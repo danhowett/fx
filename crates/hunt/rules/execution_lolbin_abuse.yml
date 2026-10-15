@@ -1,0 +1,32 @@
+kind: event
+id: execution_lolbin_abuse
+title: LOLBin abuse (download / proxy-execution / bypass)
+description: >
+  Legitimate signed Windows binaries used to download payloads, proxy-execute
+  code, or bypass application control — certutil/bitsadmin downloads, mshta and
+  rundll32 remote script, regsvr32 scriptlets, installutil/msbuild, and
+  wmic/wscript proxy execution. Common defense-evasion + execution technique.
+severity: high
+attack:
+  - T1218
+  - T1105
+  - T1220
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "certutil(\\.exe)?.*(-urlcache|-decode|-decodehex|-split).*http"
+          - "certutil(\\.exe)?.*(-urlcache|-f).*http"
+          - "bitsadmin(\\.exe)?.*(/transfer|/addfile).*http"
+          - "mshta(\\.exe)?.*(http|javascript:|vbscript:)"
+          - "rundll32(\\.exe)?.*(javascript:|http|\\.dll,)"
+          - "regsvr32(\\.exe)?.*(/i:.*http|scrobj\\.dll)"
+          - "regsvr32(\\.exe)?.*/s\\s+/u\\s+/i:"
+          - "installutil(\\.exe)?.*/logfile=.*/u"
+          - "msbuild(\\.exe)?.*\\.(xml|csproj|proj)"
+          - "wmic(\\.exe)?.*(process\\s+call\\s+create|/format:.*http)"
+          - "\\b(cscript|wscript)(\\.exe)?.*\\.(vbs|js|wsf)"
+          - "\\bcurl(\\.exe)?\\s+.*http.*-o"
+          - "\\bpowershell.*\\b(iwr|invoke-webrequest|start-bitstransfer)\\b.*http"

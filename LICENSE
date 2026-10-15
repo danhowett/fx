@@ -1,0 +1,91 @@
+fx Source-Available Licence v1.0
+Copyright (c) 2026 the fx authors
+
+================================================================================
+PLAIN-ENGLISH SUMMARY (not a substitute for the terms below)
+================================================================================
+
+You MAY, free of charge:
+  • Use fx for any purpose, including commercial incident-response and
+    forensic engagements you are paid for (e.g. a DFIR firm running fx on a
+    client's evidence as part of a paid investigation).
+  • Copy, modify, and build fx from source.
+  • Share fx and your modifications, as long as this licence travels with it.
+  • Use fx inside your own organisation without limit.
+
+You MAY NOT, without a separate commercial agreement from the authors:
+  • Sell, rent, sublicense, or otherwise charge a fee for fx itself or for a
+    modified version of it.
+  • Offer fx (or a derivative of it) to third parties as a paid product or as
+    a hosted/managed/SaaS service whose primary value is fx's functionality.
+
+In short: get paid for the investigative *work* you do with fx — don't sell
+fx, or a repackaged/hosted fx, as the product.
+
+The software is provided "as is", without warranty of any kind.
+
+================================================================================
+TERMS AND CONDITIONS
+================================================================================
+
+1. Definitions.
+   "The Software" means the fx source code, binaries, and documentation in this
+   repository, and any modified or derivative version of them.
+   "You" means the individual or legal entity exercising rights under this
+   licence.
+   "Commercial Resale" means selling, renting, licensing for a fee,
+   sublicensing for a fee, or making the Software (or a derivative of it)
+   available to a third party as a paid product or as a hosted, managed, or
+   software-as-a-service offering whose primary function or value is that of
+   the Software. Performing paid investigative, consulting, incident-response,
+   or forensic services for a third party using the Software is NOT Commercial
+   Resale.
+
+2. Grant of rights.
+   Subject to the terms of this licence, the authors grant You a worldwide,
+   royalty-free, non-exclusive licence to use, reproduce, modify, prepare
+   derivative works of, publicly display, and distribute the Software, for any
+   purpose EXCEPT Commercial Resale.
+
+3. Resale restriction.
+   You may not engage in Commercial Resale of the Software without a separate
+   written commercial licence from the authors. All other uses, including
+   commercial use of the Software as a tool to deliver services, are permitted.
+
+4. Redistribution.
+   If You distribute the Software or a derivative of it, You must (a) include a
+   copy of this licence, (b) retain all copyright and attribution notices, and
+   (c) clearly mark any files You changed. Distribution must remain free of
+   charge for the Software itself (consistent with Section 3).
+
+5. Patent grant.
+   Each contributor grants You a non-exclusive, royalty-free patent licence to
+   make and use their contributions to the Software, limited to the rights
+   granted in Section 2. This patent licence terminates for any party that
+   initiates patent litigation alleging the Software infringes a patent.
+
+6. Trademarks.
+   This licence does not grant rights to use the authors' names, logos, or the
+   "fx" name except as required for reasonable attribution.
+
+7. Disclaimer of warranty.
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. fx is a forensic
+   triage aid; its findings are investigative leads, not verdicts, and must be
+   corroborated by a qualified analyst.
+
+8. Limitation of liability.
+   IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+   LIABILITY ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR ITS
+   USE.
+
+9. Termination.
+   Any breach of Section 3 (Resale restriction) automatically terminates the
+   rights granted to You under this licence. Rights may be reinstated by the
+   authors in writing.
+
+================================================================================
+This is a source-available licence, not an OSI-approved open-source licence,
+because it restricts Commercial Resale. For a commercial resale/OEM/SaaS
+licence, contact the authors.

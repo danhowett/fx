@@ -1,0 +1,58 @@
+kind: event
+id: group_lockbit_clop_ttps
+title: LockBit / Clop ransomware TTPs
+description: >
+  Behavioural indicators associated with LockBit (LockBit5, post-Cronos
+  comeback) and Clop/Cl0p (mass managed-file-transfer exploitation). Matches
+  LockBit's StealBit exfil tool, MEGA cloud sync, and GPO-based AV-disable /
+  shadow-copy deletion, plus Clop's TrueBot loader and its distinctive ransom
+  notes. Attribution is probabilistic.
+severity: critical
+attack:
+  - T1048
+  - T1562.001
+  - T1490
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "stealbit|truebot"
+          - "megasync|megacmd|mega\\.nz"
+          - "gpupdate\\s+/force.*|new-gpo|set-gpprefregistryvalue"
+          - "net\\s+stop\\s+.*(sophos|sentinel|defend|eset|mcafee|symantec)"
+    - match:
+        field: process.name
+        op: regex
+        values:
+          - "^(stealbit|truebot)\\.exe$"
+    # Distinctive ransom-note names — safe to match anywhere (never legitimate).
+    - match:
+        field: filename
+        op: regex
+        values:
+          - "^(Restore-My-Files|LockBit|Clop|Cl0p)[-_].*\\.(txt|hta)$"
+          - "\\.lockbit$"
+    # Generic note-ish names (README_*, HOW-TO-DECRYPT, RESTORE-FILES, …) are ALSO
+    # shipped by legitimate software, so only flag them when they land in a place
+    # ransomware drops notes but apps don't ship them — a user's
+    # desktop/downloads/documents, Public, Temp, or a drive root. This keeps the
+    # "operators drop the note everywhere" signal without flagging every
+    # README_EN.txt inside an application folder.
+    - all:
+        - match:
+            field: filename
+            op: regex
+            values:
+              - "^README_[A-Z0-9]+\\.txt$"
+              - "^(HOW[-_ ]?TO[-_ ]?DECRYPT|RESTORE[-_ ]?(MY[-_ ]?)?FILES|RECOVER[-_ ]?FILES|DECRYPT[-_ ]?FILES).*\\.(txt|hta|html)$"
+        - match:
+            field: target.path
+            op: regex
+            values:
+              - "(?i)\\\\users\\\\[^\\\\]+\\\\(desktop|downloads|documents)\\\\"
+              - "(?i)\\\\users\\\\public\\\\"
+              - "(?i)\\\\(temp|tmp)\\\\"
+              - "(?i)\\\\windows\\\\temp\\\\"
+              - "(?i)^[a-z]:\\\\[^\\\\]+\\.(txt|hta|html)$"

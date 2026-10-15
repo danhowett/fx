@@ -1,0 +1,27 @@
+kind: event
+id: suspicious_parent_child
+title: Suspicious process lineage (Office / script host spawning a shell)
+description: >
+  Anomalous parent-child relationships that signal initial access or
+  exploitation — an Office app, browser, or script host spawning cmd/powershell
+  or other LOLBins. Relies on parent-image data (Sysmon 1 / 4688 with parent
+  auditing).
+severity: high
+attack:
+  - T1566
+  - T1059
+  - T1203
+detection:
+  all:
+    - match:
+        field: process.parent_name
+        op: regex
+        values:
+          - "(winword|excel|powerpnt|outlook|onenote|mspub|msaccess)\\.exe$"
+          - "(wscript|cscript|mshta|hh)\\.exe$"
+          - "(chrome|msedge|firefox|iexplore)\\.exe$"
+    - match:
+        field: process.name
+        op: regex
+        values:
+          - "(cmd|powershell|pwsh|wscript|cscript|mshta|rundll32|regsvr32|bitsadmin|certutil)\\.exe$"

@@ -1,0 +1,25 @@
+kind: event
+id: persistence_autostart_hijack
+title: Autostart hijack (Winlogon / IFEO / AppInit_DLLs)
+description: >
+  High-signal registry persistence and evasion that abuses Windows autostart
+  extension points: a non-default Winlogon Shell/Userinit value, an Image File
+  Execution Options "Debugger" hijack (the classic sticky-keys / accessibility
+  backdoor), or AppInit_DLLs injection into every GUI process. These fire on the
+  dedicated actions the registry parser emits, so they trigger whenever the
+  offending value is present.
+severity: high
+attack:
+  - T1547.001
+  - T1546.008
+  - T1546.012
+  - T1546.010
+detection:
+  any:
+    - match:
+        field: action
+        op: equals
+        values:
+          - persistence.winlogon_hijack
+          - persistence.ifeo_debugger
+          - persistence.appinit_dll

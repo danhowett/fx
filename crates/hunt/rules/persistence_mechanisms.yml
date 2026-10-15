@@ -1,0 +1,37 @@
+kind: event
+id: persistence_mechanisms
+title: Persistence establishment (registry / service / WMI / startup)
+description: >
+  Creation of autostart persistence via registry Run keys, new services,
+  WMI event subscriptions, or startup-folder / IFEO / Winlogon hijacks —
+  through reg.exe, sc.exe, wmic, schtasks, or the equivalent registry writes.
+severity: high
+attack:
+  - T1547.001
+  - T1543.003
+  - T1546
+  - T1053.005
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "reg(\\.exe)?\\s+add.*\\\\(CurrentVersion\\\\Run|RunOnce)"
+          - "reg(\\.exe)?\\s+add.*\\\\Winlogon\\\\(Shell|Userinit)"
+          - "reg(\\.exe)?\\s+add.*Image File Execution Options.*Debugger"
+          - "sc(\\.exe)?\\s+create\\b.*binpath"
+          - "\\bnew-service\\b"
+          - "wmic(\\.exe)?.*(__EventFilter|CommandLineEventConsumer|__FilterToConsumerBinding)"
+          - "schtasks(\\.exe)?\\s+/create\\b"
+          - "\\bregister-scheduledtask\\b"
+    - match:
+        field: action
+        op: equals
+        values:
+          - persistence.run_key
+          - service.install
+          - service.define
+          - persistence.scheduled_task
+          - persistence.scheduled_task_created
+          - persistence.wmi_subscription

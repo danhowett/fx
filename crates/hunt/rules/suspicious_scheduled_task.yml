@@ -1,0 +1,38 @@
+kind: event
+id: suspicious_scheduled_task
+title: Scheduled task launching from a suspicious location
+description: >
+  A scheduled task whose action runs an executable from a user-writable or
+  staging directory (ProgramData, Temp, AppData, Public, Downloads) or a known
+  living-off-the-land interpreter with an encoded/hidden command. Scheduled
+  tasks are a durable persistence and execution mechanism; attacker-created
+  tasks routinely point at payloads dropped in these locations.
+severity: high
+attack:
+  - T1053.005
+artefacts:
+  - ScheduledTask
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: contains
+        values:
+          - "\\ProgramData\\"
+          - "\\Temp\\"
+          - "\\AppData\\"
+          - "\\Users\\Public\\"
+          - "\\Downloads\\"
+          - "\\PerfLogs\\"
+    - match:
+        field: process.command_line
+        op: contains
+        values:
+          - "powershell -enc"
+          - "powershell.exe -enc"
+          - "-EncodedCommand"
+          - "-w hidden"
+          - "-windowstyle hidden"
+          - "mshta"
+          - "rundll32"
+          - "regsvr32 /s /u /i:"

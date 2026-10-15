@@ -1,0 +1,42 @@
+kind: event
+id: defense_evasion_indicators
+title: Defense evasion (log clearing / AV tampering / recovery inhibition)
+description: >
+  Actions to blind defenders or prevent recovery — clearing event logs
+  (wevtutil / Clear-EventLog / EventID 1102 & 104), disabling AV, deleting
+  volume shadow copies and backups, and disabling recovery. Consolidates the
+  highest-signal evasion behaviours across command lines and lifted event
+  actions.
+severity: high
+attack:
+  - T1070.001
+  - T1562.001
+  - T1490
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "wevtutil(\\.exe)?\\s+(cl|clear-log)\\b"
+          - "clear-eventlog\\b"
+          - "\\bvssadmin(\\.exe)?\\s+delete\\s+shadows\\b"
+          - "\\bwmic(\\.exe)?\\s+shadowcopy\\s+delete\\b"
+          - "\\bwbadmin(\\.exe)?\\s+delete\\s+(catalog|systemstatebackup)\\b"
+          - "\\bbcdedit(\\.exe)?.*(recoveryenabled\\s+no|bootstatuspolicy\\s+ignoreallfailures)"
+          - "Set-MpPreference\\s+.*-Disable"
+          - "Add-MpPreference\\s+-ExclusionPath"
+          - "\\bsc(\\.exe)?\\s+(stop|config)\\s+(windefend|sense|sysmon)"
+          - "fltmc(\\.exe)?\\s+unload"
+    - match:
+        field: action
+        op: regex
+        values:
+          - "defense_evasion\\..*"
+          - "malware\\.detected"
+    - match:
+        field: event.id
+        op: equals
+        values:
+          - "1102"
+          - "104"

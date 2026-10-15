@@ -1,0 +1,33 @@
+kind: event
+id: group_thegentlemen_ttps
+title: TheGentlemen (Storm-2697) ransomware TTPs
+description: >
+  Behavioural indicators associated with TheGentlemen / Storm-2697 (2026's #2
+  group by volume). Matches its distinctive toolset: EDR-tamper utilities
+  (EDRStartupHinder / GFreeze / GLinker), credential tools (KslDump / KslKatz /
+  XenAllPasswordPro / DumpBrowserSecrets), coerced-auth + NTLM relay
+  (PetitPotam / RelayKing / RegPwn / ntlmrelayx / Responder), NetExec, and
+  offensive DFIR (Velociraptor for C2). Attribution is probabilistic.
+severity: critical
+attack:
+  - T1557
+  - T1003
+  - T1562.001
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "edrstartuphinder|gfreeze|glinker"
+          - "ksldump|kslkatz|xenallpasswordpro|dumpbrowsersecrets"
+          - "petitpotam|relayking|regpwn|ntlmrelayx|responder\\.(py|exe)"
+          - "\\bnetexec\\b|\\bnxc\\b\\s+(smb|ldap|winrm)"
+          - "privhound|zeropulse|\\bgogo\\b.*scan"
+          - "ldapdomaindump|manspider"
+          - "chisel.*(client|server|-R)"
+    - match:
+        field: process.name
+        op: regex
+        values:
+          - "^(ksldump|kslkatz|xenallpasswordpro|netexec|nxc)\\.exe$"

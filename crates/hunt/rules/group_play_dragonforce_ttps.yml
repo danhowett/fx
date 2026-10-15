@@ -1,0 +1,36 @@
+kind: event
+id: group_play_dragonforce_ttps
+title: Play / DragonForce ransomware TTPs
+description: >
+  Behavioural indicators associated with Play and DragonForce (both 2026 top
+  groups that share tooling and the SystemBC proxy). Matches Play's custom
+  Grixba recon tool masquerading as SentinelOne (GT_NET.exe / GRB_NET.exe) and
+  its ExportData.db output, the SystemBC loader DLLs, the Betruger backdoor, and
+  the shared NetScan/ADFind/PsExec post-exploitation set. Attribution is
+  probabilistic; Grixba's SentinelOne masquerade is the strongest single signal.
+severity: critical
+attack:
+  - T1036.005
+  - T1071
+  - T1570
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "g[trb]_net\\.exe|exportdata\\.db"
+          - "\\bgrixba\\b|\\bbetruger\\b"
+          - "-m:scanall|inf_g\\.(dll|core)"
+          - "wakewordengine\\.dll|systembc"
+          - "\\bgt_net\\b.*-i:d"
+    - match:
+        field: process.name
+        op: regex
+        values:
+          - "^(gt_net|grb_net)\\.exe$"
+    - match:
+        field: filename
+        op: regex
+        values:
+          - "^exportdata\\.db$"

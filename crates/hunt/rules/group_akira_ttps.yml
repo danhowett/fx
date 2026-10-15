@@ -1,0 +1,39 @@
+kind: event
+id: group_akira_ttps
+title: Akira ransomware TTPs
+description: >
+  Behavioural indicators associated with Akira (consistent 2026 top-5, subject
+  of CISA AA24-109A). Matches its distinctive tradecraft: BYOVD EDR-kill
+  (POORTRY / STONESTOP / Terminator / ThrottleStop rwdrv.sys), Veeam abuse
+  (Veeam.Backup.MountService.exe), the "itadm" rogue-admin naming, Impacket
+  wmiexec, and its RMM/tunnel stack (RustDesk / MobaXterm / Ngrok / Cloudflare
+  Tunnel). Attribution is probabilistic.
+severity: critical
+attack:
+  - T1562.001
+  - T1068
+  - T1048
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "poortry|stonestop|stonestop|rwdrv\\.sys|throttlestop"
+          - "\\bterminator\\b.*\\.sys|zemana"
+          - "veeam\\.backup\\.mountservice"
+          - "wmiexec(\\.py)?|\\bitadm\\b"
+          - "rustdesk|mobaxterm|level\\.io|logmein"
+          - "ngrok|cloudflared|trycloudflare"
+          - "anydesk.*--install.*--silent"
+          - "net\\s+user\\s+itadm"
+    - match:
+        field: process.name
+        op: regex
+        values:
+          - "^(rustdesk|mobaxterm|ngrok|cloudflared|megazord)\\.exe$"
+    - match:
+        field: process.parent_name
+        op: regex
+        values:
+          - "veeam\\.backup\\.mountservice\\.exe$"

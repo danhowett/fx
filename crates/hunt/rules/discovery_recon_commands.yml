@@ -1,0 +1,38 @@
+kind: event
+id: discovery_recon_commands
+title: Host & domain reconnaissance commands
+description: >
+  Built-in discovery commands run in quick succession are a hallmark of
+  hands-on-keyboard activity right after initial access — enumerating the host,
+  domain, users, privileges, and trusts. Individually noisy, but high-signal in
+  an execution context (4688 / Sysmon 1 / script blocks).
+severity: medium
+attack:
+  - T1082
+  - T1087
+  - T1016
+  - T1018
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "\\bwhoami\\b.*(/all|/priv|/groups)"
+          - "\\bnet\\s+(group|localgroup)\\s+.*(domain admins|enterprise admins|administrators)"
+          - "\\bnet\\s+(user|accounts)\\b.*/domain"
+          - "\\bnltest\\b.*(/domain_trusts|/dclist|/dsgetdc)"
+          - "\\bdsquery\\b"
+          - "\\bipconfig\\b\\s+/all"
+          - "\\bsysteminfo\\b"
+          - "\\barp\\b\\s+-a"
+          - "\\broute\\b\\s+print"
+          - "\\btasklist\\b.*/svc"
+          - "\\bquser\\b|\\bqwinsta\\b"
+          - "\\bnet\\s+view\\b"
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "Get-ADUser|Get-ADComputer|Get-ADGroup|Get-ADDomain"
+          - "Get-NetUser|Get-NetGroup|Get-NetComputer|Invoke-ShareFinder"

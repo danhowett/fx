@@ -1,0 +1,15 @@
+[package]
+name = "fx-identify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fx-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+walkdir.workspace = true

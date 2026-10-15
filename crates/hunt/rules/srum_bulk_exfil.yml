@@ -1,0 +1,19 @@
+kind: correlation
+id: srum_bulk_exfil
+title: Large outbound transfer (possible exfiltration)
+description: >
+  A process with a large cumulative outbound byte total in SRUM's network-usage
+  table. SRUM preserves per-process transfer volume even after the process is
+  gone, so a quiet bulk exfil surfaces here when nothing else caught it. Grouped
+  by the (resolved) application path. The threshold (~1 GB) is a starting point;
+  lower it for environments where that volume is itself anomalous.
+severity: high
+attack:
+  - T1048      # exfiltration over alternative protocol
+  - T1567      # exfiltration to cloud/web service
+correlation:
+  type: raw_sum_threshold
+  action_prefix: "network.usage"
+  json_field: bytes_sent
+  min_total: 1073741824   # 1 GiB
+  group_by: process_name

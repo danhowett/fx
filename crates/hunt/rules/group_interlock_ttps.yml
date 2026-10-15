@@ -1,0 +1,32 @@
+kind: event
+id: group_interlock_ttps
+title: Interlock ransomware TTPs
+description: >
+  Behavioural indicators associated with Interlock (consistent 2026 top group).
+  Matches its distinctive tradecraft: NodeSnake / Interlock RAT, the Slopoly
+  PowerShell C2 backdoor, ClickFix social-engineering execution, node.exe
+  persistence running debug.log via a scheduled task, abuse of Volatility3, and
+  AZCopy exfiltration. Attribution is probabilistic.
+severity: critical
+attack:
+  - T1059.001
+  - T1053.005
+  - T1048
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "nodesnake|interlock|slopoly"
+          - "node(\\.exe)?\\s+.*debug\\.log"
+          - "vol(atility)?3?(\\.exe|\\.py)?\\s+.*(-f|windows\\.|pslist|dumpfiles)"
+          - "azcopy(\\.exe)?\\s+(copy|sync).*https?://"
+          - "haproxy|fail2ban"
+          - "mshta.*clickfix|powershell.*-w\\s+hidden.*iex.*clip"
+    - match:
+        field: filename
+        op: regex
+        values:
+          - "^!__README__!\\.txt$"
+          - "\\.interlock$"

@@ -1,0 +1,37 @@
+kind: event
+id: ransomware_shared_tooling
+title: Common ransomware operator tooling (multi-group)
+description: >
+  Tools and patterns used across the 2026 top-10 ransomware groups rather than
+  unique to one. These are strong eCrime indicators regardless of attribution:
+  AD recon (ADFind / BloodHound / SharpHound), network scanners (Advanced IP
+  Scanner / SoftPerfect / NetScan / masscan / Angry IP Scanner), RMM tooling
+  seen outside IT workflows (AnyDesk / ScreenConnect / TeamViewer / Splashtop /
+  LogMeIn / TightVNC), cloud/FTP exfil (rclone / MEGAsync / WinSCP / FileZilla /
+  AZCopy), tunnels (ngrok / Cloudflare Tunnel / Chisel), and credential/offsec
+  tooling (Mimikatz / LaZagne / NetExec / Impacket / Cobalt Strike). Broad by
+  design — corroborate against user/context before escalating.
+severity: high
+attack:
+  - T1219
+  - T1048
+  - T1087.002
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "\\badfind\\b|bloodhound|sharphound|\\bgpresult\\b.*\\/z"
+          - "advanced_?ip_?scanner|softperfect|netscan|masscan|angry.?ip"
+          - "anydesk|screenconnect|connectwise|teamviewer|splashtop|logmein|tightvnc|rustdesk"
+          - "\\brclone\\b.*(copy|sync|move).*(mega|b2|s3|ftp|remote:)"
+          - "megasync|winscp|filezilla|azcopy.*https?://"
+          - "ngrok|cloudflared|trycloudflare|chisel"
+          - "mimikatz|sekurlsa|lazagne|lsadump"
+          - "cobaltstrike|\\bbeacon\\b|\\bnetexec\\b|\\bnxc\\b|impacket|wmiexec|smbexec|secretsdump"
+    - match:
+        field: process.name
+        op: regex
+        values:
+          - "^(adfind|anydesk|screenconnect|teamviewer|rclone|winscp|filezilla|ngrok|mimikatz|lazagne|netexec|nxc)\\.exe$"

@@ -1,0 +1,28 @@
+[package]
+name = "fx-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fx-gui"
+path = "src/main.rs"
+
+[dependencies]
+fx-core = { path = "../core" }
+fx-store = { path = "../store" }
+fx-ingest = { path = "../ingest" }
+fx-parsers = { path = "../parsers" }
+fx-hunt = { path = "../hunt" }
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+uuid = { version = "1", features = ["v4", "v5"] }
+
+# Tauri v2. `tauri build` compiles the Rust backend and bundles the built
+# frontend from ui/dist (see tauri.conf.json).
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

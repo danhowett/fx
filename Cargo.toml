@@ -1,0 +1,73 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/identify",
+    "crates/parsers",
+    "crates/store",
+    "crates/ingest",
+    "crates/hunt",
+    "crates/cli",
+    "crates/gui",
+]
+# The GUI (Tauri) crate is a member so `cargo build -p fx-gui` and
+# `cargo tauri build` work, but it's kept OUT of the default set: a plain
+# `cargo build` at the root builds the core + CLI without pulling in the system
+# webkit/GTK libraries Tauri needs. Build the GUI explicitly on a machine with
+# the Tauri prerequisites installed.
+default-members = [
+    "crates/core",
+    "crates/identify",
+    "crates/parsers",
+    "crates/store",
+    "crates/ingest",
+    "crates/hunt",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "proprietary"
+
+# Shared dependency versions. Pin these in one place so every crate agrees.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["serde", "serde-well-known", "formatting", "parsing", "macros"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+walkdir = "2"
+# Needed only to name the chrono timestamps that srum-core records expose.
+chrono = "0.4"
+
+# Forensic parsing crates (real, published crates).
+# evtx + mft are by Omer BenAmram; notatin is the registry parser.
+evtx = "0.8"
+mft = "0.6"
+notatin = "1"
+# IMPORTANT (nom): notatin 1.0.1's code targets the nom 7 API, but its manifest
+# declares `nom = ">=6"` (no upper bound). Cargo is therefore free to resolve
+# notatin's transitive nom to 8, which FAILS to compile (nom 8 changed the
+# combinator API). Our own `nom = "=7.1.3"` pin below constrains only the nom we
+# use directly — it does NOT stop notatin pulling nom 8. The committed Cargo.lock
+# is what holds the whole graph (including notatin's nom) at 7.1.3; build with
+# `--locked` and it is reproducible. If the lock is ever regenerated and nom 8
+# reappears, collapse it with:  cargo update -p nom --precise 7.1.3
+nom = "=7.1.3"
+# Xpress-Huffman decompressor for Win8.1+ MAM-wrapped prefetch.
+xpress-huffman = "0.1"
+# SRUM (SRUDB.dat / ESE) parser — handles the ESE layer for us.
+srum-parser = "0.3"
+srum-core = "0.3"
+# USN journal ($UsnJrnl:$J) parser — handles sparse padding + gzipped journals.
+usnjrnl = "0.4"
+# Read-only XML for Scheduled Task definitions.
+roxmltree = "0.20"
+# Bundled SQLite for browser-history (Chromium History / Firefox places.sqlite).
+rusqlite = { version = "0.31", features = ["bundled"] }
+# Shell Link (.lnk) + Jump List reader — panic-free, bounds-checked.
+lnk-core = "0.3"

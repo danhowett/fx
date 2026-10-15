@@ -1,0 +1,35 @@
+kind: event
+id: group_qilin_ttps
+title: Qilin (Agenda) ransomware TTPs
+description: >
+  Behavioural indicators associated with the Qilin / Agenda RaaS operation
+  (2026's most active group). Matches its distinctive tradecraft: BYOVD EDR-kill
+  tools (EDRSandblast / PCHunter64 / PowerTool64), WSL-based encryptor evasion,
+  safe-mode reboot before encryption, RSAT-AD recon install, fsutil impact prep,
+  and C:\PerfLogs staging. Attribution is probabilistic — corroborate before
+  concluding Qilin specifically; the behaviours are malicious regardless.
+severity: critical
+attack:
+  - T1562.001
+  - T1486
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "edrsandblast"
+          - "pchunter64"
+          - "powertool64"
+          - "wsl(\\.exe)?\\s+.*(--exec|-d\\s|--import)"
+          - "bcdedit.*safeboot"
+          - "Add-WindowsCapability.*RSAT\\.ActiveDirectory"
+          - "ServerManagerCmd.*RSAT-AD-PowerShell"
+          - "fsutil\\s+.*(repair|resource|file\\s+layout)"
+          - "\\\\PerfLogs\\\\.*\\.exe"
+          - "cyberduck"
+    - match:
+        field: process.name
+        op: regex
+        values:
+          - "^(pchunter64|powertool64|edrsandblast)\\.exe$"

@@ -1,0 +1,247 @@
+//! `fx-hunt` — the hunt engine.
+//!
+//! Runs two detection engines over a case and writes their unified results back
+//! to the store:
+//!   * single-event rules (Sigma-subset) matched in Rust over streamed events;
+//!   * correlation rules compiled to windowed SQL and run in the store.
+//!
+//! Rules are loaded from YAML so an analyst extends coverage without a rebuild.
+//! A rule pack ships in `rules/` mapping the financially-motivated-actor TTPs
+//! this tool targets.
+
+pub mod correlation;
+pub mod event_rule;
+pub mod import;
+pub mod report;
+
+use correlation::{detection_from_row, CorrelationRule};
+use event_rule::EventRule;
+use fx_core::{Detection, DetectionEngine, Severity};
+use fx_store::CaseStore;
+use uuid::Uuid;
+
+/// A loaded rule set.
+#[derive(Default)]
+pub struct RuleSet {
+    pub event_rules: Vec<EventRule>,
+    pub correlation_rules: Vec<CorrelationRule>,
+    /// Non-fatal load problems (a bad rule file shouldn't sink the run).
+    pub load_errors: Vec<String>,
+}
+
+impl RuleSet {
+    /// Load every `*.yml` / `*.yaml` under `dir`. A file is one of two shapes,
+    /// discriminated by its top-level `kind:` — `event` or `correlation`.
+    /// Load the rules shipped with the tool, compiled directly into the binary.
+    /// This is filesystem-independent — the rules travel inside the executable,
+    /// so it works no matter where the app is run from. This is what the GUI
+    /// uses by default. `EMBEDDED_RULES` is generated below via include_str!.
+    pub fn from_embedded() -> Self {
+        let mut set = RuleSet::default();
+        for (name, text) in EMBEDDED_RULES {
+            set.load_str(text, name);
+        }
+        set
+    }
+
+    pub fn load_dir(dir: &std::path::Path) -> Self {
+        let mut set = RuleSet::default();
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                set.load_errors.push(format!("read rules dir {}: {e}", dir.display()));
+                return set;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+            if ext != "yml" && ext != "yaml" {
+                continue;
+            }
+            match std::fs::read_to_string(&path) {
+                Ok(text) => set.load_str(&text, &path.display().to_string()),
+                Err(e) => set.load_errors.push(format!("read {}: {e}", path.display())),
+            }
+        }
+        set
+    }
+
+    /// Parse one YAML document, routing by its `kind` field.
+    pub fn load_str(&mut self, text: &str, origin: &str) {
+        #[derive(serde::Deserialize)]
+        struct Kind {
+            kind: String,
+        }
+        let kind = match serde_yaml::from_str::<Kind>(text) {
+            Ok(k) => k.kind,
+            Err(e) => {
+                self.load_errors.push(format!("{origin}: missing/invalid `kind`: {e}"));
+                return;
+            }
+        };
+        match kind.as_str() {
+            "event" => match serde_yaml::from_str::<EventRule>(text) {
+                Ok(r) => self.event_rules.push(r),
+                Err(e) => self.load_errors.push(format!("{origin}: {e}")),
+            },
+            "correlation" => match serde_yaml::from_str::<CorrelationRule>(text) {
+                Ok(r) => self.correlation_rules.push(r),
+                Err(e) => self.load_errors.push(format!("{origin}: {e}")),
+            },
+            other => self
+                .load_errors
+                .push(format!("{origin}: unknown kind `{other}`")),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.event_rules.len() + self.correlation_rules.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Result of a hunt run.
+pub struct HuntReport {
+    pub detections: usize,
+    pub rules_run: usize,
+    pub errors: Vec<String>,
+}
+
+/// Run every rule against the case and persist the detections.
+pub fn run(store: &CaseStore, rules: &RuleSet) -> HuntReport {
+    let mut detections: Vec<Detection> = Vec::new();
+    let mut errors = rules.load_errors.clone();
+
+    // ── Single-event engine ────────────────────────────────────────────────
+    // One streamed pass over events; every rule is offered each event. Rule
+    // counts are small (tens–hundreds), so per-event iteration is fine and
+    // avoids one SQL scan per rule.
+    let ev_rules = &rules.event_rules;
+    if !ev_rules.is_empty() {
+        let scan = store.for_each_event(|ev| {
+            for rule in ev_rules {
+                if rule.matches(ev) {
+                    detections.push(Detection {
+                        id: Uuid::new_v4(),
+                        rule_id: rule.id.clone(),
+                        title: rule.title.clone(),
+                        severity: rule.severity,
+                        attack: rule.attack.clone(),
+                        summary: single_summary(rule, ev),
+                        event_ids: vec![ev.id],
+                        timestamp: ev.timestamp,
+                        host: ev.host.clone(),
+                        engine: DetectionEngine::SingleEvent,
+                    });
+                }
+            }
+        });
+        if let Err(e) = scan {
+            errors.push(format!("single-event scan: {e}"));
+        }
+    }
+
+    // ── Correlation engine ─────────────────────────────────────────────────
+    for rule in &rules.correlation_rules {
+        let sql = rule.correlation.to_sql();
+        match store.run_correlation(&sql) {
+            Ok(rows) => {
+                for row in rows {
+                    detections.push(detection_from_row(
+                        rule,
+                        &row.group,
+                        row.first_ts,
+                        row.event_ids,
+                        row.magnitude,
+                    ));
+                }
+            }
+            Err(e) => errors.push(format!("correlation `{}`: {e}", rule.id)),
+        }
+    }
+
+    // Worst-first ordering for the analyst.
+    detections.sort_by(|a, b| {
+        b.severity
+            .cmp(&a.severity)
+            .then(a.timestamp.cmp(&b.timestamp))
+    });
+
+    let count = detections.len();
+    if let Err(e) = store.write_detections(&detections) {
+        errors.push(format!("persist detections: {e}"));
+    }
+
+    HuntReport {
+        detections: count,
+        rules_run: rules.len(),
+        errors,
+    }
+}
+
+fn single_summary(rule: &EventRule, ev: &fx_core::Event) -> String {
+    // Prefer the most specific locus available for the analyst.
+    let locus = ev
+        .process
+        .as_ref()
+        .and_then(|p| p.command_line.clone().or_else(|| p.path.clone()))
+        .or_else(|| ev.target.as_ref().and_then(|t| t.path.clone()))
+        .unwrap_or_else(|| ev.message.clone());
+    format!("{}: {}", rule.title, truncate(&locus, 160))
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(n).collect();
+        out.push('…');
+        out
+    }
+}
+
+/// Severity helper re-exported for the CLI/GUI without pulling in fx-core there.
+pub fn severity_rank(s: Severity) -> u8 {
+    match s {
+        Severity::Informational => 1,
+        Severity::Low => 2,
+        Severity::Medium => 3,
+        Severity::High => 4,
+        Severity::Critical => 5,
+    }
+}
+
+/// Every rule file shipped with the tool, compiled into the binary via
+/// include_str! (paths relative to this source file: ../rules/).
+static EMBEDDED_RULES: &[(&str, &str)] = &[
+    ("credential_access_lsass.yml", include_str!("../rules/credential_access_lsass.yml")),
+    ("credential_access_secrets.yml", include_str!("../rules/credential_access_secrets.yml")),
+    ("defender_tampering.yml", include_str!("../rules/defender_tampering.yml")),
+    ("defense_evasion_indicators.yml", include_str!("../rules/defense_evasion_indicators.yml")),
+    ("discovery_recon_commands.yml", include_str!("../rules/discovery_recon_commands.yml")),
+    ("execution_lolbin_abuse.yml", include_str!("../rules/execution_lolbin_abuse.yml")),
+    ("execution_powershell_suspicious.yml", include_str!("../rules/execution_powershell_suspicious.yml")),
+    ("group_akira_ttps.yml", include_str!("../rules/group_akira_ttps.yml")),
+    ("group_inc_ransom_ttps.yml", include_str!("../rules/group_inc_ransom_ttps.yml")),
+    ("group_interlock_ttps.yml", include_str!("../rules/group_interlock_ttps.yml")),
+    ("group_lockbit_clop_ttps.yml", include_str!("../rules/group_lockbit_clop_ttps.yml")),
+    ("group_play_dragonforce_ttps.yml", include_str!("../rules/group_play_dragonforce_ttps.yml")),
+    ("group_qilin_ttps.yml", include_str!("../rules/group_qilin_ttps.yml")),
+    ("group_thegentlemen_ttps.yml", include_str!("../rules/group_thegentlemen_ttps.yml")),
+    ("lateral_movement_remote_exec.yml", include_str!("../rules/lateral_movement_remote_exec.yml")),
+    ("mass_rename_ransomware.yml", include_str!("../rules/mass_rename_ransomware.yml")),
+    ("offensive_tooling.yml", include_str!("../rules/offensive_tooling.yml")),
+    ("persistence_autostart_hijack.yml", include_str!("../rules/persistence_autostart_hijack.yml")),
+    ("persistence_mechanisms.yml", include_str!("../rules/persistence_mechanisms.yml")),
+    ("ransomware_shared_tooling.yml", include_str!("../rules/ransomware_shared_tooling.yml")),
+    ("rdp_then_tooling.yml", include_str!("../rules/rdp_then_tooling.yml")),
+    ("shadow_copy_deletion.yml", include_str!("../rules/shadow_copy_deletion.yml")),
+    ("srum_bulk_exfil.yml", include_str!("../rules/srum_bulk_exfil.yml")),
+    ("suspicious_parent_child.yml", include_str!("../rules/suspicious_parent_child.yml")),
+    ("suspicious_scheduled_task.yml", include_str!("../rules/suspicious_scheduled_task.yml")),
+    ("system_binary_masquerade.yml", include_str!("../rules/system_binary_masquerade.yml")),
+];

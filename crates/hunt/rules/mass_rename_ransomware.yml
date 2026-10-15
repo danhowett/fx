@@ -1,0 +1,18 @@
+kind: correlation
+id: mass_rename_ransomware
+title: Mass file rename burst (ransomware encryption)
+description: >
+  A large number of file rename/create events on one host within a short window
+  — the filesystem signature of ransomware encrypting files in bulk. Uses the
+  USN journal's per-file change records. Threshold and window are deliberately
+  conservative to avoid firing on routine bulk operations; tune per environment.
+severity: critical
+attack:
+  - T1486
+correlation:
+  type: threshold_window
+  action_prefix: "file.rename"
+  artefact: UsnJrnl
+  window_seconds: 60
+  threshold: 200
+  group_by: host

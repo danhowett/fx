@@ -1,0 +1,18 @@
+[package]
+name = "fx-hunt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fx-core = { path = "../core" }
+fx-store = { path = "../store" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+time.workspace = true
+uuid.workspace = true
+serde_yaml = "0.9"
+regex = "1"

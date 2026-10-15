@@ -1,0 +1,38 @@
+kind: event
+id: execution_powershell_suspicious
+title: Suspicious PowerShell (obfuscation / download cradle / in-memory)
+description: >
+  PowerShell used the way attackers use it — encoded commands, download-and-run
+  cradles, in-memory assembly loading, AMSI bypass, and execution-policy
+  bypass. Catches script-block (4104) content and command lines. Broad by
+  design; corroborate with surrounding activity.
+severity: high
+attack:
+  - T1059.001
+  - T1562.001
+  - T1027
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "-enc(odedcommand)?\\s+[A-Za-z0-9+/=]{30,}"
+          - "-e\\s+[A-Za-z0-9+/=]{30,}"
+          - "\\b(iex|invoke-expression)\\b"
+          - "(new-object\\s+.*net\\.webclient)|downloadstring|downloadfile"
+          - "\\binvoke-webrequest\\b|\\biwr\\b|\\bcurl\\b.*\\|.*iex"
+          - "frombase64string"
+          - "\\b-nop\\b.*\\b-w(indowstyle)?\\s+hidden\\b"
+          - "\\b-exec(utionpolicy)?\\s+bypass\\b"
+          - "reflection\\.assembly.*load"
+          - "\\[system\\.reflection\\.assembly\\]"
+          - "amsiutils|amsiInitFailed|amsiscanbuffer"
+          - "\\bicm\\b|\\binvoke-command\\b.*-computername"
+    - match:
+        field: message
+        op: contains
+        values:
+          - "System.Reflection.Assembly"
+          - "DownloadString"
+          - "FromBase64String"

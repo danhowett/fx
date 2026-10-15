@@ -1,0 +1,29 @@
+kind: event
+id: shadow_copy_deletion
+title: Shadow copy / backup deletion
+description: >
+  Deletion of Volume Shadow Copies or system backups via vssadmin, wmic,
+  wbadmin, or bcdedit recovery tampering — near-universal ransomware
+  pre-encryption behaviour to prevent recovery.
+severity: critical
+attack:
+  - T1490
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: contains
+        values:
+          - "vssadmin delete shadows"
+          - "vssadmin.exe delete shadows"
+          - "wmic shadowcopy delete"
+          - "wbadmin delete catalog"
+          - "wbadmin delete systemstatebackup"
+          - "bcdedit /set {default} recoveryenabled no"
+          - "bcdedit /set {default} bootstatuspolicy ignoreallfailures"
+    - match:
+        field: message
+        op: contains
+        values:
+          - "vssadmin delete shadows"
+          - "wmic shadowcopy delete"

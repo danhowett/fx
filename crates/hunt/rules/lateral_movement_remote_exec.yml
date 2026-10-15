@@ -1,0 +1,34 @@
+kind: event
+id: lateral_movement_remote_exec
+title: Lateral movement — remote execution
+description: >
+  Execution of code on remote hosts — PsExec / Impacket service creation,
+  WMI/WMIC process call create with a remote node, WinRM/PowerShell Remoting,
+  and scheduled-task creation against a remote host. Frequently paired with a
+  type-3 logon from the source.
+severity: high
+attack:
+  - T1021.002
+  - T1047
+  - T1021.006
+  - T1570
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "psexec(svc)?(\\.exe)?\\b"
+          - "\\\\\\\\[^\\s]+\\s+.*-u\\s+.*-p\\s+"
+          - "wmic(\\.exe)?\\s+/node:[^\\s]+\\s+process\\s+call\\s+create"
+          - "\\benter-pssession\\b|\\bnew-pssession\\b|\\binvoke-command\\b.*-computername"
+          - "winrs(\\.exe)?\\s+-r:"
+          - "schtasks(\\.exe)?\\s+/create.*\\s+/s\\s+"
+          - "\\bat\\s+\\\\\\\\"
+          - "sc(\\.exe)?\\s+\\\\\\\\[^\\s]+\\s+create"
+          - "\\bwmiexec\\b|\\bsmbexec\\b|\\batexec\\b|\\bdcomexec\\b"
+    - match:
+        field: process.path
+        op: ends_with
+        values:
+          - "\\PSEXESVC.exe"

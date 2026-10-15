@@ -1,0 +1,21 @@
+[package]
+name = "fx-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fx"
+path = "src/main.rs"
+
+[dependencies]
+fx-core = { path = "../core" }
+fx-identify = { path = "../identify" }
+fx-parsers = { path = "../parsers" }
+fx-store = { path = "../store" }
+fx-ingest = { path = "../ingest" }
+fx-hunt = { path = "../hunt" }
+anyhow.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

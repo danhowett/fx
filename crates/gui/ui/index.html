@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>fx — artefact timeline</title>
+<style>
+  /* ─────────────────────────────────────────────────────────────────────────
+     Design system for a DFIR analyst workspace.
+
+     Not a dashboard, not a marketing page — a dense analytical instrument meant
+     to be read for hours. Palette is a calm desaturated ink/slate (low eye
+     strain), with a deliberate *categorical* colour language: each kind of
+     forensic activity (execution / persistence / filesystem / network / logon)
+     carries one restrained hue so an analyst reads activity type at a glance.
+     A single alert hue is reserved for flagged (suspicious / anti-forensic)
+     events — colour spent only where it carries meaning.
+
+     Monospace is used functionally, not decoratively: timestamps, hashes,
+     paths, SIDs align column-to-column so anomalies surface by shape.
+     ───────────────────────────────────────────────────────────────────────── */
+  :root {
+    /* base ink/slate surfaces */
+    --bg:        #10151b;   /* deepest — app frame */
+    --surface:   #161d26;   /* panels */
+    --surface-2: #1c2530;   /* raised rows / inputs */
+    --line:      #26313d;   /* hairlines */
+    --line-soft: #1f2833;
+    --ink:       #dfe6ee;   /* primary text */
+    --ink-dim:   #8f9daf;   /* secondary text */
+    --ink-faint: #5f6d7e;   /* tertiary / meta */
+
+    /* categorical activity hues (restrained, equal weight) */
+    --cat-execution:   #6ea8fe;  /* cool blue   */
+    --cat-persistence: #c792ea;  /* violet      */
+    --cat-filesystem:  #7fd1b9;  /* teal        */
+    --cat-network:     #e6b673;  /* amber       */
+    --cat-logon:       #9ec37a;  /* sage        */
+    --cat-other:       --ink-faint;
+
+    /* single alert accent — only for flagged events */
+    --alert:     #ff6b6b;
+    --alert-dim: #7a2f2f;
+    --flag:      #e8a33d;  /* amber — flagged/validated share of a bar (distinct from the red alert/spike) */
+
+    --focus:     #6ea8fe;
+
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, system-ui, sans-serif;
+
+    --row-h: 30px;
+  }
+
+  /* ── Light theme (daybreak): warm paper, darkened hues for contrast ─────── */
+  html[data-theme="daybreak"] {
+    --bg:        #f3efe7;   /* warm cream — app frame */
+    --surface:   #faf7f1;   /* warm off-white panels */
+    --surface-2: #efe9df;   /* raised rows / toolbar / inputs */
+    --line:      #ddd4c6;   /* warm hairline */
+    --line-soft: #e8e1d5;
+    --ink:       #2a2621;   /* warm near-black */
+    --ink-dim:   #6a6257;
+    --ink-faint: #998f7f;
+
+    --cat-execution:   #2563c9;
+    --cat-persistence: #8a3fc0;
+    --cat-filesystem:  #128a6e;
+    --cat-network:     #b06a10;
+    --cat-logon:       #4f7a2a;
+    --cat-other:       #8792a5;
+
+    --alert:     #d13a3a;
+    --alert-dim: #f0c9c9;
+    --flag:      #b9791b;  /* amber (darker for light theme contrast) */
+
+    --focus:     #2563c9;
+  }
+
+  /* ── Sunset theme: warm dusk, matches the report's third theme ──────────── */
+  html[data-theme="sunset"] {
+    --bg:        #1a1220;
+    --surface:   #241830;
+    --surface-2: #2e1f3d;
+    --line:      #3d2740;
+    --line-soft: #2a1c33;
+    --ink:       #f6e9e4;
+    --ink-dim:   #c9a9b8;
+    --ink-faint: #8f7286;
+
+    --cat-execution:   #6fb2ff;
+    --cat-persistence: #c88cff;
+    --cat-filesystem:  #5cd9a8;
+    --cat-network:     #ffb454;
+    --cat-logon:       #9ec37a;
+    --cat-other:       #8f7286;
+
+    --alert:     #ff6b8a;
+    --alert-dim: #4a1526;
+    --flag:      #e3c24a;  /* gold — distinct from sunset's pink alert and orange focus */
+
+    --focus:     #ff9e64;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .app { animation: settle .28s ease-out; }
+    @keyframes settle { from { opacity: 0; } to { opacity: 1; } }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 13px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+
+  /* ── App frame: three-pane analyst workspace ─────────────────────────────── */
+  .app {
+    display: grid;
+    grid-template-columns: 248px 1fr 0;
+    grid-template-rows: 44px 1fr 24px;
+    grid-template-areas:
+      "topbar topbar topbar"
+      "rail   main   detail"
+      "status status status";
+    height: 100vh;
+  }
+  .app.detail-open { grid-template-columns: 248px 1fr 380px; }
+
+  /* ── Top bar ─────────────────────────────────────────────────────────────── */
+  .topbar {
+    grid-area: topbar;
+    display: flex; align-items: center; gap: 16px;
+    padding: 0 14px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+  }
+  .brand {
+    font-family: var(--mono);
+    font-weight: 600;
+    letter-spacing: .04em;
+    color: var(--ink);
+    font-size: 14px;
+  }
+  .brand .dot { color: var(--cat-execution); }
+  .case-name { color: var(--ink-dim); font-size: 12px; }
+  .topbtn {
+    background: var(--surface-2); border: 1px solid var(--line); color: var(--ink);
+    border-radius: 6px; padding: 5px 12px; font-size: 12px; cursor: pointer; font-family: var(--sans);
+  }
+  .topbtn:hover { border-color: var(--focus); }
+  #newCaseBtn { color: var(--ink); border-color: var(--focus); }
+  .topbar .search {
+    margin-left: auto;
+    position: relative;
+    width: 340px;
+  }
+  .search input {
+    width: 100%;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--ink);
+    padding: 6px 10px 6px 30px;
+    font-family: var(--sans);
+    font-size: 12.5px;
+  }
+  .search input:focus { outline: 2px solid var(--focus); outline-offset: -1px; border-color: transparent; }
+  .search svg { position: absolute; left: 9px; top: 8px; width: 14px; height: 14px; color: var(--ink-faint); }
+
+  /* progress overlay for ingest / open */
+  .overlay {
+    position: fixed; inset: 0; background: rgba(8,11,18,0.72); z-index: 1000;
+    display: none; align-items: center; justify-content: center;
+  }
+  .overlay.show { display: flex; }
+
+  /* triage controls in the detail pane */
+  .triage-btns { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+  .tri-btn {
+    font-size: 11px; padding: 4px 9px; border-radius: 5px; cursor: pointer;
+    background: var(--surface-2); border: 1px solid var(--line); color: var(--ink-dim);
+  }
+  .tri-btn:hover { border-color: var(--ink-faint); }
+  .tri-btn.active { color: #fff; font-weight: 600; }
+  .tri-btn.tri-validated.active     { background: #2e9e5b; border-color: #2e9e5b; }
+  .tri-btn.tri-unconfirmed.active   { background: #c99a2e; border-color: #c99a2e; }
+  .tri-btn.tri-false_positive.active{ background: #7a8699; border-color: #7a8699; }
+  .tri-btn.tri-dismissed.active     { background: #55607a; border-color: #55607a; }
+  .tri-note {
+    width: 100%; min-height: 48px; resize: vertical; font-family: var(--sans);
+    font-size: 12px; background: var(--surface-2); border: 1px solid var(--line);
+    color: var(--ink); border-radius: 6px; padding: 6px 8px;
+  }
+  .tri-badge {
+    font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em;
+    padding: 1px 5px; border-radius: 3px; margin-right: 6px; color: #fff;
+  }
+  .tri-badge.validated      { background: #2e9e5b; }
+  .tri-badge.unconfirmed    { background: #c99a2e; }
+  .tri-badge.false_positive { background: #7a8699; }
+  .tri-badge.dismissed      { background: #55607a; }
+  .tri-sum { display: flex; align-items: center; gap: 8px; padding: 3px 6px; margin: 0 -6px; border-radius: 5px; cursor: pointer; font-size: 12px; }
+  .tri-sum:hover { background: var(--surface-2); }
+  .tri-sum .dot { width: 8px; height: 8px; border-radius: 2px; }
+  .tri-sum .lbl { flex: 1; color: var(--ink-dim); text-transform: capitalize; }
+  .tri-sum .cnt { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }
+
+  /* time-range controls in the toolbar */
+  .time-range { display: inline-flex; align-items: center; gap: 5px; margin-left: 4px; }
+  .tr-label { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-faint); }
+  .time-range input[type="datetime-local"] {
+    background: var(--surface-2); border: 1px solid var(--line); color: var(--ink);
+    border-radius: 5px; padding: 2px 6px; font-family: var(--mono); font-size: 11px;
+    color-scheme: dark;
+  }
+  html[data-theme="daybreak"] .time-range input[type="datetime-local"] { color-scheme: light; }
+  /* pivot buttons in the detail pane */
+  .pivot-btns { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-top: 10px; }
+  .pivot-label { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-faint); width: 100%; margin-bottom: 2px; }
+  .pv-btn {
+    font-size: 11px; padding: 3px 10px; border-radius: 5px; cursor: pointer;
+    background: var(--surface-2); border: 1px solid var(--line); color: var(--ink-dim);
+    font-family: var(--mono);
+  }
+  .pv-btn:hover { border-color: var(--focus); color: var(--ink); }
+  .export-group { display: inline-flex; align-items: center; gap: 6px; margin-left: 4px; }
+  .export-group .topbtn { padding: 4px 12px; }
+
+  /* help / about modal */
+  .modal { position: fixed; inset: 0; background: rgba(8,11,18,0.6); z-index: 1100; display: none; align-items: center; justify-content: center; }
+  .modal.show { display: flex; }
+  .modal-box { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; width: min(760px, 90vw); max-height: 85vh; display: flex; flex-direction: column; box-shadow: 0 10px 40px rgba(0,0,0,.4); }
+  .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid var(--line); font-size: 15px; font-weight: 600; }
+  .modal-close { background: none; border: none; color: var(--ink-dim); font-size: 16px; cursor: pointer; }
+  .modal-body { padding: 18px 22px; overflow-y: auto; font-size: 13px; line-height: 1.6; color: var(--ink-dim); }
+  .modal-body h3 { color: var(--ink); font-size: 14px; margin: 16px 0 6px; }
+  .modal-body h3:first-child { margin-top: 0; }
+  .modal-body code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; font-family: var(--mono); font-size: 12px; color: var(--ink); }
+  .modal-body ul { margin: 4px 0; padding-left: 20px; }
+  .modal-body .muted { color: var(--ink-faint); font-size: 12px; }
+
+  /* ingest log view */
+  .ilog { padding: 8px 16px; }
+  .ilog table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .ilog th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-faint); padding: 6px 8px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); }
+  .ilog td { padding: 6px 8px; border-bottom: 1px solid var(--line-soft); }
+  .ilog td.r { text-align: right; font-family: var(--mono); }
+  .ilog .src { font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
+  .st-badge { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; padding: 1px 6px; border-radius: 3px; color: #fff; }
+  .st-parsed { background: #2e9e5b; }
+  .st-unsupported { background: #c99a2e; }
+  .st-failed { background: var(--alert); }
+  .ilog .detail { color: var(--ink-faint); font-size: 11px; }
+  .ilog-summary { display: flex; gap: 14px; padding: 10px 16px; border-bottom: 1px solid var(--line); font-size: 12px; }
+  .ilog-summary b { font-family: var(--mono); }
+  /* grouped ingest log */
+  .ilog .ilog-group { cursor: pointer; background: var(--surface); }
+  .ilog .ilog-group:hover { background: var(--surface-2); }
+  .ilog .ilog-group .gname { font-size: 12.5px; }
+  .ilog .ilog-group .caret { display: inline-block; width: 12px; color: var(--ink-faint); }
+  .ilog .ilog-group .st-badge { margin: 0 8px 0 2px; }
+  .ilog .ilog-group .gcount { color: var(--ink-faint); margin-left: 8px; font-family: var(--mono); font-size: 11px; }
+  .ilog .ilog-child .src { padding-left: 26px; }
+  .ilog .ilog-child { background: transparent; }
+
+  /* ── Activity graph ─────────────────────────────────────────────────────── */
+  .actlink .facet { padding: 6px 0; }
+  .actlink .actlink-sub { font-size: 10.5px; color: var(--ink-faint); padding: 0 0 2px 2px; }
+  .actlink.active .facet .name { font-weight: 600; }
+
+  /* Height is set in JS (--act-h) from the viewport's measured client height,
+     AFTER layout settles (double requestAnimationFrame), so it is exact in
+     WebView2 — a %/inset against the flex-item .viewport collapses there, and a
+     vh calc overshoots because .actwrap sits below the top bars. */
+  .actwrap {
+    display: flex; flex-direction: column;
+    height: var(--act-h, 60vh); min-height: 320px;
+  }
+  .act-head { padding: 12px 18px 9px; border-bottom: 1px solid var(--line-soft); flex: 0 0 auto; }
+  .act-title { font-size: 14px; font-weight: 600; color: var(--ink); }
+  .act-sub { font-size: 12px; color: var(--ink-dim); margin-top: 4px; line-height: 1.5; max-width: 760px; }
+  .act-legend { display: flex; gap: 16px; align-items: center; margin-top: 9px; font-size: 11px; color: var(--ink-dim); flex-wrap: wrap; }
+  .act-legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .act-legend .sw-total { background: var(--focus); opacity: .55; }
+  .act-legend .sw-flag  { background: var(--flag); }
+  .act-legend .sw-anom  { background: transparent; outline: 2px solid var(--alert); }
+  .act-legend .act-base { margin-left: auto; font-family: var(--mono); color: var(--ink-faint); }
+
+  /* The chart: a horizontally scrolling row of bars that grow from the bottom.
+     flex:1 + min-height:0 makes it take exactly the space the header leaves. */
+  .actchart {
+    flex: 1 1 auto; display: flex; align-items: flex-end; gap: 4px;
+    padding: 22px 18px 26px; overflow-x: auto; overflow-y: hidden; min-height: 0;
+  }
+  /* Bars are bottom-aligned in the chart (align-items:flex-end on .actchart).
+     The column gets an explicit PIXEL height in JS, so nothing here relies on a
+     %-of-flex-parent height that WebView2 won't resolve. */
+  .actbar {
+    flex: 0 0 auto; width: 34px;
+    display: flex; flex-direction: column; justify-content: flex-end; align-items: center;
+    cursor: pointer; position: relative;
+  }
+  .actbar-val {
+    font-family: var(--mono); font-size: 10px; color: var(--alert);
+    height: 14px; line-height: 14px; white-space: nowrap;
+  }
+  .actbar-col {
+    width: 22px; background: var(--focus); opacity: .45; border-radius: 3px 3px 0 0;
+    display: flex; flex-direction: column; justify-content: flex-end;
+    transition: opacity .12s, outline-color .12s; min-height: 2px; position: relative;
+  }
+  .actbar-flag { width: 100%; background: var(--flag); border-radius: 0 0 0 0; min-height: 0; }
+  .actbar:hover .actbar-col { opacity: .8; }
+  .actbar.anom .actbar-col { opacity: .7; outline: 1.5px solid var(--alert); outline-offset: 0; }
+  .actbar.anom:hover .actbar-col { opacity: 1; }
+  /* X-axis labels: horizontal, centred under the bar, absolutely positioned so
+     they never distort bar layout. Only thinned bars carry one (see JS). */
+  .actbar-day {
+    position: absolute; bottom: -20px; left: 50%; transform: translateX(-50%);
+    font-family: var(--mono); font-size: 9.5px; color: var(--ink-faint);
+    white-space: nowrap; pointer-events: none;
+  }
+  .actbar.anom .actbar-day { color: var(--alert); font-weight: 700; }
+  /* subtle tick at the first bar of each month, so month boundaries read */
+  .actbar.mstart::after {
+    content: ""; position: absolute; bottom: -6px; left: -2px; width: 1px; height: 8px;
+    background: var(--line);
+  }
+  /* year boundary: a full-height divider line through the chart + a year caption
+     at the top, so a multi-year case is readable at a glance. */
+  .actbar.ystart::before {
+    content: ""; position: absolute; top: -18px; bottom: -22px; left: -3px;
+    width: 0; border-left: 1px dashed var(--ink-faint); opacity: .55;
+  }
+  .actbar-year {
+    position: absolute; top: -14px; left: -3px;
+    font-family: var(--mono); font-size: 10px; font-weight: 700; color: var(--ink-dim);
+    white-space: nowrap; pointer-events: none;
+  }
+  .act-year { font-size: 11px; color: var(--ink-faint); font-weight: 400; font-family: var(--mono); margin-left: 6px; }
+  .overlay-box {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 28px 40px; text-align: center; min-width: 280px;
+  }
+  .overlay-title { font-size: 15px; color: var(--ink); margin-top: 14px; }
+  .overlay-sub { font-size: 12px; color: var(--ink-dim); margin-top: 6px; max-width: 360px; word-break: break-all; }
+  .spinner {
+    width: 34px; height: 34px; margin: 0 auto; border-radius: 50%;
+    border: 3px solid var(--line); border-top-color: var(--focus);
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Left rail: case shape + facets ──────────────────────────────────────── */
+  .rail {
+    grid-area: rail;
+    background: var(--surface);
+    border-right: 1px solid var(--line);
+    overflow-y: auto;
+    padding: 4px 0 16px;
+  }
+  .rail section { padding: 12px 14px; border-bottom: 1px solid var(--line-soft); }
+  .rail h2 {
+    font-size: 11px; font-weight: 600; color: var(--ink-faint);
+    margin: 0 0 9px; letter-spacing: .02em;
+  }
+  .metric { display: flex; align-items: baseline; gap: 8px; }
+  .metric .big {
+    font-family: var(--mono); font-size: 26px; font-weight: 600; color: var(--ink);
+    letter-spacing: -.01em;
+  }
+  .metric .lbl { color: var(--ink-dim); font-size: 12px; }
+
+  /* facet lists */
+  .facet {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 6px; margin: 0 -6px;
+    border-radius: 5px; cursor: pointer; user-select: none;
+  }
+  .facet:hover { background: var(--surface-2); }
+  .facet.active { background: var(--surface-2); }
+  .facet .swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .facet .name { flex: 1; color: var(--ink-dim); font-size: 12.5px; }
+  .facet.active .name { color: var(--ink); }
+  .facet .count { font-family: var(--mono); font-size: 11.5px; color: var(--ink-faint); }
+
+  /* SRUM talkers mini-bars */
+  .talker { margin: 7px 0; }
+  .talker .row { display: flex; justify-content: space-between; gap: 6px; }
+  .talker .app { font-family: var(--mono); font-size: 11px; color: var(--ink-dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; direction: rtl; text-align: left; }
+  .talker .amt { font-family: var(--mono); font-size: 11px; color: var(--cat-network); }
+  .talker .bar { height: 3px; background: var(--line); border-radius: 2px; margin-top: 3px; overflow: hidden; }
+  .talker .bar i { display: block; height: 100%; background: var(--cat-network); }
+
+  /* ── Center: the timeline (the hero) ─────────────────────────────────────── */
+  .main { grid-area: main; overflow: hidden; display: flex; flex-direction: column; background: var(--bg); position: relative; }
+
+  /* Scroll position indicator — appears while dragging through a long timeline
+     so the analyst keeps their bearings (row N of total, and the date there). */
+  .scrollpos {
+    position: absolute; right: 18px; top: 92px; z-index: 20;
+    background: var(--surface-2); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 7px; padding: 6px 11px; font-size: 11.5px; font-family: var(--mono);
+    box-shadow: 0 4px 14px rgba(0,0,0,.28); pointer-events: none;
+    opacity: 0; transform: translateY(-4px); transition: opacity .15s, transform .15s;
+    white-space: nowrap;
+  }
+  .scrollpos.show { opacity: 1; transform: translateY(0); }
+  .scrollpos .sp-row { color: var(--focus); }
+  .scrollpos .sp-date { color: var(--ink-dim); }
+
+  .toolbar {
+    display: flex; align-items: center; gap: 6px;
+    padding: 7px 12px; border-bottom: 1px solid var(--line);
+    /* Raised surface so the filter/search strip reads as its own control band,
+       breaking up the large flat timeline area. */
+    background: var(--surface-2);
+  }
+  .chip {
+    font-size: 11.5px; color: var(--ink-dim);
+    background: var(--surface-2); border: 1px solid var(--line);
+    padding: 3px 9px; border-radius: 20px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .chip:hover { border-color: var(--ink-faint); }
+  .chip.on { color: var(--bg); background: var(--alert); border-color: var(--alert); font-weight: 600; }
+  .toolbar .spacer { margin-left: auto; }
+  .toolbar .result-count { font-family: var(--mono); font-size: 11.5px; color: var(--ink-faint); display: inline-flex; align-items: center; gap: 6px; }
+  .toolbar .result-count .rc-range { color: var(--ink-dim); }
+  .toolbar .result-count .rc-total { color: var(--ink); }
+  .pg-btn {
+    font-family: var(--sans); font-size: 11px; color: var(--ink-dim);
+    background: var(--surface); border: 1px solid var(--line); border-radius: 5px;
+    padding: 2px 8px; cursor: pointer; margin-left: 2px;
+  }
+  .pg-btn:hover:not([disabled]) { background: var(--surface-2); color: var(--ink); }
+  .pg-btn[disabled] { opacity: .4; cursor: default; }
+
+  /* header row of the grid */
+  .grid-head {
+    display: grid;
+    grid-template-columns: 168px 88px 108px 150px 1fr;
+    gap: 0;
+    padding: 0 12px;
+    height: 26px; align-items: center;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+    font-size: 10.5px; color: var(--ink-faint); font-weight: 600;
+    letter-spacing: .02em;
+    flex: none;
+  }
+  .grid-head span { padding-right: 10px; }
+
+  /* virtualized scroll viewport */
+  /* overflow-anchor:none is essential for the virtualised timeline: when
+     renderWindow resizes the top spacer as you scroll, the browser's scroll
+     anchoring would otherwise "helpfully" shift scrollTop to keep an element in
+     view, which compounds into a jump/overshoot (the fast-scroll bug). Disabling
+     anchoring makes scrollTop map 1:1 to the spacer maths. */
+  .viewport { flex: 1; overflow-y: auto; position: relative; overflow-anchor: none; }
+  .viewport * { overflow-anchor: none; }
+  .spacer-top, .spacer-bot { width: 100%; }
+
+  .evrow {
+    display: grid;
+    grid-template-columns: 168px 88px 108px 150px 1fr;
+    padding: 0 12px;
+    height: var(--row-h); align-items: center;
+    border-bottom: 1px solid var(--line-soft);
+    cursor: pointer;
+    position: relative;
+  }
+  .evrow:hover { background: var(--surface); }
+  .evrow.sel { background: var(--surface-2); }
+  .evrow.sel::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+    background: var(--focus);
+  }
+  /* category left tick */
+  .evrow .cat-tick { position: absolute; left: 0; top: 6px; bottom: 6px; width: 3px; border-radius: 0 2px 2px 0; }
+
+  .evrow .c { padding-right: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .evrow .ts   { font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim); }
+  .evrow .kind { font-size: 10.5px; color: var(--ink-faint); }
+  .evrow .art  { font-family: var(--mono); font-size: 11px; }
+  .evrow .user { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); }
+  .evrow .msg  { color: var(--ink); font-size: 12.5px; }
+  .evrow .msg .path { color: var(--ink-dim); }
+  .evrow.flagged .msg { color: #ffd7d7; }
+  .flag-pill {
+    font-size: 9.5px; font-weight: 700; color: var(--bg); background: var(--alert);
+    padding: 0 5px; border-radius: 3px; margin-right: 6px; letter-spacing: .03em;
+  }
+
+  /* ── Right: detail / provenance / raw ────────────────────────────────────── */
+  .detail {
+    grid-area: detail; background: var(--surface); border-left: 1px solid var(--line);
+    overflow-y: auto; display: none;
+  }
+  .app.detail-open .detail { display: block; }
+  .detail-head { padding: 13px 15px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--surface); }
+  .detail-head .close { float: right; cursor: pointer; color: var(--ink-faint); font-size: 16px; line-height: 1; }
+  .detail-head .action { font-family: var(--mono); font-size: 13px; color: var(--ink); }
+  .detail-head .when { color: var(--ink-dim); font-size: 12px; margin-top: 3px; font-family: var(--mono); }
+  .detail section { padding: 13px 15px; border-bottom: 1px solid var(--line-soft); }
+  .detail h3 { font-size: 11px; color: var(--ink-faint); font-weight: 600; margin: 0 0 8px; }
+  .kv { display: grid; grid-template-columns: 92px 1fr; gap: 5px 10px; }
+  .kv dt { color: var(--ink-faint); font-size: 11.5px; }
+  .kv dd { margin: 0; font-family: var(--mono); font-size: 11.5px; color: var(--ink); word-break: break-all; }
+  pre.raw {
+    margin: 0; font-family: var(--mono); font-size: 11px; line-height: 1.5;
+    color: var(--ink-dim); white-space: pre-wrap; word-break: break-word;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px;
+    max-height: 340px; overflow: auto;
+  }
+  .prov-note { color: var(--ink-faint); font-size: 11px; margin-top: 8px; line-height: 1.5; }
+
+  /* ── Status bar ──────────────────────────────────────────────────────────── */
+  .status {
+    grid-area: status; background: var(--surface); border-top: 1px solid var(--line);
+    display: flex; align-items: center; gap: 14px; padding: 0 12px;
+    font-family: var(--mono); font-size: 11px; color: var(--ink-faint);
+  }
+  .status .sep { color: var(--line); }
+  .status .live { color: var(--cat-logon); }
+
+  /* empty state */
+  .empty { display: grid; place-items: center; height: 100%; text-align: center; color: var(--ink-dim); }
+  .empty .box { max-width: 340px; }
+  .empty h2 { color: var(--ink); font-weight: 600; margin: 0 0 8px; }
+  .empty p { font-size: 12.5px; line-height: 1.6; }
+  .empty code { font-family: var(--mono); color: var(--cat-execution); }
+
+  /* findings section — top billing */
+  .findings.active { background: var(--surface-2); }
+  .findings-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+  .sev-pills { display: flex; flex-wrap: wrap; gap: 4px; }
+  .sev-pill { font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 20px; }
+  .sev-critical { background: var(--alert); color: var(--bg); }
+  .sev-high { background: #d98c4a; color: var(--bg); }
+  .sev-medium { background: #d9c04a; color: var(--bg); }
+  .sev-low { background: var(--line); color: var(--ink-dim); }
+  .sev-informational { background: var(--line); color: var(--ink-faint); }
+
+  /* hunt center-pane detection rows */
+  .hitrow { padding: 12px 16px; border-bottom: 1px solid var(--line); border-left: 3px solid var(--line); cursor: pointer; }
+  .hitrow:hover { background: var(--surface); }
+  .sev-border-critical { border-left-color: var(--alert); }
+  .sev-border-high { border-left-color: #d98c4a; }
+  .sev-border-medium { border-left-color: #d9c04a; }
+  .sev-border-low { border-left-color: var(--line); }
+  .hit-main { display: flex; align-items: center; gap: 10px; }
+  .sev-tag { font-size: 9.5px; font-weight: 700; padding: 1px 7px; border-radius: 3px; text-transform: uppercase; letter-spacing: .03em; }
+  .hit-title { font-size: 13.5px; color: var(--ink); font-weight: 600; }
+  .hit-att { margin-left: auto; display: flex; gap: 4px; }
+  .att { font-family: var(--mono); font-size: 10px; color: var(--cat-execution); border: 1px solid var(--line); padding: 1px 5px; border-radius: 3px; }
+  .hit-sub { display: flex; justify-content: space-between; gap: 12px; margin-top: 6px; }
+  .hit-summary { font-size: 12px; color: var(--ink-dim); }
+  .hit-meta { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); white-space: nowrap; }
+
+  ::-webkit-scrollbar { width: 11px; height: 11px; }
+  ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 6px; border: 3px solid var(--surface); }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <div class="topbar">
+    <span class="brand">fx<span class="dot">.</span></span>
+    <button class="topbtn" id="newCaseBtn">+ New case</button>
+    <button class="topbtn" id="openCaseBtn">Open case</button>
+    <button class="topbtn" id="exportCsvTop" title="Export findings to CSV">Export CSV</button>
+    <button class="topbtn" id="exportStixTop" title="Export findings to STIX 2.1">Export STIX</button>
+    <button class="topbtn" id="themeBtn" title="Switch theme">◐ Theme</button>
+    <button class="topbtn" id="helpBtn" title="About fx / help">?</button>
+    <span class="case-name" id="caseName">no case open</span>
+    <div class="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="search" type="text" placeholder="Filter path, user, message…  (⌘K)" spellcheck="false" />
+    </div>
+  </div>
+
+  <!-- Help / about modal -->
+  <div class="modal" id="helpModal">
+    <div class="modal-box">
+      <div class="modal-head"><span>About fx</span><button class="modal-close" id="helpClose">✕</button></div>
+      <div class="modal-body" id="helpBody"></div>
+    </div>
+  </div>
+
+  <!-- Ingest / open progress overlay -->
+  <div class="overlay" id="overlay">
+    <div class="overlay-box">
+      <div class="spinner"></div>
+      <div class="overlay-title" id="overlayTitle">Working…</div>
+      <div class="overlay-sub" id="overlaySub"></div>
+    </div>
+  </div>
+
+  <aside class="rail" id="rail"></aside>
+
+  <div class="main">
+    <div class="toolbar" id="toolbar"></div>
+    <div class="grid-head">
+      <span>Time (UTC)</span><span>Kind</span><span>Artefact</span><span>User</span><span>Event</span>
+    </div>
+    <div class="viewport" id="viewport">
+      <div class="spacer-top" id="spTop"></div>
+      <div id="rows"></div>
+      <div class="spacer-bot" id="spBot"></div>
+    </div>
+    <div class="scrollpos" id="scrollPos" aria-hidden="true"></div>
+  </div>
+
+  <aside class="detail" id="detail"></aside>
+
+  <div class="status" id="status"></div>
+</div>
+
+<script type="module" src="./src/app.js"></script>
+</body>
+</html>

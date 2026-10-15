@@ -1,0 +1,16 @@
+# Build output
+target/
+
+# fx case files (DuckDB) — never commit evidence
+*.fxcase
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# NOTE: Cargo.lock is intentionally COMMITTED (this is an application, not a
+# library) so every clone builds a reproducible dependency graph — in particular
+# nom stays pinned to 7.1.3, which notatin requires. Do not add Cargo.lock here.

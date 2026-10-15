@@ -1,0 +1,41 @@
+kind: event
+id: offensive_tooling
+title: Known offensive / lateral-movement tooling
+description: >
+  Presence or execution of tooling commonly used by financially-motivated
+  intruders for credential theft, lateral movement, and exfiltration —
+  mimikatz, PsExec/PSEXESVC, Cobalt Strike, rclone, and similar. Matches on
+  process, path, or target across every artefact that records execution or
+  presence (Prefetch, AmCache, EVTX, services).
+severity: high
+attack:
+  - T1003      # credential dumping
+  - T1021.002  # SMB/admin shares (PsExec)
+  - T1567.002  # exfil to cloud (rclone)
+detection:
+  any:
+    - match:
+        field: process.path
+        op: contains
+        values: &tools
+          - "mimikatz"
+          - "psexec"
+          - "psexesvc"
+          - "cobaltstrike"
+          - "beacon.exe"
+          - "rclone"
+          - "megasync"
+          - "winrar"       # staging (context-dependent; medium-signal)
+          - "7z.exe"
+    - match:
+        field: target.path
+        op: contains
+        values: *tools
+    - match:
+        field: process.command_line
+        op: contains
+        values: *tools
+    - match:
+        field: message
+        op: contains
+        values: *tools

@@ -1,0 +1,16 @@
+kind: event
+id: system_binary_masquerade
+title: System binary at non-System32 path (masquerade)
+description: >
+  A Windows system-binary name (svchost, lsass, services, etc.) recorded at a
+  path outside System32/SysWOW64 — a common masquerading technique to blend
+  malicious processes into expected system noise.
+severity: high
+attack:
+  - T1036.005
+detection:
+  match:
+    field: message
+    op: contains
+    values:
+      - "MASQUERADE"

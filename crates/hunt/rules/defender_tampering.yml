@@ -1,0 +1,25 @@
+kind: event
+id: defender_tampering
+title: Windows Defender tampering
+description: >
+  Disabling of Microsoft Defender real-time protection or addition of broad
+  exclusions via PowerShell or registry — a routine early step to allow tooling
+  and payloads to run undetected.
+severity: high
+attack:
+  - T1562.001
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: contains
+        values:
+          - "Set-MpPreference -DisableRealtimeMonitoring $true"
+          - "Add-MpPreference -ExclusionPath"
+          - "Set-MpPreference -DisableRealtimeMonitoring 1"
+    - match:
+        field: target.path
+        op: contains
+        values:
+          - "Windows Defender\\Real-Time Protection\\DisableRealtimeMonitoring"
+          - "Windows Defender\\Exclusions\\"

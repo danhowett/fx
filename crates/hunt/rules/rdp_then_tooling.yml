@@ -1,0 +1,17 @@
+kind: correlation
+id: rdp_then_tooling
+title: RDP logon followed by tooling activity
+description: >
+  A remote-interactive (RDP) logon on a host closely followed by execution or
+  presence of offensive tooling on that same host — a hands-on-keyboard lateral
+  movement pattern. Correlates a logon event with a subsequent suspicious
+  execution within the window, on the same host.
+severity: high
+attack:
+  - T1021.001  # remote desktop protocol
+correlation:
+  type: sequence
+  first_action_prefix: "logon.success"
+  second_action_prefix: "execution.amcache_suspicious"
+  within_seconds: 1800
+  join_key: host

@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Core library + CLI: builds and tests on Linux, no GUI toolkit needed.
+  # This is the fast signal that the parsers, store, ingest and hunt engine
+  # compile and their unit tests pass.
+  build-and-test:
+    name: build & test (core + CLI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # C toolchain for the bundled DuckDB / SQLite.
+      - name: Install build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      - name: Build (workspace default members — core + CLI)
+        run: cargo build --release --locked
+
+      - name: Test
+        run: cargo test --release --locked
+
+  # Format + lint gate. Non-blocking style issues surface here without failing
+  # the core build above.
+  lint:
+    name: fmt & clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy (core + CLI)
+        run: cargo clippy --release --locked -- -D warnings
+
+  # GUI build (Tauri) on Windows — the platform fx targets. Separate job so a
+  # GUI/WebView issue doesn't mask a core failure, and vice versa.
+  gui-windows:
+    name: build GUI (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: windows-cargo-
+      - name: Build fx-gui
+        run: cargo build --release -p fx-gui --features tauri/custom-protocol --locked

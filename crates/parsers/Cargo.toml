@@ -1,0 +1,34 @@
+[package]
+name = "fx-parsers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fx-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+time.workspace = true
+uuid.workspace = true
+
+# Real forensic parsing crates.
+evtx.workspace = true
+mft.workspace = true
+notatin.workspace = true
+# Direct, pinned dependency on nom 7 so the resolver unifies notatin's
+# transitive nom on 7.1.3 (notatin 1.0.1 does not build against nom 8). This is
+# the belt to the Cargo.lock braces — a fresh clone builds without a manual
+# `cargo update -p nom`.
+nom.workspace = true
+xpress-huffman.workspace = true
+srum-parser.workspace = true
+srum-core.workspace = true
+chrono.workspace = true
+jiff = "0.2"
+usnjrnl.workspace = true
+roxmltree = { workspace = true }
+rusqlite = { workspace = true }
+lnk-core = { workspace = true }

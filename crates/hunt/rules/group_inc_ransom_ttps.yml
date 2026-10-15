@@ -1,0 +1,37 @@
+kind: event
+id: group_inc_ransom_ttps
+title: INC Ransom (Lynx / Sinobi) ransomware TTPs
+description: >
+  Behavioural indicators associated with INC Ransom and its code-sharing
+  variants Lynx and Sinobi (2026 top-5, 830+ victims). Matches its distinctive
+  tradecraft: the VeeamCreds.ps1 backup-credential script, ProcTerminator /
+  Process Hacker EDR kill, the filwfp/filnk/fildds.sys BYOVD drivers, LOLBin
+  exfil via MSPaint/WordPad, MegaSync/7-Zip staging, and the --esxi VM-shutdown
+  argument. Attribution is probabilistic.
+severity: critical
+attack:
+  - T1003
+  - T1562.001
+  - T1486
+detection:
+  any:
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "veeamcreds\\.ps1|procterminator"
+          - "filwfp\\.sys|filnk\\.sys|fildds\\.sys"
+          - "\\s--esxi\\b"
+          - "megasync|mega\\.nz|megacmd"
+          - "(mspaint|write|wordpad)\\.exe\\s+.*\\\\\\\\"
+          - "7z(\\.exe)?\\s+a\\s+.*-p.*-mhe"
+    - match:
+        field: process.name
+        op: regex
+        values:
+          - "^(procterminator|megasync)\\.exe$"
+    - match:
+        field: filename
+        op: regex
+        values:
+          - "^(INC-README|RECOVER-[A-Za-z]+-FILES)\\.(txt|html)$"

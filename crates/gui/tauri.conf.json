@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "fx",
+  "version": "0.1.0",
+  "identifier": "com.fxforensics.fx",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "fx \u2014 artefact timeline",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 640,
+        "theme": "Dark"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "targets": [
+      "nsis"
+    ],
+    "category": "Utility",
+    "shortDescription": "Windows artefact analysis and threat hunting",
+    "longDescription": "fx ingests extracted Windows artefact collections, normalizes them onto a single timeline, and surfaces financially-motivated-actor TTPs for triage and hunting."
+  }
+}
