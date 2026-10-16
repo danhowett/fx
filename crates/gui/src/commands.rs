@@ -177,7 +177,7 @@ impl From<SrumNetTotal> for SrumRow {
 
 /// Open an existing case file. Replaces any currently open case.
 #[tauri::command]
-pub fn open_case(state: tauri::State<AppState>, path: String) -> Result<CaseOverview, String> {
+pub async fn open_case(state: tauri::State<'_, AppState>, path: String) -> Result<CaseOverview, String> {
     let store = CaseStore::open(&PathBuf::from(path)).map_err(|e| e.to_string())?;
     let overview = build_overview(&store).map_err(|e| e.to_string())?;
     *state.store.lock().unwrap() = Some(store);
@@ -185,10 +185,12 @@ pub fn open_case(state: tauri::State<AppState>, path: String) -> Result<CaseOver
 }
 
 /// Create a new case and ingest a collection directory into it, then open it.
-/// Long-running: the frontend shows progress via the returned summary counts.
+/// Long-running. `async` so Tauri runs it on a worker thread, not the window's
+/// main thread — a synchronous command here froze the window ("Not Responding")
+/// for the whole ingest even though work was progressing.
 #[tauri::command]
-pub fn ingest_collection(
-    state: tauri::State<AppState>,
+pub async fn ingest_collection(
+    state: tauri::State<'_, AppState>,
     collection_dir: String,
     case_path: String,
     case_name: String,
@@ -209,8 +211,8 @@ pub fn ingest_collection(
 
 /// Query the timeline with a filter. This is the frontend's workhorse.
 #[tauri::command]
-pub fn query_timeline(
-    state: tauri::State<AppState>,
+pub async fn query_timeline(
+    state: tauri::State<'_, AppState>,
     filter: FilterInput,
 ) -> Result<Vec<EventDto>, String> {
     let guard = state.store.lock().unwrap();
@@ -240,8 +242,8 @@ pub fn query_timeline(
 /// Count all events matching a filter (ignoring paging) — for the "N of M"
 /// indicator and Next/Prev paging. Runs over the whole case in SQL.
 #[tauri::command]
-pub fn count_timeline(
-    state: tauri::State<AppState>,
+pub async fn count_timeline(
+    state: tauri::State<'_, AppState>,
     filter: FilterInput,
 ) -> Result<u64, String> {
     let guard = state.store.lock().unwrap();
@@ -264,7 +266,7 @@ pub fn count_timeline(
 
 /// Fetch the full raw JSON for one event (right-pane detail).
 #[tauri::command]
-pub fn event_raw(state: tauri::State<AppState>, event_id: String) -> Result<Option<String>, String> {
+pub async fn event_raw(state: tauri::State<'_, AppState>, event_id: String) -> Result<Option<String>, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
     store.raw_json(&event_id).map_err(|e| e.to_string())
@@ -274,8 +276,8 @@ pub fn event_raw(state: tauri::State<AppState>, event_id: String) -> Result<Opti
 /// (worst-first). Rules are loaded from `rules_dir` (defaults to the shipped
 /// pack next to the binary).
 #[tauri::command]
-pub fn run_hunt(
-    state: tauri::State<AppState>,
+pub async fn run_hunt(
+    state: tauri::State<'_, AppState>,
     rules_dir: Option<String>,
 ) -> Result<Vec<DetectionDto>, String> {
     let guard = state.store.lock().unwrap();
@@ -314,7 +316,7 @@ pub struct IngestLogDto {
 }
 
 #[tauri::command]
-pub fn ingest_log(state: tauri::State<AppState>) -> Result<Vec<IngestLogDto>, String> {
+pub async fn ingest_log(state: tauri::State<'_, AppState>) -> Result<Vec<IngestLogDto>, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
     let rows = store.ingest_log().map_err(|e| e.to_string())?;
@@ -344,7 +346,7 @@ pub struct DailyActivityDto {
 /// analyst see the shape of the whole case at a glance and spot volume spikes
 /// that no rule tagged.
 #[tauri::command]
-pub fn daily_activity(state: tauri::State<AppState>) -> Result<Vec<DailyActivityDto>, String> {
+pub async fn daily_activity(state: tauri::State<'_, AppState>) -> Result<Vec<DailyActivityDto>, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
     let rows = store.daily_activity().map_err(|e| e.to_string())?;
@@ -361,8 +363,8 @@ pub fn daily_activity(state: tauri::State<AppState>) -> Result<Vec<DailyActivity
 /// Set an event's triage state (unconfirmed / validated / false_positive /
 /// dismissed), with an optional note.
 #[tauri::command]
-pub fn set_triage(
-    state: tauri::State<AppState>,
+pub async fn set_triage(
+    state: tauri::State<'_, AppState>,
     event_id: String,
     triage_state: String,
     note: Option<String>,
@@ -374,7 +376,7 @@ pub fn set_triage(
 
 /// Clear an event's triage state.
 #[tauri::command]
-pub fn clear_triage(state: tauri::State<AppState>, event_id: String) -> Result<(), String> {
+pub async fn clear_triage(state: tauri::State<'_, AppState>, event_id: String) -> Result<(), String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
     store.clear_triage(&event_id).map_err(|e| e.to_string())
@@ -382,7 +384,7 @@ pub fn clear_triage(state: tauri::State<AppState>, event_id: String) -> Result<(
 
 /// All triage tags: [{event_id, state, note}], for badges and filtering.
 #[tauri::command]
-pub fn list_triage(state: tauri::State<AppState>) -> Result<Vec<TriageDto>, String> {
+pub async fn list_triage(state: tauri::State<'_, AppState>) -> Result<Vec<TriageDto>, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
     // Full detail (ts/host/message) so the findings view can render manual
@@ -403,7 +405,7 @@ pub fn list_triage(state: tauri::State<AppState>) -> Result<Vec<TriageDto>, Stri
 
 /// Read already-computed detections (without re-running).
 #[tauri::command]
-pub fn hunt_results(state: tauri::State<AppState>) -> Result<Vec<DetectionDto>, String> {
+pub async fn hunt_results(state: tauri::State<'_, AppState>) -> Result<Vec<DetectionDto>, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
     read_detections(store)
@@ -413,8 +415,8 @@ pub fn hunt_results(state: tauri::State<AppState>) -> Result<Vec<DetectionDto>, 
 /// destination chosen in the GUI save dialog. Returns the number of findings
 /// written.
 #[tauri::command]
-pub fn export_findings(
-    state: tauri::State<AppState>,
+pub async fn export_findings(
+    state: tauri::State<'_, AppState>,
     format: String,
     path: String,
 ) -> Result<usize, String> {

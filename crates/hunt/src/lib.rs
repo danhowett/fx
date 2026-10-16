@@ -122,9 +122,35 @@ pub fn run(store: &CaseStore, rules: &RuleSet) -> HuntReport {
     // avoids one SQL scan per rule.
     let ev_rules = &rules.event_rules;
     if !ev_rules.is_empty() {
-        let scan = store.for_each_event(|ev| {
+        // Parse `raw` per row only if some loaded rule reads a raw-backed field
+        // (event.id / extras.*). Skipping it avoids a per-row JSON parse over
+        // the whole events table when no such rule applies.
+        let needs_raw = crate::event_rule::any_rule_needs_raw(ev_rules);
+        // The MFT parser emits one event per $SI timestamp (M/A/C/B) of a
+        // record, so a rule matching a file fired up to 4× for one file. Merge
+        // hits for the same (rule, evidence file, MFT record) into a single
+        // finding: earliest timestamp, all contributing event ids. Scoped to
+        // MFT on purpose — other parsers can share a source_ref across
+        // genuinely distinct entries (e.g. several values under one Run key).
+        let mut mft_seen: std::collections::HashMap<(String, Uuid, String), usize> =
+            std::collections::HashMap::new();
+        let scan = store.for_each_event(needs_raw, |ev| {
             for rule in ev_rules {
                 if rule.matches(ev) {
+                    if ev.artefact == fx_core::ArtefactKind::Mft {
+                        if let Some(sref) = &ev.provenance.source_ref {
+                            let key = (rule.id.clone(), ev.provenance.evidence_id, sref.clone());
+                            if let Some(&idx) = mft_seen.get(&key) {
+                                let d = &mut detections[idx];
+                                d.event_ids.push(ev.id);
+                                if ev.timestamp < d.timestamp {
+                                    d.timestamp = ev.timestamp;
+                                }
+                                continue;
+                            }
+                            mft_seen.insert(key, detections.len());
+                        }
+                    }
                     detections.push(Detection {
                         id: Uuid::new_v4(),
                         rule_id: rule.id.clone(),

@@ -28,15 +28,29 @@ detection:
           - "Add-MpPreference\\s+-ExclusionPath"
           - "\\bsc(\\.exe)?\\s+(stop|config)\\s+(windefend|sense|sysmon)"
           - "fltmc(\\.exe)?\\s+unload"
+    # Lifted EVTX actions. Explicit list rather than `defense_evasion.*`:
+    # Defender 5007 "configuration changed" fires on routine Defender
+    # platform/signature updates and is only interesting when it adds an
+    # exclusion or disables protection (classified separately by the parser).
     - match:
         field: action
         op: regex
         values:
-          - "defense_evasion\\..*"
-          - "malware\\.detected"
-    - match:
-        field: event.id
-        op: equals
-        values:
-          - "1102"
-          - "104"
+          - "^defense_evasion\\.(security_log_cleared|audit_policy_changed|defender_rtp_disabled|defender_exclusion_added|defender_protection_disabled|create_remote_thread)$"
+          - "^malware\\.detected$"
+    # EventID 104 is "log cleared" ONLY from the Eventlog provider, whose event
+    # names the cleared channel. Many unrelated providers reuse id 104; those
+    # produced "Event log cleared: " with an empty channel — hundreds of false
+    # positives. Require a named channel. (The bare `event.id: 104/1102` match
+    # that used to be here ignored the provider entirely and is removed.)
+    - all:
+        - match:
+            field: action
+            op: equals
+            values:
+              - defense_evasion.log_cleared
+        - match:
+            field: message
+            op: regex
+            values:
+              - "^Event log cleared: \\S"

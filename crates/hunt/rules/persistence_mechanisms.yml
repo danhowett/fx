@@ -25,13 +25,44 @@ detection:
           - "wmic(\\.exe)?.*(__EventFilter|CommandLineEventConsumer|__FilterToConsumerBinding)"
           - "schtasks(\\.exe)?\\s+/create\\b"
           - "\\bregister-scheduledtask\\b"
-    - match:
-        field: action
-        op: equals
-        values:
-          - persistence.run_key
-          - service.install
-          - service.define
-          - persistence.scheduled_task
-          - persistence.scheduled_task_created
-          - persistence.wmi_subscription
+    # Inventory entries (every run key / service / task on the host) are NOT
+    # findings on their own — that fired on thousands of stock Windows and
+    # Office entries. Flag one only when what it launches looks like attacker
+    # tradecraft: a staging location, a script host / LOLBin, a URL or a UNC
+    # path to an IP. Microsoft's own AppData/ProgramData updaters are excluded.
+    - all:
+        - match:
+            field: action
+            op: equals
+            values:
+              - persistence.run_key
+              - service.install
+              - service.define
+              - persistence.scheduled_task
+              - persistence.scheduled_task_created
+              - persistence.wmi_subscription
+        - match:
+            field: message
+            op: regex
+            values:
+              - "[\\\\/](temp|tmp)[\\\\/]"
+              - "[\\\\/]appdata[\\\\/]"
+              - "[\\\\/]users[\\\\/]public[\\\\/]"
+              - "[\\\\/](downloads|desktop)[\\\\/]"
+              - "[\\\\/]perflogs[\\\\/]"
+              - "\\$recycle\\.bin"
+              - "[\\\\/]programdata[\\\\/][^\\\\/]+\\.(exe|dll|bat|cmd|ps1|vbs|js|hta)\\b"
+              - "powershell(\\.exe)?.*\\s-(e|en|enc|encodedcommand|w|windowstyle|nop|noprofile)\\b"
+              - "powershell(\\.exe)?.*-(ep|executionpolicy)\\s+bypass"
+              - "\\b(mshta|wscript|cscript|bitsadmin)(\\.exe)?\\b"
+              - "\\bregsvr32(\\.exe)?.*(/i:|scrobj)"
+              - "\\bcertutil(\\.exe)?.*(urlcache|decode)"
+              - "https?://"
+              - "\\\\\\\\[0-9]{1,3}\\."
+        - not:
+            match:
+              field: message
+              op: regex
+              values:
+                - "[\\\\/]appdata[\\\\/]local[\\\\/]microsoft[\\\\/](onedrive|teams|windowsapps|edgeupdate)[\\\\/]"
+                - "[\\\\/]programdata[\\\\/]microsoft[\\\\/]"

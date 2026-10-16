@@ -126,9 +126,28 @@ fn ingest_one(
     // here: on a panic we discard `counting`/`writer` state for this artefact and
     // move on (any partial events already emitted are flushed below and the
     // artefact is marked Failed).
+    // Progress logging: one line before and after each artefact. If ingest ever
+    // stalls, the last "parsing" line with no matching "done" names the file.
+    let size = std::fs::metadata(&artefact.path).map(|m| m.len()).unwrap_or(0);
+    tracing::info!(
+        "parsing [{:?}] {} ({:.1} MB)",
+        artefact.artefact,
+        artefact.source_path,
+        size as f64 / 1_048_576.0
+    );
+    let started = std::time::Instant::now();
+
     let parse_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         registry.parse(artefact, &mut counting)
     }));
+
+    tracing::info!(
+        "done    [{:?}] {} — {} events in {:.1}s",
+        artefact.artefact,
+        artefact.source_path,
+        counting.count,
+        started.elapsed().as_secs_f64()
+    );
 
     let (status, records_read, events_emitted, warnings) = match parse_result {
         Ok(Ok(Some(outcome))) => (

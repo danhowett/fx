@@ -102,6 +102,15 @@ fn read_prefix(path: &Path, buf: &mut [u8]) -> std::io::Result<usize> {
 /// specialized RegistryRun/Service/etc. kinds); at identification time we just
 /// mark it a registry hive so it dispatches to the registry parser.
 fn resolve_registry(name: &str) -> Option<(ArtefactKind, IdMethod, f32)> {
+    // Transaction logs (SYSTEM.LOG1, ntuser.dat.LOG2, BCD-Template.LOG, ...)
+    // carry a `regf` base block, so they sniff as hives — but they are not
+    // standalone hives. The registry parser already replays .LOG1/.LOG2 into
+    // their primary hive, so parsing them on their own only produced a
+    // "Nom parsing error" FAILED line per log. Class them as companion files
+    // (shown as unsupported, still registered + hashed as evidence).
+    if name.ends_with(".log") || name.ends_with(".log1") || name.ends_with(".log2") {
+        return Some((ArtefactKind::Unclassified, IdMethod::Content, 0.5));
+    }
     let known = matches!(
         name,
         "system" | "software" | "sam" | "security" | "default"
@@ -171,7 +180,13 @@ fn resolve_by_path_only(lower: &str, name: &str) -> Option<(ArtefactKind, IdMeth
     } else if name.ends_with(".evtx") {
         // Extension-only EVTX (e.g. header unreadable) — low confidence.
         Some((ArtefactKind::Evtx, IdMethod::PathOnly, 0.55))
-    } else if lower.contains("/tasks/") || lower.contains("\\tasks\\") {
+    } else if (lower.contains("/tasks/") || lower.contains("\\tasks\\"))
+        // Legacy C:\Windows\Tasks holds binary .job files and the scheduler's
+        // SA.DAT state file, neither of which is task XML.
+        && !name.ends_with(".job")
+        && name != "sa.dat"
+        && name != "desktop.ini"
+    {
         // Scheduled task definitions live under System32\Tasks\ as extension-
         // less XML. Path is the reliable signal; the parser confirms the <Task>
         // root and skips anything that isn't one.

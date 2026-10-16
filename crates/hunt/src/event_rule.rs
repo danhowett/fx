@@ -15,6 +15,8 @@
 
 use fx_core::{Event, Severity};
 use regex::RegexBuilder;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// A single-event detection rule.
@@ -89,6 +91,14 @@ pub enum MatchOp {
     Exists,
 }
 
+/// Fields whose value is derived from the stored `raw` JSON (see
+/// `field_value`). Reconstructing an `Event` only needs to parse `raw` when a
+/// loaded rule references one of these; otherwise the (expensive, per-row) JSON
+/// parse can be skipped entirely. On a filesystem-heavy case (millions of USN /
+/// MFT events, no EVTX-EventID rules matching them) that parse was pure waste
+/// and a large fraction of the single-event pass's time.
+pub const RAW_BACKED_FIELDS: &[&str] = &["event.id", "extras.browser_event", "extras.domain"];
+
 impl EventRule {
     /// Does this rule match the given event?
     pub fn matches(&self, ev: &Event) -> bool {
@@ -100,6 +110,23 @@ impl EventRule {
         }
         self.detection.eval(ev)
     }
+
+    /// True if any condition in this rule reads a `raw`-backed field.
+    pub fn references_raw(&self) -> bool {
+        let mut hit = false;
+        self.detection.for_each_field(&mut |f| {
+            if RAW_BACKED_FIELDS.contains(&f) {
+                hit = true;
+            }
+        });
+        hit
+    }
+}
+
+/// Does any rule in the set need the `raw` JSON? Used to decide whether the
+/// single-event scan must parse it per row.
+pub fn any_rule_needs_raw(rules: &[EventRule]) -> bool {
+    rules.iter().any(|r| r.references_raw())
 }
 
 impl Condition {
@@ -109,6 +136,16 @@ impl Condition {
             Condition::Any { any } => any.iter().any(|c| c.eval(ev)),
             Condition::Not { not } => !not.eval(ev),
             Condition::Match { match_ } => match_.eval(ev),
+        }
+    }
+
+    /// Visit every field name referenced anywhere in this condition tree.
+    fn for_each_field(&self, f: &mut impl FnMut(&str)) {
+        match self {
+            Condition::All { all } => all.iter().for_each(|c| c.for_each_field(f)),
+            Condition::Any { any } => any.iter().for_each(|c| c.for_each_field(f)),
+            Condition::Not { not } => not.for_each_field(f),
+            Condition::Match { match_ } => f(&match_.field),
         }
     }
 }
@@ -123,27 +160,60 @@ impl FieldMatch {
         if matches!(self.op, MatchOp::Exists) {
             return !actual.is_empty();
         }
-        self.values.iter().any(|want| compare(self.op, &actual, want, self.ci))
+        // Lower-case the event value ONCE per condition, not once per value.
+        let actual_lc = if self.ci { actual.to_ascii_lowercase() } else { actual.clone() };
+        self.values
+            .iter()
+            .any(|want| compare(self.op, &actual, &actual_lc, want, self.ci))
     }
 }
 
-fn compare(op: MatchOp, actual: &str, want: &str, ci: bool) -> bool {
-    let (a, w) = if ci {
-        (actual.to_ascii_lowercase(), want.to_ascii_lowercase())
+thread_local! {
+    /// Compiled-regex cache, indexed by case-insensitivity (0 = sensitive,
+    /// 1 = insensitive) then pattern. Rules used to compile every regex afresh
+    /// for EVERY event it was tested against — on a multi-million-event case
+    /// that was ~10^8 regex compilations and the real cause of the
+    /// "Running detections…" hang. Now each distinct pattern compiles once.
+    /// `None` caches an invalid pattern so it isn't retried per event.
+    static REGEX_CACHE: RefCell<[HashMap<String, Option<regex::Regex>>; 2]> =
+        RefCell::new([HashMap::new(), HashMap::new()]);
+}
+
+fn cached_regex_match(pattern: &str, ci: bool, haystack: &str) -> bool {
+    REGEX_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let map = &mut cache[ci as usize];
+        if let Some(entry) = map.get(pattern) {
+            return entry.as_ref().map_or(false, |re| re.is_match(haystack));
+        }
+        let compiled = RegexBuilder::new(pattern).case_insensitive(ci).build().ok();
+        let hit = compiled.as_ref().map_or(false, |re| re.is_match(haystack));
+        map.insert(pattern.to_string(), compiled);
+        hit
+    })
+}
+
+/// `actual_lc` is `actual` already lower-cased when `ci` (computed once by the
+/// caller); regex matching uses the original text with a case-insensitive
+/// compiled pattern instead.
+fn compare(op: MatchOp, actual: &str, actual_lc: &str, want: &str, ci: bool) -> bool {
+    if let MatchOp::Regex = op {
+        return cached_regex_match(want, ci, actual);
+    }
+    let w_owned;
+    let w: &str = if ci {
+        w_owned = want.to_ascii_lowercase();
+        &w_owned
     } else {
-        (actual.to_string(), want.to_string())
+        want
     };
     match op {
-        MatchOp::Equals => a == w,
-        MatchOp::Contains => a.contains(&w),
-        MatchOp::StartsWith => a.starts_with(&w),
-        MatchOp::EndsWith => a.ends_with(&w),
-        MatchOp::Exists => !a.is_empty(),
-        MatchOp::Regex => RegexBuilder::new(want)
-            .case_insensitive(ci)
-            .build()
-            .map(|re| re.is_match(actual))
-            .unwrap_or(false),
+        MatchOp::Equals => actual_lc == w,
+        MatchOp::Contains => actual_lc.contains(w),
+        MatchOp::StartsWith => actual_lc.starts_with(w),
+        MatchOp::EndsWith => actual_lc.ends_with(w),
+        MatchOp::Exists => !actual_lc.is_empty(),
+        MatchOp::Regex => unreachable!(),
     }
 }
 

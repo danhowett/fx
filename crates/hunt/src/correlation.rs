@@ -103,6 +103,18 @@ impl Correlation {
                 } else {
                     String::new()
                 };
+                // Evidence-id cap. A real mass-rename burst (the exact thing
+                // this rule exists to catch) can be hundreds of thousands of
+                // events in ONE host group. STRING_AGG over all of them builds a
+                // multi-megabyte id string per group, which DuckDB materialises
+                // and then Rust splits back into UUIDs — on a big single-host
+                // USN journal this looked like a hang. We keep the true burst
+                // size as `magnitude` (COUNT, cheap) but only carry a bounded
+                // sample of contributing ids as evidence. A few hundred ids is
+                // far more than an analyst pivots through; the count tells the
+                // real story. `ranked` numbers rows within each qualifying group
+                // so the cap is applied in SQL, before any big string is built.
+                const ID_SAMPLE_CAP: usize = 500;
                 format!(
                     "WITH matched AS (
                         SELECT id, ts, {grp_expr} AS grp,
@@ -117,13 +129,19 @@ impl Correlation {
                                  RANGE BETWEEN CURRENT ROW AND {window} FOLLOWING
                                ) AS burst
                         FROM matched
+                     ),
+                     qualifying AS (
+                        SELECT grp, id, ts,
+                               MAX(burst) OVER (PARTITION BY grp) AS grp_peak,
+                               ROW_NUMBER() OVER (PARTITION BY grp ORDER BY ts) AS rn
+                        FROM windowed
+                        WHERE burst >= {threshold}
                      )
                      SELECT grp,
                             strftime(MIN(ts), '%Y-%m-%dT%H:%M:%S') AS first_ts,
-                            STRING_AGG(id, ',') AS ids,
-                            MAX(burst) AS magnitude
-                     FROM windowed
-                     WHERE burst >= {threshold}
+                            STRING_AGG(CASE WHEN rn <= {cap} THEN id END, ',') AS ids,
+                            MAX(grp_peak) AS magnitude
+                     FROM qualifying
                      GROUP BY grp",
                     grp_expr = grp_expr,
                     prefix = esc(action_prefix),
@@ -131,6 +149,7 @@ impl Correlation {
                     partition = partition,
                     window = window_seconds,
                     threshold = threshold,
+                    cap = ID_SAMPLE_CAP,
                 )
             }
 
@@ -176,21 +195,39 @@ impl Correlation {
                 json_field,
                 min_total,
                 group_by,
-            } => format!(
-                "SELECT
-                    {grp} AS grp,
-                    strftime(MIN(ts), '%Y-%m-%dT%H:%M:%S') AS first_ts,
-                    STRING_AGG(id, ',') AS ids,
-                    SUM(CAST(json_extract(raw, '$.{field}') AS BIGINT)) AS magnitude
-                 FROM events
-                 WHERE action LIKE '{prefix}%'
-                 GROUP BY {grp}
-                 HAVING SUM(CAST(json_extract(raw, '$.{field}') AS BIGINT)) >= {min}",
-                grp = grouping_expr(group_by),
-                field = esc(json_field),
-                prefix = esc(action_prefix),
-                min = min_total,
-            ),
+            } => {
+                // Same evidence-id cap as threshold_window: bound the sampled
+                // ids per group so a group with very many contributing rows
+                // can't build an unbounded id string. The real magnitude is the
+                // SUM, which is unaffected. `ranked` numbers rows per group so
+                // the cap is applied in SQL.
+                const ID_SAMPLE_CAP: usize = 500;
+                format!(
+                    "WITH matched AS (
+                        SELECT id, ts, {grp} AS grp,
+                               CAST(json_extract(raw, '$.{field}') AS BIGINT) AS val
+                        FROM events
+                        WHERE action LIKE '{prefix}%'
+                     ),
+                     ranked AS (
+                        SELECT grp, id, ts, val,
+                               ROW_NUMBER() OVER (PARTITION BY grp ORDER BY ts) AS rn
+                        FROM matched
+                     )
+                     SELECT grp,
+                            strftime(MIN(ts), '%Y-%m-%dT%H:%M:%S') AS first_ts,
+                            STRING_AGG(CASE WHEN rn <= {cap} THEN id END, ',') AS ids,
+                            SUM(val) AS magnitude
+                     FROM ranked
+                     GROUP BY grp
+                     HAVING SUM(val) >= {min}",
+                    grp = grouping_expr(group_by),
+                    field = esc(json_field),
+                    prefix = esc(action_prefix),
+                    min = min_total,
+                    cap = ID_SAMPLE_CAP,
+                )
+            }
         }
     }
 }

@@ -334,9 +334,13 @@ fn classify(
             .target(Target { path: ed("TaskName"), ..Default::default() }),
 
         // Log tampering / anti-forensics.
-        1102 => Classified::new("defense_evasion.security_log_cleared", "Security event log was CLEARED".into())
+        // 1102 / 104 mean "log cleared" ONLY from Microsoft-Windows-Eventlog.
+        // Many unrelated providers reuse these ids; matching on the number
+        // alone produced hundreds of bogus "log cleared" findings. Other
+        // providers' 1102/104 fall through to the generic evtx.eid.N event.
+        1102 if prov.contains("eventlog") => Classified::new("defense_evasion.security_log_cleared", "Security event log was CLEARED".into())
             .user(Principal { name: ed("SubjectUserName"), sid: ed("SubjectUserId").or(system_sid), ..Default::default() }),
-        104 => Classified::new("defense_evasion.log_cleared", format!("Event log cleared: {}", ed("Channel").unwrap_or_default())),
+        104 if prov.contains("eventlog") => Classified::new("defense_evasion.log_cleared", format!("Event log cleared: {}", ed("Channel").unwrap_or_default())),
 
         // Object access — file shares (lateral movement / staging).
         5140 => Classified::new(
@@ -440,7 +444,15 @@ fn classify_sysmon(
         7 => Classified::new("process.image_loaded", format!("Sysmon image loaded: {}", ed("ImageLoaded").unwrap_or_default()))
             .process(ProcessInfo { path: ed("Image"), hash_sha1: sysmon_sha1(ed), ..Default::default() })
             .target(Target { path: ed("ImageLoaded"), ..Default::default() }),
-        8 => Classified::new("defense_evasion.create_remote_thread", "Sysmon CreateRemoteThread (possible injection)".into())
+        8 => Classified::new(
+            "defense_evasion.create_remote_thread",
+            format!(
+                "Sysmon CreateRemoteThread: {} -> {} (start module {})",
+                ed("SourceImage").unwrap_or_else(|| "?".into()),
+                ed("TargetImage").unwrap_or_else(|| "?".into()),
+                ed("StartModule").unwrap_or_else(|| "?".into())
+            ),
+        )
             .process(ProcessInfo { path: ed("SourceImage"), ..Default::default() })
             .target(Target { path: ed("TargetImage"), ..Default::default() }),
         10 => Classified::new("credential_access.process_access", format!("Sysmon process access -> {}", ed("TargetImage").unwrap_or_default()))
@@ -510,7 +522,25 @@ fn classify_defender(event_id: u64, ed: &dyn Fn(&str) -> Option<String>) -> Clas
         .target(Target { path: ed("Path").or(ed("Process Name")), ..Default::default() }),
         1117 => Classified::new("malware.action_taken", format!("Defender action on: {}", ed("Threat Name").unwrap_or_default())),
         5001 => Classified::new("defense_evasion.defender_rtp_disabled", "Defender real-time protection DISABLED".into()),
-        5007 => Classified::new("defense_evasion.defender_config_changed", "Defender configuration changed (possible exclusion added)".into()),
+        // 5007 fires on every Defender setting change, including routine
+        // platform/signature updates. Only exclusions and protection being
+        // switched off are tampering; everything else is ordinary config noise.
+        5007 => {
+            let new_val = ed("New Value").or(ed("NewValue")).unwrap_or_default();
+            let lc = new_val.to_ascii_lowercase();
+            if lc.contains("\\exclusions\\") {
+                Classified::new("defense_evasion.defender_exclusion_added", format!("Defender exclusion added: {new_val}"))
+            } else if lc.contains("disablerealtimemonitoring = 0x1")
+                || lc.contains("disableantispyware = 0x1")
+                || lc.contains("disablebehaviormonitoring = 0x1")
+                || lc.contains("disableioavprotection = 0x1")
+                || lc.contains("tamperprotection = 0x0")
+            {
+                Classified::new("defense_evasion.defender_protection_disabled", format!("Defender protection disabled: {new_val}"))
+            } else {
+                Classified::new("defender.config_changed", format!("Defender configuration changed: {new_val}"))
+            }
+        }
         1006 | 1007 => Classified::new("malware.detected", "Defender malware behaviour detected".into()),
         _ => Classified::new(&format!("defender.eid.{event_id}"), format!("Defender EventID {event_id}")),
     }

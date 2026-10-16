@@ -415,52 +415,49 @@ impl EventWriter<'_> {
         if self.buf.is_empty() {
             return Ok(());
         }
-        self.conn.execute_batch("BEGIN TRANSACTION")?;
-        {
-            let mut stmt = self.conn.prepare(
-                "INSERT INTO events
-                    (id, ts, ts_kind, artefact, action, host,
-                     user_name, user_sid, user_domain,
-                     process_name, process_path, process_pid, command_line, process_sha1, parent_name,
-                     target_path, target_value, src_ip, dst_ip, logon_type,
-                     message, evidence_id, parser, parser_version, source_ref, raw)
-                 VALUES (?,?,?,?,?,?, ?,?,?, ?,?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?)",
-            )?;
-            for ev in self.buf.drain(..) {
-                let proc = ev.process.unwrap_or_default();
-                let target = ev.target.unwrap_or_default();
-                let net = ev.network.unwrap_or_default();
-                stmt.execute(params![
-                    ev.id.to_string(),
-                    fmt_ts(ev.timestamp),
-                    format!("{:?}", ev.timestamp_kind),
-                    format!("{:?}", ev.artefact),
-                    ev.action,
-                    ev.host,
-                    ev.user.name,
-                    ev.user.sid,
-                    ev.user.domain,
-                    proc.name,
-                    proc.path,
-                    proc.pid,
-                    proc.command_line,
-                    proc.hash_sha1,
-                    proc.parent_name,
-                    target.path,
-                    target.value_name,
-                    net.source_ip,
-                    net.dest_ip,
-                    net.logon_type,
-                    ev.message,
-                    ev.provenance.evidence_id.to_string(),
-                    ev.provenance.parser,
-                    ev.provenance.parser_version,
-                    ev.provenance.source_ref,
-                    ev.raw.to_string(),
-                ])?;
-            }
+        // Bulk-load via DuckDB's Appender, NOT row-by-row INSERTs. DuckDB is a
+        // columnar/analytical engine: single-row `INSERT ... VALUES` is its
+        // slowest path, and a multi-million-row $MFT / $UsnJrnl load that way
+        // took many minutes (the "stuck on Ingesting…" hang). The Appender
+        // batches columnar chunks internally and is 10–100× faster for bulk
+        // loads. Column order below MUST match the `events` table DDL exactly.
+        let mut appender = self.conn.appender("events")?;
+        for ev in self.buf.drain(..) {
+            let proc = ev.process.unwrap_or_default();
+            let target = ev.target.unwrap_or_default();
+            let net = ev.network.unwrap_or_default();
+            appender.append_row(params![
+                ev.id.to_string(),
+                fmt_ts(ev.timestamp),
+                format!("{:?}", ev.timestamp_kind),
+                format!("{:?}", ev.artefact),
+                ev.action,
+                ev.host,
+                ev.user.name,
+                ev.user.sid,
+                ev.user.domain,
+                proc.name,
+                proc.path,
+                proc.pid,
+                proc.command_line,
+                proc.hash_sha1,
+                proc.parent_name,
+                target.path,
+                target.value_name,
+                net.source_ip,
+                net.dest_ip,
+                net.logon_type,
+                ev.message,
+                ev.provenance.evidence_id.to_string(),
+                ev.provenance.parser,
+                ev.provenance.parser_version,
+                ev.provenance.source_ref,
+                ev.raw.to_string(),
+            ])?;
         }
-        self.conn.execute_batch("COMMIT")?;
+        // Explicitly flush and surface any error before the appender drops —
+        // append_row can return Ok for a row that only fails at flush time.
+        appender.flush()?;
         Ok(())
     }
 }

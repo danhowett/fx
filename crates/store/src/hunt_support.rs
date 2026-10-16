@@ -33,19 +33,34 @@ impl CaseStore {
     /// flat across multi-million-row cases.
     pub fn for_each_event(
         &self,
+        needs_raw: bool,
         mut f: impl FnMut(&Event),
     ) -> Result<(), StoreError> {
-        let mut stmt = self.connection().prepare(
+        // Only SELECT (and parse) the `raw` JSON when a loaded rule actually
+        // reads a raw-backed field. On a filesystem-heavy case this skips a
+        // per-row serde_json parse over millions of rows — the dominant cost of
+        // the single-event pass when no EVTX-EventID / browser rules apply.
+        // `raw` stays column index 25 either way (a constant '' when skipped),
+        // so row_to_event's positional reads are unchanged.
+        let sql = if needs_raw {
             "SELECT id, strftime(ts, '%Y-%m-%dT%H:%M:%S') AS ts, ts_kind, artefact, action, host,
                     user_name, user_sid, user_domain,
                     process_name, process_path, process_pid, command_line, process_sha1, parent_name,
                     target_path, target_value, src_ip, dst_ip, logon_type,
                     message, evidence_id, parser, parser_version, source_ref, raw
-             FROM events",
-        )?;
+             FROM events"
+        } else {
+            "SELECT id, strftime(ts, '%Y-%m-%dT%H:%M:%S') AS ts, ts_kind, artefact, action, host,
+                    user_name, user_sid, user_domain,
+                    process_name, process_path, process_pid, command_line, process_sha1, parent_name,
+                    target_path, target_value, src_ip, dst_ip, logon_type,
+                    message, evidence_id, parser, parser_version, source_ref, '' AS raw
+             FROM events"
+        };
+        let mut stmt = self.connection().prepare(sql)?;
         let mut rows = stmt.query([])?;
         while let Some(r) = rows.next()? {
-            let ev = row_to_event(r)?;
+            let ev = row_to_event(r, needs_raw)?;
             f(&ev);
         }
         Ok(())
@@ -187,7 +202,7 @@ fn parse_ts(s: &str) -> OffsetDateTime {
 }
 
 /// Reconstruct a normalized `Event` from a full events-table row.
-fn row_to_event(r: &duckdb::Row) -> Result<Event, StoreError> {
+fn row_to_event(r: &duckdb::Row, needs_raw: bool) -> Result<Event, StoreError> {
     let artefact = parse_artefact(&r.get::<_, String>(3)?);
     let raw: String = r.get(25)?;
     Ok(Event {
@@ -230,7 +245,11 @@ fn row_to_event(r: &duckdb::Row) -> Result<Event, StoreError> {
             parser_version: r.get(23)?,
             source_ref: r.get(24)?,
         },
-        raw: serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null),
+        raw: if needs_raw {
+            serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Null
+        },
     })
 }
 
