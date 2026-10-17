@@ -1,0 +1,27 @@
+kind: event
+id: data_staging_tools
+title: Archiver / file-transfer tool executed (possible staging or exfil)
+description: >
+  Execution of dual-use archivers and transfer clients often used to stage and
+  exfiltrate data before encryption — WinRAR, 7-Zip, MEGAsync, WinSCP,
+  FileZilla, AzCopy. Common on legitimate systems, so this fires on EXECUTION
+  evidence only (not mere installation) and at medium severity: a lead to
+  correlate with the incident window and with large outbound transfers.
+severity: medium
+attack:
+  - T1560.001  # archive via utility
+  - T1048      # exfiltration over alternative protocol
+artefacts: [Prefetch, BamDam, UserAssist, Amcache, Evtx, PsHistory, RegistryGeneric]
+detection:
+  any:
+    - match:
+        field: filename
+        op: regex
+        values:
+          - "^(winrar|rar|unrar|7z|7za|7zg|7zfm|megasync|megacmd.*|winscp|filezilla|azcopy)\\.exe$"
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "\\b(rar|winrar)(\\.exe)?\\s+a\\s+.*-(hp|p)\\S*"
+          - "\\b7za?(\\.exe)?\\s+a\\s+.*-p\\S*"

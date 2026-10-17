@@ -102,7 +102,9 @@ around any event, and triage inline.
 - **Broad artefact coverage** — EVTX, `$MFT`, registry hives, Prefetch, SRUM,
   `$UsnJrnl`, scheduled tasks, browser history (Chromium / Edge / Firefox),
   LNK / jump-lists, PowerShell console history, Windows Timeline, ShellBags,
-  Recycle Bin, and USB / device, network-profile & autostart registry keys.
+  Recycle Bin, USB / device, network-profile & autostart registry keys,
+  Run-dialog (RunMRU) and outbound-RDP history, and **remote-access tool logs**
+  (AnyDesk, TeamViewer, ScreenConnect).
 - **Behaviour-based hunt engine** — single-event (Sigma-subset) **and**
   correlation rules, all ATT&CK-mapped and embedded in the binary. Includes
   per-group rules for the top ransomware crews (Qilin, Akira, Play/DragonForce,
@@ -111,6 +113,9 @@ around any event, and triage inline.
   **millions of events**; correlation runs in seconds, not minutes.
 - **Triage & pivot** — tag events, filter by category / artefact / flagged,
   full-text search, pivot the timeline around any event or day.
+- **IOC sweep** — paste or load an indicator list (hashes, IPs, domains, URLs,
+  paths, defanged or not) and hunt the whole case for it, post-processing, in
+  one pass. Every match becomes a triageable, exportable finding.
 - **Per-day activity graph** — surface untagged volume spikes no rule flagged.
 - **Export** — CSV / STIX, plus a self-contained interactive **HTML / PDF case
   report** with a chain-of-custody evidence table.

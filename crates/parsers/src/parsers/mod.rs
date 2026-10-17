@@ -10,6 +10,7 @@ pub mod prefetch;
 pub mod pshistory;
 pub mod windows_timeline;
 pub mod recyclebin;
+pub mod remote_access;
 pub mod registry;
 pub mod scheduled_task;
 pub mod srum;

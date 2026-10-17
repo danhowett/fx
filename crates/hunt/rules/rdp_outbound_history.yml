@@ -1,0 +1,17 @@
+kind: event
+id: rdp_outbound_history
+title: Outbound RDP history from this host
+description: >
+  Hosts this user connected OUT to with the Windows RDP client (Terminal
+  Server Client MRU / Servers keys). Routine for administrators; in an
+  intrusion it maps lateral movement from this machine. Low severity — a lead
+  for scoping, not an alert.
+severity: low
+attack:
+  - T1021.001
+detection:
+  any:
+    - match:
+        field: action
+        op: equals
+        values: [lateral_movement.rdp_outbound]

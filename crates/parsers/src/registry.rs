@@ -47,6 +47,7 @@ impl ParserRegistry {
         r.register(Arc::new(crate::parsers::recyclebin::RecycleBinParser::default()));
         r.register(Arc::new(crate::parsers::pshistory::PsHistoryParser::default()));
         r.register(Arc::new(crate::parsers::windows_timeline::WindowsTimelineParser::default()));
+        r.register(Arc::new(crate::parsers::remote_access::RemoteAccessParser::default()));
         // Disk-artefact parser breadth complete.
         r
     }

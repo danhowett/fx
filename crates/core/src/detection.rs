@@ -67,4 +67,6 @@ pub enum DetectionEngine {
     SingleEvent,
     /// Emerged from correlating/aggregating multiple events.
     Correlation,
+    /// A match from an analyst-supplied IOC list (post-processing sweep).
+    Ioc,
 }

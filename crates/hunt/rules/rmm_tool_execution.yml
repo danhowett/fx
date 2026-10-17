@@ -1,0 +1,22 @@
+kind: event
+id: rmm_tool_execution
+title: Remote-access / RMM or tunnelling tool executed
+description: >
+  Execution of commercial remote-access (RMM) tools and tunnelling utilities —
+  AnyDesk, TeamViewer, ScreenConnect, Splashtop, RustDesk, Atera, NetSupport,
+  MeshAgent, Remote Utilities, VNC variants, ngrok, cloudflared, chisel.
+  Ransomware affiliates install these for persistent hands-on access, but many
+  are also legitimate IT tools: medium severity, corroborate against the
+  remote-access session logs and the organisation's sanctioned tooling.
+severity: medium
+attack:
+  - T1219      # remote access software
+  - T1572      # protocol tunnelling
+artefacts: [Prefetch, BamDam, UserAssist, Amcache, Evtx, RegistryService, ScheduledTask]
+detection:
+  any:
+    - match:
+        field: filename
+        op: regex
+        values:
+          - "^(anydesk|teamviewer.*|tv_(w32|x64)|screenconnect\\..*|connectwisecontrol\\..*|splashtop.*|srservice|strwinclt|rustdesk|atera.*|agentpackage.*|client32|meshagent|rutserv|rfusclient|simplehelp.*|tvnserver|winvnc|ammyy.*|aa_v3|supremo.*|zaservice|level|ngrok|cloudflared|chisel)\\.exe$"

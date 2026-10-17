@@ -86,9 +86,9 @@ struct ReportData {
 #[derive(Serialize)]
 struct MetaJson { case_id: String, name: String, examiner: String, created_utc: String, timezone: String, verdict: String, verdict_level: String }
 #[derive(Serialize)]
-struct CountsJson { total_findings: usize, critical: u32, high: u32, medium: u32, low: u32, info: u32, events: u64, evidence_items: usize, unclassified: u64 }
+struct CountsJson { total_findings: usize, critical: u32, high: u32, medium: u32, low: u32, info: u32, events: u64, evidence_items: usize, unclassified: u64, validated: u32, unconfirmed: u32, false_positive: u32, dismissed: u32, excluded: u32 }
 #[derive(Serialize)]
-struct FindingJson { rule_id: String, title: String, severity: String, sev_rank: u8, tactic: String, techniques: Vec<TechJson>, summary: String, ts: String, host: String, engine: String }
+struct FindingJson { rule_id: String, title: String, severity: String, sev_rank: u8, tactic: String, techniques: Vec<TechJson>, summary: String, ts: String, host: String, engine: String, triage: String, note: String }
 #[derive(Serialize)]
 struct TechJson { id: String, name: String }
 #[derive(Serialize)]
@@ -109,13 +109,91 @@ pub fn generate_report(store: &CaseStore) -> Result<String, StoreError> {
     let unclassified = store.unclassified_count()?;
     let attack_raw = store.attack_coverage()?;
 
+    // Analyst triage: each finding carries the state of the first of its events
+    // that was triaged (untriaged = "unconfirmed", as in the app and exports).
+    let triage: std::collections::HashMap<String, (String, String)> = store
+        .triage_map()?
+        .into_iter()
+        .map(|(id, st, note)| (id, (st, note.unwrap_or_default())))
+        .collect();
+    let tri_for = |ids: &str| -> (String, String) {
+        ids.split(',')
+            .map(str::trim)
+            .find_map(|id| triage.get(id).cloned())
+            .unwrap_or_else(|| ("unconfirmed".into(), String::new()))
+    };
+
+    let mut findings: Vec<FindingJson> = detections.iter().map(|d| {
+        let techs: Vec<TechJson> = d.attack.split(',').filter(|s| !s.trim().is_empty()).map(|t| {
+            let (_, name) = technique_info(t.trim());
+            TechJson { id: t.trim().to_string(), name: name.to_string() }
+        }).collect();
+        let tactic = if d.engine == "ioc" { "IOC matches".to_string() }
+            else { techs.first().map(|t| technique_info(&t.id).0.to_string()).unwrap_or_else(|| "Other".to_string()) };
+        let (triage, note) = tri_for(&d.event_ids);
+        FindingJson {
+            rule_id: d.rule_id.clone(), title: d.title.clone(), severity: d.severity.clone(),
+            sev_rank: severity_rank(&d.severity), tactic, techniques: techs,
+            summary: d.summary.clone(), ts: d.ts.clone(),
+            host: d.host.clone().unwrap_or_else(|| "—".into()), engine: d.engine.clone(),
+            triage, note,
+        }
+    }).collect();
+
+    // Events the analyst tagged by hand that no rule fired on — the same
+    // "manual findings" the CSV / STIX exports carry.
+    let covered: std::collections::HashSet<String> = detections
+        .iter()
+        .flat_map(|d| d.event_ids.split(',').map(|s| s.trim().to_string()))
+        .collect();
+    for t in store.triaged_events()? {
+        if covered.contains(&t.event_id) {
+            continue;
+        }
+        let severity = match t.state.as_str() {
+            "validated" => "high",
+            "false_positive" | "dismissed" => "info",
+            _ => "medium",
+        };
+        let first = t.message.lines().next().unwrap_or("").trim();
+        let title: String = first.chars().take(90).collect();
+        findings.push(FindingJson {
+            rule_id: "manual-triage".into(),
+            title: format!("Analyst finding: {title}"),
+            severity: severity.into(),
+            sev_rank: severity_rank(severity),
+            tactic: "Analyst findings".into(),
+            techniques: Vec::new(),
+            summary: format!("{} · {} · {}", t.artefact, t.action, t.message),
+            ts: t.ts.replace('T', " "),
+            host: t.host.unwrap_or_else(|| "—".into()),
+            engine: "analyst".into(),
+            triage: t.state,
+            note: t.note.unwrap_or_default(),
+        });
+    }
+
+    // Severity counts and the verdict ignore findings the analyst marked false
+    // positive or dismissed — a reviewed-benign critical must not drive the
+    // headline. They stay in the report (filterable) for transparency.
     let mut counts = CountsJson {
-        total_findings: detections.len(),
+        total_findings: findings.len(),
         critical: 0, high: 0, medium: 0, low: 0, info: 0,
         events: total_events, evidence_items: evidence.len(), unclassified,
+        validated: 0, unconfirmed: 0, false_positive: 0, dismissed: 0, excluded: 0,
     };
-    for d in &detections {
-        match d.severity.as_str() {
+    for f in &findings {
+        match f.triage.as_str() {
+            "validated" => counts.validated += 1,
+            "false_positive" => counts.false_positive += 1,
+            "dismissed" => counts.dismissed += 1,
+            _ => counts.unconfirmed += 1,
+        }
+        if f.triage == "false_positive" || f.triage == "dismissed" {
+            counts.excluded += 1;
+            continue;
+        }
+        match f.severity.as_str() {
             "critical" => counts.critical += 1,
             "high" => counts.high += 1,
             "medium" => counts.medium += 1,
@@ -123,30 +201,19 @@ pub fn generate_report(store: &CaseStore) -> Result<String, StoreError> {
             _ => counts.info += 1,
         }
     }
+    let active = findings.len() as u32 - counts.excluded;
 
     let (verdict, verdict_level) = if counts.critical > 0 {
         ("This case contains CRITICAL findings consistent with a completed or in-progress ransomware / eCrime intrusion. Immediate containment and escalation are warranted.", "danger")
     } else if counts.high > 0 {
         ("This case contains HIGH-severity findings indicating likely malicious activity. Prompt investigation is warranted.", "warn")
-    } else if !detections.is_empty() {
+    } else if active > 0 {
         ("This case contains findings that merit analyst review. No critical activity was automatically detected.", "info")
+    } else if !findings.is_empty() {
+        ("All findings in this case were reviewed and marked false positive or dismissed by the analyst. This is not proof of a clean host — coverage is limited to the artefacts and rules available.", "info")
     } else {
         ("No automated detections fired against the ingested evidence. This is not proof of a clean host — coverage is limited to the artefacts and rules available.", "info")
     };
-
-    let findings: Vec<FindingJson> = detections.iter().map(|d| {
-        let techs: Vec<TechJson> = d.attack.split(',').filter(|s| !s.trim().is_empty()).map(|t| {
-            let (_, name) = technique_info(t.trim());
-            TechJson { id: t.trim().to_string(), name: name.to_string() }
-        }).collect();
-        let tactic = techs.first().map(|t| technique_info(&t.id).0.to_string()).unwrap_or_else(|| "Other".to_string());
-        FindingJson {
-            rule_id: d.rule_id.clone(), title: d.title.clone(), severity: d.severity.clone(),
-            sev_rank: severity_rank(&d.severity), tactic, techniques: techs,
-            summary: d.summary.clone(), ts: d.ts.clone(),
-            host: d.host.clone().unwrap_or_else(|| "—".into()), engine: d.engine.clone(),
-        }
-    }).collect();
 
     let attack: Vec<AttackJson> = attack_raw.iter().map(|(id, count)| {
         let (tactic, name) = technique_info(id);
@@ -170,7 +237,7 @@ pub fn generate_report(store: &CaseStore) -> Result<String, StoreError> {
             sha256: e.sha256.clone(), size: human_bytes(e.size_bytes),
             id_method: e.id_method.clone(), confidence: (e.id_confidence * 100.0) as u32,
         }).collect(),
-        tactic_order: TACTIC_ORDER.iter().map(|s| s.to_string()).collect(),
+        tactic_order: TACTIC_ORDER.iter().map(|s| s.to_string()).chain(["IOC matches".to_string(), "Analyst findings".to_string()]).collect(),
         generated_utc: now_utc(),
     };
 
@@ -197,20 +264,25 @@ fn now_utc() -> String {
 /// Build the self-contained interactive HTML report, injecting the case JSON.
 fn build_html(json: &str) -> String {
     let safe = json.replace("</", "<\\/");
-    TEMPLATE.replace("/*__CASE_DATA__*/", &safe)
+    TEMPLATE
+        .replace("/*__REPORT_FONTS__*/", REPORT_FONTS)
+        .replace("/*__CASE_DATA__*/", &safe)
 }
+
+/// Embedded Noto Sans / Noto Sans Mono (latin) @font-face rules, base64 woff2.
+static REPORT_FONTS: &str = include_str!("../assets/report-fonts.css");
 
 static TEMPLATE: &str = r##"<!DOCTYPE html><html lang="en" data-theme="midnight"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>fx case report</title>
-<style>
+<style>/*__REPORT_FONTS__*/
 :root, html[data-theme="midnight"] {
   --bg:#0d1524; --elev:#151f34; --deep:#243450; --fg:#eef2f8; --dim:#aebdd2; --faint:#7787a0;
   --rule:#2a3a5a; --rule2:#42557d; --accent:#4a9eff; --field:#0f1a2e;
   --crit-bg:#421826; --crit:#ff7d8d; --high-bg:#3d2d10; --high:#f8bd52;
   --med-bg:#14304f; --med:#6fb2ff; --low-bg:#153a24; --low:#5cd98a; --info-bg:#1c2740; --info:#aebdd2;
   --grid:rgba(255,255,255,0.02); --radius:6px; --shadow:0 1px 3px rgba(0,0,0,.35),0 4px 16px rgba(0,0,0,.28);
-  --mono:'JetBrains Mono','SF Mono',Consolas,monospace; --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  --mono:'Noto Sans Mono','Cascadia Mono',Consolas,monospace; --sans:'Noto Sans','Segoe UI',system-ui,-apple-system,sans-serif;
 }
 html[data-theme="daybreak"] {
   --bg:#f7f4ec; --elev:#fbf9f3; --deep:#efe9dc; --fg:#2e3a3a; --dim:#5b6a68; --faint:#8a938c;
@@ -219,16 +291,16 @@ html[data-theme="daybreak"] {
   --med-bg:#e2ecf1; --med:#2c6a8f; --low-bg:#e4ecd9; --low:#5a7a3a; --info-bg:#eee9dd; --info:#5b6a68;
   --grid:rgba(0,0,0,0.02); --shadow:0 1px 3px rgba(70,60,40,.06),0 4px 14px rgba(70,60,40,.05);
 }
-html[data-theme="sunset"] {
-  /* Sunset — warm dusk: deep plum/indigo ground, amber & coral accents */
-  --bg:#1a1220; --elev:#241830; --deep:#38243f; --fg:#f6e9e4; --dim:#c9a9b8; --faint:#8f7286;
-  --rule:#3d2740; --rule2:#5a3a55; --accent:#ff9e64; --field:#170f1d;
-  --crit-bg:#4a1526; --crit:#ff6b8a; --high-bg:#4a2a10; --high:#ffb454;
-  --med-bg:#2f2145; --med:#c88cff; --low-bg:#153a30; --low:#5cd9a8; --info-bg:#2a1c33; --info:#c9a9b8;
-  --grid:rgba(255,190,120,0.025); --shadow:0 1px 3px rgba(0,0,0,.4),0 4px 16px rgba(20,0,10,.3);
+html[data-theme="slate"] {
+  /* Slate — mid-tone grey-blue between Daybreak and Midnight, saturated accents */
+  --bg:#2a3038; --elev:#323943; --deep:#3b434e; --fg:#eef2f6; --dim:#bcc6d1; --faint:#909ba8;
+  --rule:#4b5562; --rule2:#5b6675; --accent:#4cc2e8; --field:#262b32;
+  --crit-bg:#5a2a2a; --crit:#ff7b72; --high-bg:#4d3a1c; --high:#f2a65a;
+  --med-bg:#253a52; --med:#7cb8ff; --low-bg:#21423a; --low:#57d4b0; --info-bg:#3b434e; --info:#bcc6d1;
+  --grid:rgba(255,255,255,0.025); --shadow:0 1px 3px rgba(0,0,0,.3),0 4px 16px rgba(0,0,0,.2);
 }
 *{box-sizing:border-box;}
-html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:13.5px;line-height:1.55;-webkit-font-smoothing:antialiased;}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:13.5px;line-height:1.55;-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums;}
 body{background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);background-size:32px 32px;min-height:100vh;}
 .mono{font-family:var(--mono);}
 a{color:var(--accent);text-decoration:none;}
@@ -255,16 +327,28 @@ h1 .dot{color:var(--accent);}
 .metagrid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px 28px;}
 .metagrid .k{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);}
 .metagrid .v{font-size:12.5px;}
-/* scorecards */
-.scores{display:flex;gap:10px;flex-wrap:wrap;margin:22px 0;}
-.score{background:var(--elev);border:1px solid var(--rule);border-top-width:3px;border-radius:var(--radius);padding:12px 18px;min-width:104px;}
-.score .n{font-size:30px;font-weight:700;font-family:var(--mono);line-height:1.1;}
-.score .l{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);margin-top:2px;}
-.score.all{border-top-color:var(--accent);}
-.score.critical{border-top-color:var(--crit);} .score.critical .n{color:var(--crit);}
-.score.high{border-top-color:var(--high);} .score.high .n{color:var(--high);}
-.score.medium{border-top-color:var(--med);} .score.medium .n{color:var(--med);}
-.score.low{border-top-color:var(--low);} .score.low .n{color:var(--low);}
+/* summary: total + stacked severity bar + triage chips */
+.scores{display:grid;grid-template-columns:minmax(150px,190px) 1fr;gap:12px;margin:22px 0 10px;}
+.sum-total,.sum-sev{background:var(--elev);border:1px solid var(--rule);border-radius:var(--radius);padding:14px 18px;}
+.sum-total .n{font-size:40px;font-weight:700;font-family:var(--mono);line-height:1;}
+.sum-total .l{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin-top:6px;}
+.sum-total .x{font-size:11px;color:var(--faint);margin-top:6px;}
+.sevbar{display:flex;height:14px;border-radius:7px;overflow:hidden;background:var(--deep);margin:4px 0 12px;}
+.sevbar span{display:block;height:100%;}
+.sevbar span+span{border-left:2px solid var(--elev);}
+.sevlegend{display:flex;flex-wrap:wrap;gap:6px 22px;}
+.sevlegend .it{display:flex;align-items:baseline;gap:8px;}
+.sevlegend .sw{width:10px;height:10px;border-radius:3px;align-self:center;}
+.sevlegend .n{font-family:var(--mono);font-size:22px;font-weight:700;line-height:1;}
+.sevlegend .l{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);}
+.sevlegend .it.zero{opacity:.38;}
+.sevlegend .it.zero .n{font-weight:500;}
+.trirow{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px;}
+.trichip{display:flex;align-items:center;gap:8px;background:var(--elev);border:1px solid var(--rule);border-radius:20px;padding:5px 12px 5px 10px;font-size:12px;color:var(--dim);}
+.trichip .d{width:8px;height:8px;border-radius:50%;}
+.trichip b{font-family:var(--mono);color:var(--fg);font-size:13px;}
+.trichip.zero{opacity:.45;}
+@media (max-width:640px){.scores{grid-template-columns:1fr;}}
 /* verdict */
 .verdict{border-radius:var(--radius);padding:14px 18px;margin:0 0 22px;border-left:4px solid;}
 .verdict.danger{background:var(--crit-bg);border-color:var(--crit);}
@@ -308,6 +392,27 @@ h1 .dot{color:var(--accent);}
 .kv-row .v{font-family:var(--mono);word-break:break-all;}
 .caret{color:var(--faint);transition:transform .15s;}
 .finding.open .caret{transform:rotate(90deg);}
+.f-count{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--fg);background:var(--deep);border:1px solid var(--rule);border-radius:20px;padding:1px 8px;white-space:nowrap;}
+.f-trisum{font-size:11px;color:var(--faint);white-space:nowrap;}
+.inst{width:100%;border-collapse:collapse;margin:10px 0 2px;font-size:12px;}
+.inst th{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);text-align:left;padding:6px 8px;border-bottom:1px solid var(--rule);font-weight:600;}
+.inst td{padding:7px 8px;border-bottom:1px solid var(--rule);vertical-align:top;}
+.inst td.when,.inst td.host{font-family:var(--mono);font-size:11.5px;white-space:nowrap;}
+.inst td.sum{word-break:break-word;}
+.inst td.sum .note{display:block;margin-top:3px;color:var(--dim);font-style:italic;}
+.inst tr.muted td{opacity:.6;}
+.inst tr.hl td{background:var(--deep);}
+.navgrp{display:flex;align-items:flex-start;gap:8px;padding:5px 16px;cursor:pointer;font-size:12.5px;color:var(--dim);line-height:1.35;}
+.navgrp:hover{background:var(--deep);color:var(--fg);}
+.navgrp .sev-dot{width:7px;height:7px;border-radius:2px;flex:none;margin-top:5px;}
+.navgrp .t{flex:1;}
+.navgrp .c{font-family:var(--mono);font-size:10.5px;color:var(--fg);background:var(--deep);border:1px solid var(--rule);border-radius:10px;padding:0 6px;margin-top:1px;}
+.navgrp .tg{color:var(--faint);font-size:10px;width:12px;flex:none;margin-top:3px;transition:transform .15s;}
+.navgrp.open .tg{transform:rotate(90deg);}
+.navsub{display:none;margin:0 0 4px 0;}
+.navgrp.open + .navsub{display:block;}
+.navinst{padding:3px 16px 3px 43px;font-size:11px;font-family:var(--mono);color:var(--faint);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.navinst:hover{color:var(--fg);background:var(--deep);}
 /* attack matrix */
 .attgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;}
 .attcell{background:var(--elev);border:1px solid var(--rule);border-radius:var(--radius);padding:10px 12px;}
@@ -322,6 +427,17 @@ table{width:100%;border-collapse:collapse;}
 th,td{padding:5px 8px;border-bottom:1px solid var(--rule);text-align:left;}
 th{font-size:10px;text-transform:uppercase;letter-spacing:.03em;color:var(--faint);}
 td.r,th.r{text-align:right;} .small{font-size:11px;} .hash{color:var(--faint);word-break:break-all;}
+.nowrap{white-space:nowrap;}
+#tbl-ev td{vertical-align:top;}
+.src-path{word-break:break-all;color:var(--fg);}
+.src-hash{font-size:11px;color:var(--dim);margin-top:4px;letter-spacing:.01em;user-select:all;cursor:text;overflow-wrap:anywhere;}
+.src-hash-lbl{font-family:var(--sans);font-size:9.5px;font-weight:700;letter-spacing:.08em;color:var(--faint);margin-right:7px;user-select:none;}
+.tri{margin-left:4px;font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;letter-spacing:.02em;white-space:nowrap;border:1px solid var(--rule);color:var(--dim);}
+.tri-validated{background:#2e9e5b22;border-color:#2e9e5b;color:#2e9e5b;}
+.tri-unconfirmed{background:#c99a2e1f;border-color:#c99a2e;color:#c99a2e;}
+.tri-false_positive,.tri-dismissed{color:var(--faint);}
+.finding.muted{opacity:.62;}
+@media print{.finding.muted{opacity:1;}}
 footer{margin-top:36px;padding-top:20px;border-top:1px solid var(--rule);color:var(--faint);font-size:12px;}
 .muted{color:var(--faint);}
 .empty{color:var(--faint);padding:20px;text-align:center;}
@@ -347,6 +463,7 @@ footer{margin-top:36px;padding-top:20px;border-top:1px solid var(--rule);color:v
       <div class="metagrid" id="metagrid"></div>
     </header>
     <div class="scores" id="scores"></div>
+    <div class="trirow" id="trirow"></div>
     <div class="verdict" id="verdict"></div>
     <div class="panel"><h2>Timeline</h2><div class="tl" id="tl"></div><div class="tl-axis" id="tl-axis"></div></div>
     <div class="verdict info" style="border-left-color:var(--accent)">
@@ -362,6 +479,7 @@ footer{margin-top:36px;padding-top:20px;border-top:1px solid var(--rule);color:v
         <select id="fsev"><option value="">All severities</option><option>critical</option><option>high</option><option>medium</option><option>low</option><option>info</option></select>
         <select id="ftac"><option value="">All tactics</option></select>
         <select id="fhost"><option value="">All hosts</option></select>
+        <select id="ftri"><option value="">All triage states</option><option value="validated">Validated</option><option value="unconfirmed">Unconfirmed</option><option value="false_positive">False positive</option><option value="dismissed">Dismissed</option><option value="active">Exclude false positive / dismissed</option></select>
       </div>
       <div id="findings"></div>
     </div>
@@ -374,7 +492,7 @@ footer{margin-top:36px;padding-top:20px;border-top:1px solid var(--rule);color:v
       </div>
       <h2 class="sec">Evidence — chain of custody</h2>
       <p class="muted">Every finding traces to one of these source files. SHA-256 recorded at ingest.</p>
-      <table id="tbl-ev"><thead><tr><th>Source</th><th>Artefact</th><th class="r">Size</th><th>SHA-256</th><th>Ident.</th></tr></thead><tbody></tbody></table>
+      <table id="tbl-ev"><thead><tr><th>Source &amp; SHA-256</th><th>Artefact</th><th class="r">Size</th><th>Ident.</th></tr></thead><tbody></tbody></table>
     </div>
     <footer>
       <p><strong>Scope &amp; limitations.</strong> This report reflects automated analysis of the artefacts ingested into this case using the rule set active at generation time. Findings are investigative leads to be corroborated by an analyst. Timestamps are UTC unless noted.</p>
@@ -395,24 +513,58 @@ document.getElementById('metagrid').innerHTML = [
   ['Created', D.meta.created_utc],['Report generated', D.generated_utc],['Events analysed', D.counts.events.toLocaleString()],
 ].map(([k,v])=>`<div><div class="k">${esc(k)}</div><div class="v mono">${esc(v)}</div></div>`).join('');
 
-// scorecards
-const sc = D.counts;
-document.getElementById('scores').innerHTML = [
-  ['all','All',sc.total_findings],['critical','Critical',sc.critical],['high','High',sc.high],
-  ['medium','Medium',sc.medium],['low','Low',sc.low],['info','Info',sc.info],
-].map(([c,l,n])=>`<div class="score ${c}"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
+// summary panel: total, stacked severity bar, triage chips. Severity counts
+// exclude false positive / dismissed (server-side), as does the verdict.
+(function(){
+  const sc = D.counts;
+  const sev = [['critical','Critical',sc.critical,'var(--crit)'],['high','High',sc.high,'var(--high)'],
+               ['medium','Medium',sc.medium,'var(--med)'],['low','Low',sc.low,'var(--low)'],['info','Info',sc.info,'var(--info)']];
+  const active = sev.reduce((t,x)=>t+x[2],0);
+  const bar = active ? sev.filter(x=>x[2]).map(([k,l,n,c])=>`<span style="width:${(n/active*100).toFixed(2)}%;background:${c}" title="${n} ${l}"></span>`).join('') : '';
+  const legend = sev.map(([k,l,n,c])=>`<div class="it ${n?'':'zero'}"><span class="sw" style="background:${c}"></span><span class="n" style="color:${n?c:'var(--faint)'}">${n}</span><span class="l">${l}</span></div>`).join('');
+  const groups = new Set(D.findings.map(f=>f.rule_id==='manual-triage'?'m:'+f.title:f.rule_id)).size;
+  document.getElementById('scores').innerHTML =
+    `<div class="sum-total"><div class="n">${sc.total_findings}</div><div class="l">Findings</div>
+       <div class="x">${groups} distinct rule${groups===1?'':'s'}${sc.excluded?` · ${sc.excluded} excluded (FP / dismissed)`:''}</div></div>
+     <div class="sum-sev"><div class="sevbar">${bar}</div><div class="sevlegend">${legend}</div></div>`;
+  const tri = [['Validated',sc.validated,'#2e9e5b'],['Unconfirmed',sc.unconfirmed,'#c99a2e'],['False positive',sc.false_positive,'#7a8699'],['Dismissed',sc.dismissed,'#55607a']];
+  document.getElementById('trirow').innerHTML = tri.map(([l,n,c])=>`<div class="trichip ${n?'':'zero'}"><span class="d" style="background:${c}"></span><b>${n}</b>${l}</div>`).join('');
+})();
 
 // verdict
 const v=document.getElementById('verdict'); v.className='verdict '+D.meta.verdict_level; v.innerHTML=esc(D.meta.verdict);
 
-// nav rail: tactics -> findings
+// Findings are grouped by rule (manual analyst findings by their title) so
+// repeated hits read as one entry with a count. Groups are built once from all
+// findings; filters then apply to the instances inside each group.
+const gkey = f => f.rule_id==='manual-triage' ? 'm:'+f.title : f.rule_id;
+// Severity -> CSS colour variable (the report's vars are --crit / --med, not --critical / --medium).
+const SEVVAR = {critical:'var(--crit)',high:'var(--high)',medium:'var(--med)',low:'var(--low)',info:'var(--info)',informational:'var(--info)'};
+const GROUPS = []; const GBYKEY = {};
+D.findings.forEach(f=>{ const k=gkey(f); let g=GBYKEY[k];
+  if(!g){ g=GBYKEY[k]={id:'g'+GROUPS.length,key:k,title:f.title,rule_id:f.rule_id,tactic:f.tactic,techniques:f.techniques,engine:f.engine,items:[]}; GROUPS.push(g); }
+  g.items.push(f); });
+GROUPS.forEach(g=>{
+  g.items.sort((a,b)=>(a.ts<b.ts?-1:a.ts>b.ts?1:0));
+  g.sev_rank=Math.max(...g.items.map(f=>f.sev_rank));
+  g.severity=g.items.find(f=>f.sev_rank===g.sev_rank).severity;
+});
+const triSummary = items => { const c={}; items.forEach(f=>c[f.triage]=(c[f.triage]||0)+1);
+  return ['validated','unconfirmed','false_positive','dismissed'].filter(k=>c[k]).map(k=>c[k]+' '+(TRI_LABEL[k]||k).toLowerCase()).join(' · '); };
+
+// nav rail: tactics -> rule groups (count + dropdown of hits)
 (function(){
-  const byT={}; D.findings.forEach(f=>{(byT[f.tactic]=byT[f.tactic]||[]).push(f);});
+  const byT={}; GROUPS.forEach(g=>{(byT[g.tactic]=byT[g.tactic]||[]).push(g);});
   let h='<h3>Findings by tactic</h3>';
   D.tactic_order.forEach(t=>{ if(!byT[t]) return;
-    h+=`<div class="navitem tactic">${esc(t)} <span class="cnt">${byT[t].length}</span></div>`;
-    byT[t].sort((a,b)=>b.sev_rank-a.sev_rank).forEach(f=>{
-      h+=`<div class="navitem" data-jump="${esc(f.rule_id)}"><span class="sev-dot ${f.severity}" style="background:var(--${f.severity})"></span>${esc(f.title)}</div>`;
+    const n=byT[t].reduce((s,g)=>s+g.items.length,0);
+    h+=`<div class="navitem tactic">${esc(t)} <span class="cnt">${n}</span></div>`;
+    byT[t].sort((a,b)=>b.sev_rank-a.sev_rank||b.items.length-a.items.length).forEach(g=>{
+      const multi=g.items.length>1;
+      h+=`<div class="navgrp" data-jump="${g.id}"><span class="tg"${multi?' data-toggle="1"':''}>${multi?'▸':''}</span>`+
+         `<span class="sev-dot" style="background:${SEVVAR[g.severity]||'var(--info)'}"></span><span class="t">${esc(g.title)}</span>`+
+         (multi?`<span class="c">${g.items.length}</span>`:'')+`</div>`;
+      if(multi) h+=`<div class="navsub">`+g.items.map((f,i)=>`<div class="navinst" data-jump="${g.id}" data-inst="${i}" title="${esc(f.summary)}">${esc(f.ts||'—')} · ${esc(f.host)}</div>`).join('')+`</div>`;
     });
   });
   document.getElementById('nav').innerHTML=h;
@@ -427,7 +579,7 @@ const v=document.getElementById('verdict'); v.className='verdict '+D.meta.verdic
   const lanes={critical:18,high:34,medium:50,low:66,info:82};
   tl.innerHTML=timed.map(({f,t})=>{
     const x=((t-min)/span)*96+2, y=lanes[f.severity]||82;
-    return `<div class="dot ${f.severity}" style="left:${x}%;top:${y}%" title="${esc(f.ts)} — ${esc(f.title)}" data-jump="${esc(f.rule_id)}"></div>`;
+    return `<div class="dot ${f.severity}" style="left:${x}%;top:${y}%" title="${esc(f.ts)} — ${esc(f.title)}" data-jump="${GBYKEY[gkey(f)].id}" data-inst="${GBYKEY[gkey(f)].items.indexOf(f)}"></div>`;
   }).join('');
   const fmt=ms=>new Date(ms).toISOString().replace('T',' ').slice(0,19);
   document.getElementById('tl-axis').innerHTML=`<span>${fmt(min)}</span><span>${fmt(max)}</span>`;
@@ -439,7 +591,7 @@ document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   document.querySelectorAll('.tabpanel').forEach(x=>x.classList.remove('active'));
   t.classList.add('active'); document.getElementById('panel-'+t.dataset.tab).classList.add('active');
 });
-document.getElementById('tc-f').textContent=D.findings.length;
+document.getElementById('tc-f').textContent=D.findings.length;  // updated below once groups exist
 document.getElementById('tc-a').textContent=D.attack.length;
 
 // filters
@@ -448,35 +600,58 @@ document.getElementById('fhost').innerHTML='<option value="">All hosts</option>'
 const tacs=D.tactic_order.filter(t=>D.findings.some(f=>f.tactic===t));
 document.getElementById('ftac').innerHTML='<option value="">All tactics</option>'+tacs.map(t=>`<option>${esc(t)}</option>`).join('');
 
+const TRI_LABEL={validated:'Validated',unconfirmed:'Unconfirmed',false_positive:'False positive',dismissed:'Dismissed'};
 function renderFindings(){
   const q=document.getElementById('q').value.toLowerCase();
-  const fs=document.getElementById('fsev').value, ft=document.getElementById('ftac').value, fh=document.getElementById('fhost').value;
-  const list=D.findings.filter(f=>{
+  const fs=document.getElementById('fsev').value, ft=document.getElementById('ftac').value, fh=document.getElementById('fhost').value, fr=document.getElementById('ftri').value;
+  const keep=f=>{
     if(fs&&f.severity!==fs)return false; if(ft&&f.tactic!==ft)return false; if(fh&&f.host!==fh)return false;
-    if(q){ const hay=(f.title+' '+f.summary+' '+f.host+' '+f.techniques.map(t=>t.id+' '+t.name).join(' ')).toLowerCase(); if(!hay.includes(q))return false; }
+    if(fr==='active'){ if(f.triage==='false_positive'||f.triage==='dismissed')return false; } else if(fr&&f.triage!==fr)return false;
+    if(q){ const hay=(f.title+' '+f.summary+' '+f.host+' '+f.note+' '+f.techniques.map(t=>t.id+' '+t.name).join(' ')).toLowerCase(); if(!hay.includes(q))return false; }
     return true;
-  }).sort((a,b)=>b.sev_rank-a.sev_rank || (a.ts<b.ts?-1:1));
+  };
+  const shown=GROUPS.map(g=>({g,items:g.items.filter(keep)})).filter(x=>x.items.length)
+    .sort((a,b)=>b.g.sev_rank-a.g.sev_rank||b.items.length-a.items.length);
   const el=document.getElementById('findings');
-  if(!list.length){ el.innerHTML='<div class="empty">No findings match the current filter.</div>'; return; }
-  el.innerHTML=list.map(f=>{
-    const atts=f.techniques.map(t=>`<span class="att" title="${esc(t.name)}">${esc(t.id)}</span>`).join('');
-    return `<div class="finding ${f.severity}" id="f-${esc(f.rule_id)}">
-      <div class="f-head" onclick="this.parentNode.classList.toggle('open')">
-        <span class="caret">▸</span><span class="pill ${f.severity}">${f.severity}</span>
-        <span class="f-title">${esc(f.title)}</span>
-        <span class="f-att"><span class="f-tactic">${esc(f.tactic)}</span>${atts}</span>
-      </div>
-      <div class="f-body">
-        <div class="f-summary">${esc(f.summary)}</div>
+  if(!shown.length){ el.innerHTML='<div class="empty">No findings match the current filter.</div>'; return; }
+  el.innerHTML=shown.map(({g,items})=>{
+    const atts=g.techniques.map(t=>`<span class="att" title="${esc(t.name)}">${esc(t.id)}</span>`).join('');
+    const allMuted=items.every(f=>f.triage==='false_positive'||f.triage==='dismissed');
+    const count = g.items.length>1 ? `<span class="f-count">×${items.length}${items.length<g.items.length?` of ${g.items.length}`:''}</span>` : '';
+    const one = items.length===1 && g.items.length===1;
+    const triHead = one ? `<span class="tri tri-${esc(items[0].triage)}">${esc(TRI_LABEL[items[0].triage]||items[0].triage)}</span>`
+                        : `<span class="f-trisum">${esc(triSummary(items))}</span>`;
+    let body;
+    if(one){
+      const f=items[0];
+      body=`<div class="f-summary">${esc(f.summary)}</div>
         <div class="kv-row"><span class="k">Rule</span><span class="v">${esc(f.rule_id)}</span></div>
         <div class="kv-row"><span class="k">When</span><span class="v">${esc(f.ts)}</span></div>
         <div class="kv-row"><span class="k">Host</span><span class="v">${esc(f.host)}</span></div>
         <div class="kv-row"><span class="k">Engine</span><span class="v">${esc(f.engine)}</span></div>
-        <div class="kv-row"><span class="k">ATT&CK</span><span class="v">${f.techniques.map(t=>esc(t.id)+' ('+esc(t.name)+')').join(', ')||'—'}</span></div>
-      </div></div>`;
+        <div class="kv-row"><span class="k">Triage</span><span class="v">${esc(TRI_LABEL[f.triage]||f.triage)}</span></div>
+        ${f.note?`<div class="kv-row"><span class="k">Analyst note</span><span class="v">${esc(f.note)}</span></div>`:''}
+        <div class="kv-row"><span class="k">ATT&CK</span><span class="v">${f.techniques.map(t=>esc(t.id)+' ('+esc(t.name)+')').join(', ')||'—'}</span></div>`;
+    } else {
+      body=`<div class="kv-row" style="margin-top:10px"><span class="k">Rule</span><span class="v">${esc(g.rule_id)}</span></div>
+        <div class="kv-row"><span class="k">ATT&CK</span><span class="v">${g.techniques.map(t=>esc(t.id)+' ('+esc(t.name)+')').join(', ')||'—'}</span></div>
+        <table class="inst"><thead><tr><th>When</th><th>Host</th><th>Detail</th><th>Triage</th></tr></thead><tbody>`+
+        items.map(f=>{ const i=g.items.indexOf(f); const m=(f.triage==='false_positive'||f.triage==='dismissed')?' muted':'';
+          return `<tr class="${m}" id="${g.id}-i${i}"><td class="when">${esc(f.ts||'—')}</td><td class="host">${esc(f.host)}</td>`+
+                 `<td class="sum">${esc(f.summary)}${f.note?`<span class="note">Note: ${esc(f.note)}</span>`:''}</td>`+
+                 `<td><span class="tri tri-${esc(f.triage)}">${esc(TRI_LABEL[f.triage]||f.triage)}</span></td></tr>`; }).join('')+
+        `</tbody></table>`;
+    }
+    return `<div class="finding ${g.severity}${allMuted?' muted':''}" id="${g.id}">
+      <div class="f-head" onclick="this.parentNode.classList.toggle('open')">
+        <span class="caret">▸</span><span class="pill ${g.severity}">${g.severity}</span>
+        <span class="f-title">${esc(g.title)}</span>${count}${triHead}
+        <span class="f-att"><span class="f-tactic">${esc(g.tactic)}</span>${atts}</span>
+      </div>
+      <div class="f-body">${body}</div></div>`;
   }).join('');
 }
-['q','fsev','ftac','fhost'].forEach(id=>document.getElementById(id).addEventListener('input',renderFindings));
+['q','fsev','ftac','fhost','ftri'].forEach(id=>document.getElementById(id).addEventListener('input',renderFindings));
 renderFindings();
 
 // attack matrix
@@ -487,22 +662,29 @@ document.getElementById('attgrid').innerHTML = D.attack.length ? D.attack.map(a=
 // data tables
 document.getElementById('tbl-art').innerHTML=D.artefacts.map(r=>`<tr><td>${esc(r.label)}</td><td class="r mono">${r.count.toLocaleString()}</td></tr>`).join('');
 document.getElementById('tbl-ing').innerHTML=D.ingest.map(r=>`<tr><td>${esc(r.label)}</td><td class="r mono">${r.count}</td></tr>`).join('')+`<tr><td>unclassified files</td><td class="r mono">${D.counts.unclassified}</td></tr>`;
-document.querySelector('#tbl-ev tbody').innerHTML=D.evidence.map(e=>`<tr><td class="mono small">${esc(e.source_path)}</td><td>${esc(e.artefact)}</td><td class="r mono small">${esc(e.size)}</td><td class="mono small hash">${esc(e.sha256)}</td><td class="small">${esc(e.id_method)} (${e.confidence}%)</td></tr>`).join('');
+document.querySelector('#tbl-ev tbody').innerHTML=D.evidence.map(e=>`<tr><td><div class="src-path mono small">${esc(e.source_path)}</div><div class="src-hash mono" title="SHA-256 — click to select"><span class="src-hash-lbl">SHA-256</span>${esc(e.sha256)}</div></td><td class="nowrap">${esc(e.artefact)}</td><td class="r mono small nowrap">${esc(e.size)}</td><td class="small nowrap">${esc(e.id_method)} (${e.confidence}%)</td></tr>`).join('');
 
-// jump-to-finding from nav / timeline
+// jump-to-finding from nav / timeline. The ▸ on a multi-hit nav group only
+// expands its list of hits; anywhere else jumps to the group's card (and to a
+// specific hit row when one was clicked).
 document.addEventListener('click',e=>{
+  const tg=e.target.closest('[data-toggle]');
+  if(tg){ tg.closest('.navgrp').classList.toggle('open'); return; }
   const j=e.target.closest('[data-jump]'); if(!j)return;
   document.querySelector('.tab[data-tab="findings"]').click();
-  document.getElementById('fsev').value='';document.getElementById('ftac').value='';document.getElementById('fhost').value='';document.getElementById('q').value='';
+  ['fsev','ftac','fhost','ftri','q'].forEach(id=>{const x=document.getElementById(id); if(x) x.value='';});
   renderFindings();
-  const card=document.getElementById('f-'+j.dataset.jump);
-  if(card){card.classList.add('open');card.scrollIntoView({behavior:'smooth',block:'center'});}
+  const card=document.getElementById(j.dataset.jump); if(!card) return;
+  card.classList.add('open');
+  const row = j.dataset.inst!=null ? document.getElementById(j.dataset.jump+'-i'+j.dataset.inst) : null;
+  if(row){ row.classList.add('hl'); setTimeout(()=>row.classList.remove('hl'),2200); row.scrollIntoView({behavior:'smooth',block:'center'}); }
+  else card.scrollIntoView({behavior:'smooth',block:'center'});
 });
 
 // theme toggle
-// theme switcher — cycle midnight → daybreak → sunset, label the current one
+// theme switcher — cycle midnight → daybreak → slate, label the current one
 (function(){
-  const THEMES=[['midnight','◐ Midnight'],['daybreak','☀ Daybreak'],['sunset','◑ Sunset']];
+  const THEMES=[['midnight','◐ Midnight'],['daybreak','☀ Daybreak'],['slate','◑ Slate']];
   const btn=document.getElementById('themebtn'), h=document.documentElement;
   function apply(name){
     h.dataset.theme=name;

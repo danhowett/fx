@@ -2,40 +2,42 @@ kind: event
 id: offensive_tooling
 title: Known offensive / lateral-movement tooling
 description: >
-  Presence or execution of tooling commonly used by financially-motivated
-  intruders for credential theft, lateral movement, and exfiltration —
-  mimikatz, PsExec/PSEXESVC, Cobalt Strike, rclone, and similar. Matches on
-  process, path, or target across every artefact that records execution or
-  presence (Prefetch, AmCache, EVTX, services).
+  Execution or on-disk presence of tooling used by financially-motivated
+  intruders for credential theft, lateral movement, AD reconnaissance and
+  exfiltration — mimikatz, PsExec/PSEXESVC, Rubeus, nanodump, AdFind,
+  SharpHound, rclone, network scanners, Cobalt Strike and similar. Matched on
+  the executable/file NAME across every artefact that records execution or
+  presence (Prefetch, AmCache, BAM, UserAssist, MFT, EVTX process events), and
+  on command lines. Free-text `message` matching was removed: it fired on
+  browser page titles and log prose that merely mentioned a tool.
 severity: high
 attack:
   - T1003      # credential dumping
   - T1021.002  # SMB/admin shares (PsExec)
+  - T1087.002  # AD discovery (AdFind / SharpHound)
   - T1567.002  # exfil to cloud (rclone)
 detection:
   any:
     - match:
-        field: process.path
-        op: contains
-        values: &tools
-          - "mimikatz"
-          - "psexec"
-          - "psexesvc"
-          - "cobaltstrike"
-          - "beacon.exe"
-          - "rclone"
-          - "megasync"
-          - "winrar"       # staging (context-dependent; medium-signal)
-          - "7z.exe"
-    - match:
-        field: target.path
-        op: contains
-        values: *tools
+        field: filename
+        op: regex
+        values:
+          - "^(mimikatz|mimilib|mimidrv|safetykatz|sharpkatz|pypykatz)\\.(exe|dll|sys)$"
+          - "^(psexec(64)?|psexesvc|paexec|remcom(svc)?|csexec)\\.exe$"
+          - "^(rubeus|kerbrute|certify|sharpup|seatbelt|sharpdpapi|sharpchrome|lazagne|nanodump|procdump64?|dumpert|outflank-dumpert|handlekatz|ppldump)\\.exe$"
+          - "^(adfind|sharphound|bloodhound|adrecon|pingcastle)\\.exe$"
+          - "^(netscan|netscan64|advanced_ip_scanner|advanced ip scanner|ipscan|ipscan24|angryip|masscan|nmap|softperfect.*)\\.exe$"
+          - "^(rclone|restic)\\.exe$"
+          - "^(cobaltstrike|beacon|artifact|artifact64)\\.exe$"
+          - "^(netexec|nxc|crackmapexec|cme|wmiexec|smbexec|atexec|dcomexec|secretsdump)(\\.exe|\\.py)?$"
     - match:
         field: process.command_line
-        op: contains
-        values: *tools
-    - match:
-        field: message
-        op: contains
-        values: *tools
+        op: regex
+        values:
+          - "\\b(mimikatz|sekurlsa::|lsadump::|kerberos::golden)"
+          - "\\b(psexec(64)?|paexec)(\\.exe)?\\s+\\\\\\\\"
+          - "\\b(rubeus|kerbrute|nanodump|lazagne)(\\.exe)?\\b"
+          - "\\bprocdump(64)?(\\.exe)?\\s+.*\\blsass"
+          - "\\badfind(\\.exe)?\\s+-(f|b|sc)\\b"
+          - "\\bsharphound|invoke-bloodhound"
+          - "\\brclone(\\.exe)?\\s+(copy|sync|move|config)\\b"

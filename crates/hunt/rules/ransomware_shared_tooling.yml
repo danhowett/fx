@@ -10,7 +10,9 @@ description: >
   LogMeIn / TightVNC), cloud/FTP exfil (rclone / MEGAsync / WinSCP / FileZilla /
   AZCopy), tunnels (ngrok / Cloudflare Tunnel / Chisel), and credential/offsec
   tooling (Mimikatz / LaZagne / NetExec / Impacket / Cobalt Strike). Broad by
-  design — corroborate against user/context before escalating.
+  design — corroborate against user/context before escalating. Remote-access
+  (RMM) tools and tunnels now have their own medium-severity rules
+  (rmm_tool_execution, remote_access_*), informed by the tools' own logs.
 severity: high
 attack:
   - T1219
@@ -24,14 +26,12 @@ detection:
         values:
           - "\\badfind\\b|bloodhound|sharphound|\\bgpresult\\b.*\\/z"
           - "advanced_?ip_?scanner|softperfect|netscan|masscan|angry.?ip"
-          - "anydesk|screenconnect|connectwise|teamviewer|splashtop|logmein|tightvnc|rustdesk"
           - "\\brclone\\b.*(copy|sync|move).*(mega|b2|s3|ftp|remote:)"
           - "megasync|winscp|filezilla|azcopy.*https?://"
-          - "ngrok|cloudflared|trycloudflare|chisel"
           - "mimikatz|sekurlsa|lazagne|lsadump"
           - "cobaltstrike|\\bbeacon\\b|\\bnetexec\\b|\\bnxc\\b|impacket|wmiexec|smbexec|secretsdump"
     - match:
         field: process.name
         op: regex
         values:
-          - "^(adfind|anydesk|screenconnect|teamviewer|rclone|winscp|filezilla|ngrok|mimikatz|lazagne|netexec|nxc)\\.exe$"
+          - "^(adfind|rclone|mimikatz|lazagne|netexec|nxc)\\.exe$"

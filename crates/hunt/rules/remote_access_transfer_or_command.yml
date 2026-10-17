@@ -1,0 +1,25 @@
+kind: event
+id: remote_access_transfer_or_command
+title: Files moved or commands run via remote-access tool
+description: >
+  A remote-access tool's logs show files transferred or commands executed
+  through the session — tool ingress and data egress over AnyDesk,
+  TeamViewer or ScreenConnect. High signal in an intrusion timeline.
+severity: high
+attack:
+  - T1219
+  - T1105      # ingress tool transfer
+  - T1041      # exfiltration over C2 channel
+detection:
+  any:
+    - match:
+        field: action
+        op: equals
+        values:
+          - remote_access.file_transfer
+          - remote_access.command
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "anydesk(\\.exe)?\\s+.*--(file-transfer|plain)"

@@ -101,7 +101,11 @@ impl CaseStore {
     pub fn case_meta(&self) -> Result<CaseMeta, StoreError> {
         let (name, examiner, created, tz): (String, Option<String>, String, String) =
             self.conn.query_row(
-                "SELECT name, examiner, created_utc, display_timezone FROM case_meta LIMIT 1",
+                // created_utc is a TIMESTAMP column; format it in SQL. Reading
+                // it straight into a String fails ("Invalid column type
+                // Timestamp") — this broke the HTML case report.
+                "SELECT name, examiner, strftime(created_utc, '%Y-%m-%dT%H:%M:%SZ') AS created_utc,
+                        display_timezone FROM case_meta LIMIT 1",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )?;
@@ -540,4 +544,25 @@ pub struct TriagedEvent {
     pub action: String,
     pub artefact: String,
     pub message: String,
+}
+
+#[cfg(test)]
+mod case_meta_tests {
+    use super::*;
+
+    /// Regression: case_meta() read the TIMESTAMP created_utc column as a
+    /// String and failed, breaking the HTML case report on every case.
+    #[test]
+    fn case_meta_reads_created_timestamp() {
+        let dir = std::env::temp_dir().join(format!("fx-meta-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.fxcase");
+        let store = CaseStore::create(&path, "Meta test", Some("A. Analyst"), "UTC").unwrap();
+        let meta = store.case_meta().expect("case_meta must succeed");
+        assert_eq!(meta.name, "Meta test");
+        assert_eq!(meta.examiner.as_deref(), Some("A. Analyst"));
+        assert!(meta.created_utc.ends_with('Z') && meta.created_utc.contains('T'), "got {}", meta.created_utc);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

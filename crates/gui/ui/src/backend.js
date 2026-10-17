@@ -33,15 +33,28 @@ export const backend = {
   setTriage: (event_id, triage_state, note) => call("set_triage", { eventId: event_id, triageState: triage_state, note: note || null }),
   clearTriage: (event_id) => call("clear_triage", { eventId: event_id }),
   listTriage: () => call("list_triage", {}),
-  exportFindings: (format, path) => call("export_findings", { format, path }),
+  exportFindings: (format, path, states) => call("export_findings", { format, path, states: states || null }),
+  exportCounts: () => call("export_counts", {}),
+  exportReport: (path) => call("export_report", { path }),
+  iocPreview: (text) => call("ioc_preview", { text }),
+  iocSweep: (text) => call("ioc_sweep", { text }),
+  readIocFile: (path) => call("read_ioc_file", { path }),
+  eventsByIds: (ids) => call("events_by_ids", { ids }),
+  pickIocFile: async () => {
+    if (!hasTauri) return null;
+    return window.__TAURI__.dialog.open({
+      directory: false, multiple: false, title: "Load an IOC list",
+      filters: [{ name: "IOC list", extensions: ["txt", "csv", "tsv", "ioc", "json", "log"] }, { name: "All files", extensions: ["*"] }],
+    });
+  },
   ingestLog: () => call("ingest_log", {}),
   dailyActivity: () => call("daily_activity", {}),
   pickExportFile: async (format) => {
     if (!hasTauri) return null;
-    const ext = format === "stix" ? "json" : "csv";
-    const name = format === "stix" ? "findings-stix.json" : "findings.csv";
+    const ext = format === "stix" ? "json" : format === "html" ? "html" : "csv";
+    const name = format === "stix" ? "findings-stix.json" : format === "html" ? "case-report.html" : "findings.csv";
     return window.__TAURI__.dialog.save({
-      title: "Export findings as " + format.toUpperCase(),
+      title: format === "html" ? "Save case report" : "Export findings as " + format.toUpperCase(),
       defaultPath: name,
       filters: [{ name: format.toUpperCase(), extensions: [ext] }],
     });
@@ -149,6 +162,20 @@ function sample(cmd, args) {
     return Promise.resolve(sampleDetections());
   }
   if (cmd === "export_findings") { return Promise.resolve(sampleDetections().length); }
+  if (cmd === "export_report") { return Promise.resolve(0); }
+  if (cmd === "events_by_ids") { const want = new Set(args.ids || []); return Promise.resolve(SEED.filter((e) => want.has(e.id))); }
+  if (cmd === "ioc_preview") {
+    const lines = (args.text || "").split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+    return Promise.resolve({ total: lines.length, by_kind: lines.length ? { "mixed (preview)": lines.length } : {}, skipped: 0 });
+  }
+  if (cmd === "ioc_sweep") {
+    const lines = (args.text || "").split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+    return Promise.resolve({ iocs: lines.length, matched: Math.min(2, lines.length), events_scanned: 4217, skipped: [],
+      results: lines.map((v, i) => ({ value: v, kind: "text", kind_label: "text", events: i < 2 ? 3 - i : 0,
+        first_seen: i < 2 ? "2026-02-11T02:14:00" : null, last_seen: i < 2 ? "2026-02-11T02:31:00" : null,
+        artefacts: i < 2 ? { Evtx: 2, Mft: 1 - i } : {} })) });
+  }
+  if (cmd === "export_counts") { return Promise.resolve({ validated: 1, unconfirmed: sampleDetections().length - 1, false_positive: 0, dismissed: 0 }); }
   if (cmd === "ingest_log") { return Promise.resolve([
     { source_path: "C/Windows/System32/winevt/Logs/Security.evtx", artefact_kind: "Evtx", status: "parsed", detail: null, records_read: 4217, events_emitted: 4217, warning_count: 0 },
     { source_path: "C/$MFT", artefact_kind: "Mft", status: "parsed", detail: null, records_read: 1051, events_emitted: 1051, warning_count: 3 },

@@ -19,7 +19,7 @@
 //! the structure is real even where the binary decode is Week-2-continued.
 
 use super::{key_raw, make_event, value_pairs, value_string, Ctx};
-use fx_core::{ArtefactKind, EventSink, ParseOutcome, Principal, TimestampKind};
+use fx_core::{ArtefactKind, EventSink, ParseOutcome, Principal, ProcessInfo, TimestampKind};
 use notatin::cell_key_node::CellKeyNode;
 use serde_json::json;
 use time::OffsetDateTime;
@@ -57,6 +57,8 @@ pub(crate) fn default_extractors() -> Vec<Box<dyn Extractor>> {
         Box::new(UsbDevices),
         Box::new(NetworkProfiles),
         Box::new(AutostartExtras),
+        Box::new(RunMru),
+        Box::new(RdpClientMru),
     ]
 }
 
@@ -228,24 +230,49 @@ impl Extractor for UserAssist {
     ) {
         for v in key.value_iter() {
             let vname = super::value_name(&v);
-            // Value names are ROT13-encoded paths.
+            // Value names are ROT13-encoded paths, often prefixed with a
+            // KNOWNFOLDERID GUID ({6D809377-...}\app.exe = Program Files).
             let decoded = rot13(&vname);
-            // TODO(week2-cont): decode the Count value blob for run count and
-            // the FILETIME last-run. Until then, use the key LastWrite and the
-            // decoded name — still a usable execution-evidence timeline entry.
-            sink.emit(make_event(
+            if decoded.starts_with("UEME_") {
+                continue; // session / control bookkeeping values, not programs
+            }
+            let path = expand_known_folder(&decoded);
+            let stats = decode_userassist(&super::value_bytes(&v));
+            // Prefer the decoded last-run FILETIME; many entries (focus-only,
+            // never launched via Explorer) have none, so fall back to the key
+            // LastWrite and say so in raw.
+            let (ts, time_source) = match stats.as_ref().and_then(|s| s.last_run) {
+                Some(t) => (t, "last_run"),
+                None => (lastwrite, "key_lastwrite"),
+            };
+            let runs = stats.as_ref().map(|s| s.run_count);
+            let mut ev = make_event(
                 ctx,
                 ArtefactKind::UserAssist,
-                lastwrite,
+                ts,
                 TimestampKind::Executed,
                 "execution.userassist",
                 key_path,
                 Some(&vname),
-                Some(decoded.clone()),
+                Some(path.clone()),
                 Principal::default(),
-                format!("UserAssist run: {decoded}"),
-                json!({ "key": key_path, "encoded": vname, "decoded": decoded }),
-            ));
+                match runs {
+                    Some(n) => format!("UserAssist: {path} (run {n}×)"),
+                    None => format!("UserAssist: {path}"),
+                },
+                json!({
+                    "key": key_path,
+                    "encoded": vname,
+                    "decoded": decoded,
+                    "path": path,
+                    "run_count": runs,
+                    "focus_count": stats.as_ref().and_then(|s| s.focus_count),
+                    "focus_ms": stats.as_ref().and_then(|s| s.focus_ms),
+                    "time_source": time_source,
+                }),
+            );
+            ev.process = Some(exe_process(&path));
+            sink.emit(ev);
             outcome.events_emitted += 1;
         }
     }
@@ -280,18 +307,18 @@ impl Extractor for BamDam {
 
         for v in key.value_iter() {
             let vname = super::value_name(&v);
-            // Each value name is an executable path; data holds a FILETIME.
-            // TODO(week2-cont): decode the 8-byte FILETIME from the value data
-            // for a precise exec time. Marker uses LastWrite for now.
+            // Each value name is an executable path; the first 8 bytes of the
+            // data are the last-execution FILETIME.
             if vname.eq_ignore_ascii_case("Version")
                 || vname.eq_ignore_ascii_case("SequenceNumber")
             {
                 continue;
             }
-            sink.emit(make_event(
+            let exec_time = filetime_at(&super::value_bytes(&v), 0).unwrap_or(lastwrite);
+            let mut ev = make_event(
                 ctx,
                 ArtefactKind::BamDam,
-                lastwrite,
+                exec_time,
                 TimestampKind::Executed,
                 "execution.bam",
                 key_path,
@@ -307,7 +334,9 @@ impl Extractor for BamDam {
                     sid.clone().unwrap_or_else(|| "?".into())
                 ),
                 json!({ "key": key_path, "exe": vname, "sid": sid }),
-            ));
+            );
+            ev.process = Some(exe_process(&vname));
+            sink.emit(ev);
             outcome.events_emitted += 1;
         }
     }
@@ -924,5 +953,258 @@ mod tests {
         let e = RdpConfig;
         assert!(e.matches(r"ControlSet001\Control\Terminal Server"));
         assert!(!e.matches(r"ControlSet001\Control\Terminal Server\WinStations"));
+    }
+}
+
+// ── RunMRU ──────────────────────────────────────────────────────────────────
+// NTUSER\...\Explorer\RunMRU: commands typed into Win+R. Values a, b, c ...
+// hold "command\1"; MRUList orders them most-recent-first. Hands-on-keyboard
+// evidence — attackers on an interactive session type cmd, powershell, mstsc,
+// UNC paths here. Only the most recent entry's time is known (key LastWrite);
+// older entries carry the same timestamp but are tagged with their MRU rank.
+// The command lands in process.command_line so every command-line hunt rule
+// covers it automatically.
+struct RunMru;
+impl Extractor for RunMru {
+    fn matches(&self, p: &str) -> bool {
+        ci_ends_with(p, r"\Explorer\RunMRU")
+    }
+
+    fn extract(
+        &self,
+        key: &CellKeyNode,
+        key_path: &str,
+        lastwrite: OffsetDateTime,
+        ctx: &Ctx,
+        sink: &mut dyn EventSink,
+        outcome: &mut ParseOutcome,
+    ) {
+        let order = value_string(key, "MRUList").unwrap_or_default();
+        for (name, data) in value_pairs(key) {
+            if name.eq_ignore_ascii_case("MRUList") || name.chars().count() != 1 {
+                continue;
+            }
+            let cmd = strip_mru_suffix(&data);
+            if cmd.is_empty() {
+                continue;
+            }
+            let rank = order.find(name.as_str()).map(|i| i + 1);
+            let mut ev = make_event(
+                ctx,
+                ArtefactKind::RegistryGeneric,
+                lastwrite,
+                TimestampKind::Modified,
+                "execution.runmru",
+                key_path,
+                Some(&name),
+                None,
+                Principal::default(),
+                match rank {
+                    Some(1) => format!("Run dialog (most recent): {cmd}"),
+                    Some(r) => format!("Run dialog (#{r} most recent): {cmd}"),
+                    None => format!("Run dialog: {cmd}"),
+                },
+                json!({ "key": key_path, "value": name, "command": cmd, "mru_rank": rank,
+                        "time_note": "key LastWrite = time of the most recent entry only" }),
+            );
+            ev.process = Some(ProcessInfo {
+                command_line: Some(cmd.clone()),
+                name: cmd.split_whitespace().next().map(|s| basename(s).to_string()),
+                ..Default::default()
+            });
+            sink.emit(ev);
+            outcome.events_emitted += 1;
+        }
+    }
+}
+
+// ── RDP client MRU ──────────────────────────────────────────────────────────
+// NTUSER\Software\Microsoft\Terminal Server Client\Default (MRU0..9) and
+// \Servers\<host> (UsernameHint): hosts this user RDP'd OUT to — outbound
+// lateral movement from this machine.
+struct RdpClientMru;
+impl Extractor for RdpClientMru {
+    fn matches(&self, p: &str) -> bool {
+        ci_ends_with(p, r"\Terminal Server Client\Default")
+            || ci_contains(p, r"\Terminal Server Client\Servers\")
+    }
+
+    fn extract(
+        &self,
+        key: &CellKeyNode,
+        key_path: &str,
+        lastwrite: OffsetDateTime,
+        ctx: &Ctx,
+        sink: &mut dyn EventSink,
+        outcome: &mut ParseOutcome,
+    ) {
+        if ci_contains(key_path, r"\Servers\") {
+            let host = key_path.rsplit('\\').next().unwrap_or(key_path).to_string();
+            let user = value_string(key, "UsernameHint");
+            sink.emit(make_event(
+                ctx,
+                ArtefactKind::RegistryGeneric,
+                lastwrite,
+                TimestampKind::Modified,
+                "lateral_movement.rdp_outbound",
+                key_path,
+                None,
+                Some(host.clone()),
+                Principal { name: user.clone(), ..Default::default() },
+                format!("Outbound RDP to {host}{}", user.as_deref().map(|u| format!(" as {u}")).unwrap_or_default()),
+                json!({ "key": key_path, "host": host, "username_hint": user }),
+            ));
+            outcome.events_emitted += 1;
+            return;
+        }
+        for (name, host) in value_pairs(key) {
+            if !name.to_ascii_uppercase().starts_with("MRU") || host.is_empty() {
+                continue;
+            }
+            sink.emit(make_event(
+                ctx,
+                ArtefactKind::RegistryGeneric,
+                lastwrite,
+                TimestampKind::Modified,
+                "lateral_movement.rdp_outbound",
+                key_path,
+                Some(&name),
+                Some(host.clone()),
+                Principal::default(),
+                format!("Outbound RDP history ({name}): {host}"),
+                json!({ "key": key_path, "value": name, "host": host }),
+            ));
+            outcome.events_emitted += 1;
+        }
+    }
+}
+
+// ── decoding helpers ────────────────────────────────────────────────────────
+
+/// Decoded UserAssist Count value.
+#[derive(Debug, PartialEq)]
+pub(crate) struct UserAssistStats {
+    pub run_count: u32,
+    pub focus_count: Option<u32>,
+    pub focus_ms: Option<u32>,
+    pub last_run: Option<OffsetDateTime>,
+}
+
+/// Win7+ values are 72 bytes: run count @4, focus count @8, focus time (ms) @12,
+/// last-run FILETIME @60. XP/2003 values are 16 bytes: run count @4 (offset by
+/// 5), FILETIME @8. Anything else is left undecoded.
+pub(crate) fn decode_userassist(b: &[u8]) -> Option<UserAssistStats> {
+    let u32_at = |o: usize| b.get(o..o + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap()));
+    match b.len() {
+        72 => Some(UserAssistStats {
+            run_count: u32_at(4)?,
+            focus_count: u32_at(8),
+            focus_ms: u32_at(12),
+            last_run: filetime_at(b, 60),
+        }),
+        16 => Some(UserAssistStats {
+            run_count: u32_at(4)?.saturating_sub(5),
+            focus_count: None,
+            focus_ms: None,
+            last_run: filetime_at(b, 8),
+        }),
+        _ => None,
+    }
+}
+
+/// Little-endian FILETIME at `off`, if present and non-zero.
+pub(crate) fn filetime_at(b: &[u8], off: usize) -> Option<OffsetDateTime> {
+    let ft = u64::from_le_bytes(b.get(off..off + 8)?.try_into().ok()?);
+    fx_core::filetime_to_datetime(ft)
+}
+
+/// Replace a leading KNOWNFOLDERID GUID with a readable folder.
+pub(crate) fn expand_known_folder(p: &str) -> String {
+    const KNOWN: &[(&str, &str)] = &[
+        ("{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}", "C:\\Windows\\System32"),
+        ("{D65231B0-B2F1-4857-A4CE-A8E7C6EA7D27}", "C:\\Windows\\SysWOW64"),
+        ("{F38BF404-1D43-42F2-9305-67DE0B28FC23}", "C:\\Windows"),
+        ("{6D809377-6AF0-444B-8957-A3773F02200E}", "C:\\Program Files"),
+        ("{7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E}", "C:\\Program Files (x86)"),
+        ("{905E63B6-C1BF-494E-B29C-65B732D3D21A}", "C:\\Program Files"),
+        ("{0139D44E-6AFE-49F2-8690-3DAFCAE6FFB8}", "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs"),
+        ("{A77F5D77-2E2B-44C3-A6A2-ABA601054A51}", "%AppData%\\Microsoft\\Windows\\Start Menu\\Programs"),
+        ("{9E3995AB-1F9C-4F13-B827-48B24B6C7174}", "%AppData%\\Microsoft\\Internet Explorer\\Quick Launch\\User Pinned"),
+        ("{374DE290-123F-4565-9164-39C4925E467B}", "%UserProfile%\\Downloads"),
+        ("{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}", "%UserProfile%\\Desktop"),
+        ("{FDD39AD0-238F-46AF-ADB4-6C85480369C7}", "%UserProfile%\\Documents"),
+    ];
+    for (guid, folder) in KNOWN {
+        if p.len() >= guid.len() && p[..guid.len()].eq_ignore_ascii_case(guid) {
+            return format!("{folder}{}", &p[guid.len()..]);
+        }
+    }
+    p.to_string()
+}
+
+/// RunMRU values end with "\1" (a flag); drop it.
+pub(crate) fn strip_mru_suffix(s: &str) -> String {
+    s.strip_suffix("\\1").unwrap_or(s).trim().to_string()
+}
+
+fn basename(p: &str) -> &str {
+    p.rsplit(|c| c == '\\' || c == '/').next().unwrap_or(p)
+}
+
+/// ProcessInfo for an execution artefact that only knows a path, so name-based
+/// hunt rules (process.name / filename) match it like any other execution.
+fn exe_process(path: &str) -> ProcessInfo {
+    ProcessInfo {
+        name: Some(basename(path).to_string()),
+        path: Some(path.to_string()),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::*;
+
+    fn ft(y: i32, mo: u8, d: u8) -> u64 {
+        let dt = time::Date::from_calendar_date(y, time::Month::try_from(mo).unwrap(), d)
+            .unwrap()
+            .midnight()
+            .assume_utc();
+        ((dt.unix_timestamp() as i128 * 10_000_000) + 116_444_736_000_000_000) as u64
+    }
+
+    #[test]
+    fn userassist_win7_layout() {
+        let mut b = vec![0u8; 72];
+        b[4..8].copy_from_slice(&7u32.to_le_bytes());
+        b[8..12].copy_from_slice(&3u32.to_le_bytes());
+        b[12..16].copy_from_slice(&65_000u32.to_le_bytes());
+        b[60..68].copy_from_slice(&ft(2026, 2, 11).to_le_bytes());
+        let s = decode_userassist(&b).unwrap();
+        assert_eq!(s.run_count, 7);
+        assert_eq!(s.focus_count, Some(3));
+        assert_eq!(s.focus_ms, Some(65_000));
+        assert_eq!(s.last_run.unwrap().date().to_string(), "2026-02-11");
+    }
+
+    #[test]
+    fn userassist_xp_layout_and_zero_time() {
+        let mut b = vec![0u8; 16];
+        b[4..8].copy_from_slice(&9u32.to_le_bytes());
+        let s = decode_userassist(&b).unwrap();
+        assert_eq!(s.run_count, 4); // XP stores count + 5
+        assert_eq!(s.last_run, None); // zero FILETIME = unknown
+        assert!(decode_userassist(&[0u8; 10]).is_none());
+    }
+
+    #[test]
+    fn known_folder_and_mru() {
+        assert_eq!(
+            expand_known_folder("{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\cmd.exe"),
+            "C:\\Windows\\System32\\cmd.exe"
+        );
+        assert_eq!(expand_known_folder("C:\\x\\a.exe"), "C:\\x\\a.exe");
+        assert_eq!(strip_mru_suffix("powershell -nop\\1"), "powershell -nop");
+        assert_eq!(basename("C:\\Tools\\rclone.exe"), "rclone.exe");
     }
 }

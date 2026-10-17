@@ -122,6 +122,8 @@ pub enum ArtefactKind {
     PsHistory,
     /// Windows Timeline / Activity (ActivitiesCache.db).
     WindowsTimeline,
+    /// Remote-access tool logs (AnyDesk, TeamViewer).
+    RemoteAccess,
     /// Registry-derived but not one of the specialized views above.
     RegistryGeneric,
     /// Identified container we can read but have no specialized parser for yet.

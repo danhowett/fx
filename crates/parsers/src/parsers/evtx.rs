@@ -236,6 +236,13 @@ fn classify(
     if is_defender {
         return classify_defender(event_id, &ed);
     }
+    // ── ScreenConnect / ConnectWise Control (Application log) ──────────────
+    // The client logs as provider "ScreenConnect Client (<instance id>)" with
+    // the useful text in EventData/Data — session connects, file transfers and
+    // commands run through the tool. Heavily abused for hands-on access.
+    if prov.contains("screenconnect") {
+        return classify_screenconnect(provider, data);
+    }
 
     // ── Security auditing + other channels, keyed on id ────────────────────
     match event_id {
@@ -544,4 +551,30 @@ fn classify_defender(event_id: u64, ed: &dyn Fn(&str) -> Option<String>) -> Clas
         1006 | 1007 => Classified::new("malware.detected", "Defender malware behaviour detected".into()),
         _ => Classified::new(&format!("defender.eid.{event_id}"), format!("Defender EventID {event_id}")),
     }
+}
+
+/// ScreenConnect client events. EventData/Data may be a string, an object with
+/// `#text`, or an array of strings; flatten it and classify on the text.
+fn classify_screenconnect(provider: &str, data: &Value) -> Classified {
+    let text = match data.pointer("/Event/EventData/Data") {
+        Some(Value::Array(a)) => a.iter().filter_map(value_to_string).collect::<Vec<_>>().join(" | "),
+        Some(v) => value_to_string(v).unwrap_or_default(),
+        None => String::new(),
+    };
+    let lc = text.to_ascii_lowercase();
+    let action = if lc.contains("transferred files") || lc.contains("file transfer") {
+        "remote_access.file_transfer"
+    } else if lc.contains("executed command") || lc.contains("ran command") {
+        "remote_access.command"
+    } else if lc.contains("disconnected") {
+        "remote_access.session_end"
+    } else if lc.contains("connected") {
+        "remote_access.session_incoming"
+    } else {
+        "remote_access.screenconnect"
+    };
+    let short: String = text.chars().take(200).collect();
+    Classified::new(action, format!("ScreenConnect: {short}"))
+        .process(ProcessInfo { name: Some("ScreenConnect.ClientService.exe".into()), ..Default::default() })
+        .target(Target { value_name: Some(provider.to_string()), ..Default::default() })
 }

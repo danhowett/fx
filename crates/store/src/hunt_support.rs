@@ -93,9 +93,21 @@ impl CaseStore {
             .collect())
     }
 
-    /// Persist detections (replacing any prior run's results for a clean view).
+    /// Persist a hunt run's detections, replacing the previous run's rule
+    /// detections. IOC-sweep findings (engine = 'ioc') are kept: re-running the
+    /// rules must not throw away an analyst's IOC sweep.
     pub fn write_detections(&self, dets: &[Detection]) -> Result<(), StoreError> {
-        self.connection().execute_batch("DELETE FROM detections")?;
+        self.connection().execute_batch("DELETE FROM detections WHERE engine <> 'ioc'")?;
+        self.insert_detections(dets)
+    }
+
+    /// Replace the IOC-sweep findings (and only those) with a new sweep's.
+    pub fn replace_ioc_detections(&self, dets: &[Detection]) -> Result<(), StoreError> {
+        self.connection().execute_batch("DELETE FROM detections WHERE engine = 'ioc'")?;
+        self.insert_detections(dets)
+    }
+
+    fn insert_detections(&self, dets: &[Detection]) -> Result<(), StoreError> {
         let now = OffsetDateTime::now_utc();
         self.connection().execute_batch("BEGIN TRANSACTION")?;
         {
@@ -115,12 +127,42 @@ impl CaseStore {
                     d.event_ids.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(","),
                     fmt_ts_helper(d.timestamp),
                     d.host,
-                    match d.engine { DetectionEngine::SingleEvent => "single_event", DetectionEngine::Correlation => "correlation" },
+                    match d.engine {
+                        DetectionEngine::SingleEvent => "single_event",
+                        DetectionEngine::Correlation => "correlation",
+                        DetectionEngine::Ioc => "ioc",
+                    },
                     fmt_ts_helper(now),
                 ])?;
             }
         }
         self.connection().execute_batch("COMMIT")?;
+        Ok(())
+    }
+
+    /// Stream every event as (id, timestamp, artefact, searchable text) for an
+    /// IOC sweep. The text joins the lifted columns AND the raw record, so a
+    /// hash, URL or domain is found wherever the parser kept it. No JSON
+    /// parsing — the raw record is scanned as text.
+    pub fn for_each_event_text(
+        &self,
+        mut f: impl FnMut(&str, &str, &str, &str),
+    ) -> Result<(), StoreError> {
+        let mut stmt = self.connection().prepare(
+            "SELECT id, strftime(ts, '%Y-%m-%dT%H:%M:%S'), artefact,
+                    concat_ws(chr(10), message, command_line, process_path, process_name,
+                              target_path, target_value, src_ip, dst_ip, process_sha1,
+                              host, user_name, CAST(raw AS VARCHAR))
+             FROM events",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            let id: String = r.get(0)?;
+            let ts: String = r.get(1)?;
+            let art: String = r.get(2)?;
+            let text: Option<String> = r.get(3)?;
+            f(&id, &ts, &art, text.as_deref().unwrap_or(""));
+        }
         Ok(())
     }
 
@@ -287,6 +329,11 @@ fn parse_artefact(s: &str) -> ArtefactKind {
         "JumpList" => ArtefactKind::JumpList,
         "Recycle" => ArtefactKind::Recycle,
         "BrowserHistory" => ArtefactKind::BrowserHistory,
+        // These two were missing, so hunted PSReadLine / Timeline events
+        // reached the rules as "Unclassified".
+        "PsHistory" => ArtefactKind::PsHistory,
+        "WindowsTimeline" => ArtefactKind::WindowsTimeline,
+        "RemoteAccess" => ArtefactKind::RemoteAccess,
         "RegistryGeneric" => ArtefactKind::RegistryGeneric,
         _ => ArtefactKind::Unclassified,
     }

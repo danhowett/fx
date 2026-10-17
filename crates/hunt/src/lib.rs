@@ -12,6 +12,7 @@
 pub mod correlation;
 pub mod event_rule;
 pub mod import;
+pub mod ioc;
 pub mod report;
 
 use correlation::{detection_from_row, CorrelationRule};
@@ -246,6 +247,7 @@ pub fn severity_rank(s: Severity) -> u8 {
 static EMBEDDED_RULES: &[(&str, &str)] = &[
     ("credential_access_lsass.yml", include_str!("../rules/credential_access_lsass.yml")),
     ("credential_access_secrets.yml", include_str!("../rules/credential_access_secrets.yml")),
+    ("data_staging_tools.yml", include_str!("../rules/data_staging_tools.yml")),
     ("defender_tampering.yml", include_str!("../rules/defender_tampering.yml")),
     ("defense_evasion_indicators.yml", include_str!("../rules/defense_evasion_indicators.yml")),
     ("discovery_recon_commands.yml", include_str!("../rules/discovery_recon_commands.yml")),
@@ -264,10 +266,46 @@ static EMBEDDED_RULES: &[(&str, &str)] = &[
     ("persistence_autostart_hijack.yml", include_str!("../rules/persistence_autostart_hijack.yml")),
     ("persistence_mechanisms.yml", include_str!("../rules/persistence_mechanisms.yml")),
     ("ransomware_shared_tooling.yml", include_str!("../rules/ransomware_shared_tooling.yml")),
+    ("rdp_outbound_history.yml", include_str!("../rules/rdp_outbound_history.yml")),
     ("rdp_then_tooling.yml", include_str!("../rules/rdp_then_tooling.yml")),
+    ("remote_access_session.yml", include_str!("../rules/remote_access_session.yml")),
+    ("remote_access_transfer_or_command.yml", include_str!("../rules/remote_access_transfer_or_command.yml")),
+    ("rmm_tool_execution.yml", include_str!("../rules/rmm_tool_execution.yml")),
+    ("runmru_hands_on_keyboard.yml", include_str!("../rules/runmru_hands_on_keyboard.yml")),
     ("shadow_copy_deletion.yml", include_str!("../rules/shadow_copy_deletion.yml")),
     ("srum_bulk_exfil.yml", include_str!("../rules/srum_bulk_exfil.yml")),
     ("suspicious_parent_child.yml", include_str!("../rules/suspicious_parent_child.yml")),
     ("suspicious_scheduled_task.yml", include_str!("../rules/suspicious_scheduled_task.yml")),
     ("system_binary_masquerade.yml", include_str!("../rules/system_binary_masquerade.yml")),
 ];
+
+
+#[cfg(test)]
+mod embedded_rules_tests {
+    /// Every rule file on disk must be embedded, or the GUI (which uses the
+    /// embedded set) silently runs fewer rules than the CLI (which reads the
+    /// directory). This list is hand-maintained, so guard it.
+    #[test]
+    fn every_rule_file_is_embedded() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/rules");
+        let mut on_disk: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".yml"))
+            .collect();
+        on_disk.sort();
+        let mut embedded: Vec<String> =
+            super::EMBEDDED_RULES.iter().map(|(n, _)| n.to_string()).collect();
+        embedded.sort();
+        assert_eq!(on_disk, embedded, "rules/ and EMBEDDED_RULES differ");
+    }
+
+    /// Every embedded rule must parse.
+    #[test]
+    fn embedded_rules_all_load() {
+        let rs = super::RuleSet::from_embedded();
+        assert!(rs.load_errors.is_empty(), "rule load errors: {:?}", rs.load_errors);
+        assert_eq!(rs.len(), super::EMBEDDED_RULES.len());
+    }
+}

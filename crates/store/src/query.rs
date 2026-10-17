@@ -54,12 +54,12 @@ pub struct TimelineFilter {
 fn category_sql(cat: &str) -> &'static str {
     match cat {
         "logon" => " AND action LIKE 'logon%'",
-        "network" => " AND (action LIKE 'network%' OR action LIKE 'browser%' OR action LIKE '%rdp%' OR artefact = 'BrowserHistory')",
+        "network" => " AND (action LIKE 'network%' OR action LIKE 'browser%' OR action LIKE '%rdp%' OR action LIKE 'remote_access%' OR artefact = 'BrowserHistory' OR artefact = 'RemoteAccess')",
         "persistence" => " AND (action LIKE 'persistence%' OR action LIKE 'service%')",
         "execution" => " AND (action LIKE 'execution%' OR artefact = 'Prefetch' OR artefact = 'UserAssist')",
         "filesystem" => " AND (action LIKE 'file%' OR artefact = 'Mft' OR artefact = 'UsnJrnl')",
         // "other" = none of the above. Negate all the known buckets.
-        "other" => " AND NOT (action LIKE 'logon%' OR action LIKE 'network%' OR action LIKE 'browser%' OR action LIKE '%rdp%' OR artefact = 'BrowserHistory' OR action LIKE 'persistence%' OR action LIKE 'service%' OR action LIKE 'execution%' OR artefact = 'Prefetch' OR artefact = 'UserAssist' OR action LIKE 'file%' OR artefact = 'Mft' OR artefact = 'UsnJrnl')",
+        "other" => " AND NOT (action LIKE 'logon%' OR action LIKE 'network%' OR action LIKE 'browser%' OR action LIKE '%rdp%' OR action LIKE 'remote_access%' OR artefact = 'BrowserHistory' OR artefact = 'RemoteAccess' OR action LIKE 'persistence%' OR action LIKE 'service%' OR action LIKE 'execution%' OR artefact = 'Prefetch' OR artefact = 'UserAssist' OR action LIKE 'file%' OR artefact = 'Mft' OR artefact = 'UsnJrnl')",
         _ => "",
     }
 }
@@ -253,6 +253,40 @@ impl CaseStore {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Fetch specific events by id, in time order — the "show every event that
+    /// matched this IOC" view. Ids are bound as parameters, in chunks.
+    pub fn events_by_ids(&self, ids: &[String]) -> Result<Vec<TimelineRow>, StoreError> {
+        let mut out = Vec::new();
+        for chunk in ids.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT id, strftime(ts, '%Y-%m-%dT%H:%M:%S') AS ts, ts_kind, artefact, action, host, user_name, target_path, message, source_ref
+                 FROM events WHERE CAST(id AS VARCHAR) IN ({marks})"
+            );
+            let params: Vec<&dyn duckdb::ToSql> = chunk.iter().map(|s| s as &dyn duckdb::ToSql).collect();
+            let mut stmt = self.connection().prepare(&sql)?;
+            let rows = stmt
+                .query_map(params.as_slice(), |r| {
+                    Ok(TimelineRow {
+                        id: r.get(0)?,
+                        ts: r.get(1)?,
+                        ts_kind: r.get(2)?,
+                        artefact: r.get(3)?,
+                        action: r.get(4)?,
+                        host: r.get(5)?,
+                        user_name: r.get(6)?,
+                        target_path: r.get(7)?,
+                        message: r.get(8)?,
+                        source_ref: r.get(9)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            out.extend(rows);
+        }
+        out.sort_by(|a, b| a.ts.cmp(&b.ts));
+        Ok(out)
     }
 
     /// Fetch the full raw JSON for one event (for the detail pane).

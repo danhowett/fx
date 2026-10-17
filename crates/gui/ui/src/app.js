@@ -22,6 +22,8 @@ const state = {
   detections: [],
   triage: [],        // [{event_id, triage_state, note}]
   view: "timeline", // "timeline" | "hunt"
+  huntOnly: null,   // "ioc" = findings view filtered to IOC matches (set by the IOC sweep)
+  idFilter: null,   // {label, ids, key}: timeline shows exactly these events (IOC matches); dropped when any other filter changes
   filter: { text: "", category: null, artefact: null, triage: null, flagged_only: false, limit: 5000, offset: 0 },
   selectedId: null,
   rowH: 30,
@@ -109,6 +111,11 @@ function wireCaseButtons() {
   const expCsvTop = el("exportCsvTop"), expStixTop = el("exportStixTop");
   if (expCsvTop) expCsvTop.addEventListener("click", () => exportFindings("csv"));
   if (expStixTop) expStixTop.addEventListener("click", () => exportFindings("stix"));
+  wireExportMenu();
+  const iocBtn = el("iocBtn");
+  if (iocBtn) iocBtn.addEventListener("click", () => openIocSweep());
+  const expRepTop = el("exportReportTop");
+  if (expRepTop) expRepTop.addEventListener("click", () => exportReport());
   // Help modal.
   const helpBtn = el("helpBtn"), helpModal = el("helpModal"), helpClose = el("helpClose");
   if (helpBtn) helpBtn.addEventListener("click", () => { el("helpBody").innerHTML = HELP_HTML; helpModal.classList.add("show"); });
@@ -409,10 +416,11 @@ const HELP_HTML = `
   <ul>
     <li><b>+ New case</b> — pick an artefact folder and where to save the <code>.fxcase</code>; fx ingests, hunts, and displays it.</li>
     <li><b>Open case</b> — reopen a saved <code>.fxcase</code>.</li>
-    <li><b>view all findings</b> — rule detections and your analyst-validated events together. Click a finding to jump to the event, see its raw record, and triage it.</li>
+    <li><b>Review findings</b> (rail) — rule detections and your analyst-validated events together. Click a finding to jump to the event, see its raw record, and triage it.</li>
     <li><b>Triage</b> — mark any event Validated / Unconfirmed / False positive / Dismissed, with a note. Filter by state from the rail.</li>
     <li><b>Timeline</b> — filter by activity, artefact, or time range; click an event and use <b>Pivot ±1m/5m/30m/1h</b> to see what happened around it.</li>
-    <li><b>Export CSV / STIX</b> — export findings (rule + analyst) for Excel or a TIP/MISP.</li>
+    <li><b>Export report</b> — save the self-contained HTML case report (findings, ATT&CK matrix, timeline, evidence chain of custody with SHA-256s). Print it to PDF to archive.</li>
+    <li><b>Export CSV / STIX</b> — export findings (rule + analyst) for Excel or a TIP/MISP. Choose which triage states to include (validated / unconfirmed / false positive / dismissed).</li>
     <li><b>Ingest log</b> (rail) — every file ingested and whether it parsed, was unsupported, or failed.</li>
     <li><b>Activity graph</b> (rail) — events-per-day histogram across the whole case. A day far above the baseline is outlined and labelled — the way to spot high-volume activity no rule tagged. Click a day to pivot the timeline to it.</li>
   </ul>
@@ -425,12 +433,12 @@ const HELP_HTML = `
 `;
 
 
-// ── Theme switcher (midnight / daybreak / sunset) ────────────────────────────
+// ── Theme switcher (daybreak / slate / midnight) ────────────────────────────
 function wireTheme() {
   const THEMES = [
-    ["midnight", "◐ Midnight"],
     ["daybreak", "☀ Daybreak"],
-    ["sunset", "◑ Sunset"],
+    ["slate", "◑ Slate"],
+    ["midnight", "◐ Midnight"],
   ];
   const btn = el("themeBtn");
   if (!btn) return;
@@ -448,6 +456,7 @@ function wireTheme() {
   // Default to Daybreak (light) unless the analyst has chosen otherwise before.
   let saved = "daybreak";
   try { saved = localStorage.getItem("fx-theme") || "daybreak"; } catch (e) {}
+  if (saved === "sunset" || saved === "moss") saved = "slate"; // retired themes -> Slate
   apply(saved);
 }
 
@@ -588,17 +597,30 @@ function renderFindings() {
   const order = ["critical", "high", "medium", "low", "informational"];
   const pills = order
     .filter((s) => bySev[s])
-    .map((s) => `<span class="sev-pill sev-${s}">${bySev[s]} ${s}</span>`)
+    .map((s) => `<span class="sev-pill sev-${s}">${fmt(bySev[s])} ${s}</span>`)
     .join("");
-  const active = state.view === "hunt" ? "active" : "";
-  return `<section class="findings ${active}" id="findingsSection">
+  const worst = order.find((s) => bySev[s]) || "low";
+  const sevColor = { critical: "var(--alert)", high: "#d98c4a", medium: "#d9c04a" }[worst] || "var(--focus)";
+  // How much of the list still needs eyes: a detection counts as reviewed once
+  // any of its events carries a triage state other than unconfirmed.
+  const tri = new Map((state.triage || []).map((t) => [t.event_id, t.triage_state]));
+  let reviewed = 0;
+  d.forEach((x) => {
+    const st = (x.event_ids || []).map((id) => tri.get(id)).find(Boolean);
+    if (st && st !== "unconfirmed") reviewed++;
+  });
+  const toReview = d.length - reviewed;
+  const inHunt = state.view === "hunt";
+  return `<section class="findings ${inHunt ? "active" : ""}" id="findingsSection">
     <h2>Findings</h2>
-    <div class="findings-head">
-      <span class="big" style="font-size:22px;font-family:var(--mono);color:var(--alert)">${d.length}</span>
-      <span class="lbl" style="color:var(--ink-dim)">detections</span>
+    <div class="findings-card" style="--fc-sev:${sevColor}" title="${inHunt ? "Back to the timeline" : "Open the findings list"}">
+      <div><span class="fc-count">${fmt(d.length)}</span><span class="fc-lbl">detection${d.length === 1 ? "" : "s"}</span></div>
+      <div class="sev-pills" style="margin-top:9px">${pills}</div>
+      <div class="fc-tri"><b>${fmt(toReview)}</b> to review · ${fmt(reviewed)} triaged</div>
+      <button class="findings-cta" type="button">
+        <span>${inHunt ? "Back to timeline" : "Review findings"}</span><span class="arrow">${inHunt ? "←" : "→"}</span>
+      </button>
     </div>
-    <div class="sev-pills">${pills}</div>
-    <div class="facet" style="margin-top:8px;color:var(--focus)"><span class="name" style="color:var(--focus)">${state.view === "hunt" ? "▾ viewing findings" : "▸ view all findings"}</span></div>
   </section>`;
 }
 
@@ -646,15 +668,229 @@ function renderToolbar() {
 
 async function exportFindings(format) {
   if (!backend.isLive()) { alert("Export is only available in the desktop app."); return; }
-  if (!state.detections || !state.detections.length) { alert("No findings to export. Run a hunt first."); return; }
+  const hasAny = (state.detections && state.detections.length) || (state.triage && state.triage.length);
+  if (!hasAny) { alert("No findings to export. Run a hunt first."); return; }
   try {
+    const counts = await backend.exportCounts();
+    const states = await chooseExportStates(format, counts);
+    if (!states) return; // cancelled
     const path = await backend.pickExportFile(format);
     if (!path) return; // cancelled
-    const n = await backend.exportFindings(format, path);
+    const n = await backend.exportFindings(format, path, states);
     alert(`Exported ${n} finding${n === 1 ? "" : "s"} to:\n${path}`);
   } catch (e) {
     alert("Export failed:\n" + (e && e.message ? e.message : e));
   }
+}
+
+// IOC sweep: paste or load an indicator list and hunt the open case for it.
+// Post-processing — nothing is re-ingested. Each matched indicator becomes a
+// finding (so it can be triaged, exported and reported); a new sweep replaces
+// the previous sweep's findings, and re-running the rules keeps them.
+let iocPreviewTimer = null;
+function openIocSweep() {
+  const m = el("iocModal");
+  el("iocInput").hidden = false; el("iocResults").hidden = true;
+  const ta = el("iocText");
+  const preview = async () => {
+    const text = ta.value;
+    if (!text.trim()) { el("iocPreview").textContent = "No indicators yet."; el("iocGo").disabled = true; el("iocGo").textContent = "Sweep"; return; }
+    try {
+      const p = await backend.iocPreview(text);
+      const kinds = Object.entries(p.by_kind || {}).sort((x, y) => y[1] - x[1]).map(([k, n]) => `${fmt(n)} ${escapeHtml(k)}`).join(" · ");
+      el("iocPreview").innerHTML = p.total
+        ? `<b>${fmt(p.total)} indicator${p.total === 1 ? "" : "s"}</b>: ${kinds}${p.skipped ? ` <span class="warn">(${p.skipped} too short to search, ignored)</span>` : ""}`
+        : `No indicators recognised${p.skipped ? ` (${p.skipped} ignored)` : ""}.`;
+      el("iocGo").disabled = !p.total;
+      el("iocGo").textContent = p.total ? `Sweep ${fmt(p.total)} indicator${p.total === 1 ? "" : "s"}` : "Sweep";
+    } catch (e) { el("iocPreview").textContent = String(e && e.message ? e.message : e); }
+  };
+  ta.oninput = () => { clearTimeout(iocPreviewTimer); iocPreviewTimer = setTimeout(preview, 180); };
+  const close = () => { m.classList.remove("show"); document.removeEventListener("keydown", onKey, true); };
+  const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
+  el("iocCancel").onclick = close;
+  el("iocClose").onclick = close;
+  el("iocAgain").onclick = () => { el("iocResults").hidden = true; el("iocInput").hidden = false; ta.focus(); };
+  el("iocFindings").onclick = () => { close(); state.view = "hunt"; state.huntOnly = "ioc"; closeDetail(); renderRail(); renderToolbar(); refresh(); };
+  m.onclick = (e) => { if (e.target === m) close(); };
+  el("iocLoad").onclick = async () => {
+    try {
+      const path = await backend.pickIocFile();
+      if (!path) return;
+      const text = await backend.readIocFile(path);
+      ta.value = (ta.value.trim() ? ta.value.trimEnd() + "\n" : "") + text;
+      preview();
+    } catch (e) { alert("Could not load the file:\n" + (e && e.message ? e.message : e)); }
+  };
+  el("iocGo").onclick = async () => {
+    if (el("iocGo").disabled) return;
+    m.classList.remove("show");
+    showOverlay("Sweeping for IOCs…", "Searching every event in the case. Large cases take a minute or two.");
+    try {
+      const r = await backend.iocSweep(ta.value);
+      hideOverlay();
+      renderIocResults(r);
+      m.classList.add("show");
+      try { state.detections = (await backend.huntResults()) || []; } catch (e) {}
+      renderRail();
+      if (state.view === "hunt") refresh();
+    } catch (e) {
+      hideOverlay(); m.classList.add("show");
+      alert("IOC sweep failed:\n" + (e && e.message ? e.message : e));
+    }
+  };
+  document.addEventListener("keydown", onKey, true);
+  m.classList.add("show");
+  preview();
+  ta.focus();
+}
+
+function renderIocResults(r) {
+  el("iocInput").hidden = true; el("iocResults").hidden = false;
+  el("iocSummary").innerHTML = `<b>${fmt(r.matched)}</b> of ${fmt(r.iocs)} indicator${r.iocs === 1 ? "" : "s"} found across ${fmt(r.events_scanned)} events. `
+    + (r.matched ? "Each match is now a finding you can triage and export." : "No indicator appears in this case.");
+  const hits = r.results.filter((x) => x.events > 0), misses = r.results.filter((x) => !x.events);
+  const row = (x) => `<tr class="${x.events ? "hit" : "miss"}"${x.events ? ` data-val="${escapeHtml(x.value)}" title="Show every matching event"` : ""}><td class="v">${escapeHtml(x.value)}</td><td>${escapeHtml(x.kind_label)}</td>`
+    + `<td class="n">${x.events ? fmt(x.events) : "—"}</td>`
+    + `<td class="ts">${x.first_seen ? escapeHtml(ukDateTime(x.first_seen)) : ""}</td>`
+    + `<td class="where">${Object.entries(x.artefacts || {}).map(([k, n]) => `${escapeHtml(k)} ${fmt(n)}`).join(", ")}</td></tr>`;
+  el("iocTable").innerHTML = `<thead><tr><th>Indicator</th><th>Type</th><th style="text-align:right">Events</th><th>First seen</th><th>Where</th></tr></thead><tbody>`
+    + hits.map(row).join("")
+    + (misses.length ? `<tr class="sep" id="iocMissToggle"><td colspan="5">${fmt(misses.length)} not found, click to ${hits.length ? "show" : "hide"}</td></tr>` : "")
+    + `</tbody><tbody id="iocMisses"${hits.length ? " hidden" : ""}>${misses.map(row).join("")}</tbody>`;
+  const t = el("iocMissToggle");
+  if (t) t.onclick = () => { const b = el("iocMisses"); b.hidden = !b.hidden; t.firstChild.textContent = `${fmt(misses.length)} not found, click to ${b.hidden ? "show" : "hide"}`; };
+  el("iocFindings").hidden = !r.matched;
+  el("iocTable").querySelectorAll("tr.hit[data-val]").forEach((tr) => {
+    tr.onclick = () => {
+      const v = tr.dataset.val;
+      const det = (state.detections || []).find((d) => d.engine === "ioc" && d.rule_id.endsWith(":" + v));
+      if (!det || !det.event_ids || !det.event_ids.length) return;
+      el("iocModal").classList.remove("show");
+      showIocEvents(det);
+    };
+  });
+}
+
+// Show every event an IOC finding matched, in time order, in the timeline.
+function showIocEvents(det) {
+  const ids = det.event_ids || [];
+  if (!ids.length) return;
+  const label = det.rule_id.replace(/^ioc:[^:]*:/, "");
+  state.view = "timeline";
+  state.huntOnly = null;
+  state.filter = { text: "", category: null, artefact: null, triage: null, flagged_only: false, limit: 5000, offset: 0 };
+  state.idFilter = { label, ids, key: JSON.stringify(state.filter) };
+  closeDetail();
+  renderRail(); renderToolbar();
+  refresh();
+}
+
+// Export menu: one top-bar button for all exports. Items keep their original
+// ids, so the existing handlers run unchanged; picking one closes the menu.
+function wireExportMenu() {
+  const wrap = el("exportMenuWrap"), btn = el("exportMenuBtn");
+  if (!wrap || !btn) return;
+  const close = () => { wrap.classList.remove("open"); btn.setAttribute("aria-expanded", "false"); };
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = !wrap.classList.contains("open");
+    wrap.classList.toggle("open", open);
+    btn.setAttribute("aria-expanded", String(open));
+    if (open) { const first = wrap.querySelector(".menuitem"); if (first) first.focus(); }
+  });
+  wrap.querySelectorAll(".menuitem").forEach((it) => it.addEventListener("click", close));
+  document.addEventListener("click", (e) => { if (!wrap.contains(e.target)) close(); });
+  document.addEventListener("keydown", (e) => {
+    if (!wrap.classList.contains("open")) return;
+    if (e.key === "Escape") { close(); btn.focus(); }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      const items = Array.from(wrap.querySelectorAll(".menuitem"));
+      const i = items.indexOf(document.activeElement);
+      const n = e.key === "ArrowDown" ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
+      items[n].focus(); e.preventDefault();
+    }
+  });
+}
+
+// HTML case report — same output as `fx report`: findings by tactic, ATT&CK
+// matrix, timeline and the evidence chain-of-custody table (SHA-256 per file).
+async function exportReport() {
+  if (!backend.isLive()) { alert("The case report is only available in the desktop app."); return; }
+  try {
+    const path = await backend.pickExportFile("html");
+    if (!path) return; // cancelled
+    showOverlay("Building case report…", "Findings, ATT&CK matrix, timeline and evidence hashes.");
+    const bytes = await backend.exportReport(path);
+    hideOverlay();
+    alert(`Case report saved (${humanBytes(bytes)}) to:\n${path}\n\nOpen it in any browser; print to PDF to archive.`);
+  } catch (e) {
+    hideOverlay();
+    alert("Report failed:\n" + (e && e.message ? e.message : e));
+  }
+}
+
+// Export dialog: pick which triage states go in the file. Resolves to an array
+// of state keys, or null if cancelled. Defaults to validated + unconfirmed —
+// the findings that still matter — so dismissed / false-positive noise is left
+// out of a client-facing export unless the analyst asks for it.
+const EXPORT_DEFAULT = ["validated", "unconfirmed"];
+const EXPORT_HINTS = {
+  validated: "confirmed by an analyst",
+  unconfirmed: "not yet reviewed",
+  false_positive: "reviewed, benign",
+  dismissed: "reviewed, out of scope",
+};
+function chooseExportStates(format, counts) {
+  return new Promise((resolve) => {
+    const modal = el("exportModal");
+    const label = format === "stix" ? "STIX 2.1" : "CSV";
+    el("expTitle").textContent = `Export findings — ${label}`;
+    el("expRows").innerHTML = TRI_STATES.map(([k, name, color]) => {
+      const n = (counts && counts[k]) || 0;
+      const checked = EXPORT_DEFAULT.includes(k) && n > 0 ? "checked" : "";
+      return `<label class="exp-row ${n ? "" : "zero"}">
+        <input type="checkbox" data-state="${k}" ${checked}>
+        <span class="dot" style="background:${color}"></span>
+        <span class="lbl">${name}<br><span class="hint">${EXPORT_HINTS[k] || ""}</span></span>
+        <span class="cnt">${fmt(n)}</span>
+      </label>`;
+    }).join("");
+    const boxes = () => Array.from(modal.querySelectorAll("input[data-state]"));
+    const update = () => {
+      const picked = boxes().filter((b) => b.checked).map((b) => b.dataset.state);
+      const total = picked.reduce((t, k) => t + ((counts && counts[k]) || 0), 0);
+      el("expTotal").textContent = `${fmt(total)} finding${total === 1 ? "" : "s"} selected`;
+      el("expGo").textContent = `Export ${fmt(total)}`;
+      el("expGo").disabled = total === 0;
+    };
+    const setTo = (keys) => { boxes().forEach((b) => (b.checked = keys.includes(b.dataset.state))); update(); };
+    const close = (result) => {
+      modal.classList.remove("show");
+      document.removeEventListener("keydown", onKey, true);
+      modal.onclick = null;
+      resolve(result);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(null); }
+      if (e.key === "Enter" && !el("expGo").disabled) { e.preventDefault(); e.stopPropagation(); el("expGo").click(); }
+    };
+    modal.onclick = (e) => {
+      if (e.target === modal) return close(null);            // backdrop
+      if (e.target.closest("input[data-state]")) return update();
+      if (e.target.id === "expAll") return setTo(TRI_STATES.map(([k]) => k));
+      if (e.target.id === "expNone") return setTo([]);
+      if (e.target.id === "expDefault") return setTo(EXPORT_DEFAULT);
+      if (e.target.id === "expCancel") return close(null);
+      if (e.target.id === "expGo" && !el("expGo").disabled) {
+        return close(boxes().filter((b) => b.checked).map((b) => b.dataset.state));
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    update();
+    modal.classList.add("show");
+    el("expGo").focus();
+  });
 }
 
 // Convert stored RFC3339 (UTC) <-> the datetime-local input value.
@@ -682,6 +918,7 @@ function clearChip(kind, value) {
 
 // ── Timeline (virtualized) ───────────────────────────────────────────────────
 async function refresh() {
+  if (el("idfBar") && (state.view !== "timeline" || !state.idFilter)) el("idfBar").hidden = true;
   if (state.view === "hunt") {
     renderHuntView();
     return;
@@ -692,6 +929,27 @@ async function refresh() {
   }
   if (state.view === "activity") {
     await renderActivityGraph();
+    return;
+  }
+  if (state.idFilter && state.idFilter.key !== JSON.stringify(state.filter)) state.idFilter = null;
+  if (!state.idFilter && el("idfBar")) el("idfBar").hidden = true;
+  if (state.idFilter) {
+    const f = state.idFilter;
+    state.rows = await backend.eventsByIds(f.ids);
+    state.total = state.rows.length;
+    const n = state.rows.length;
+    el("resultCount").textContent = `${fmt(n)} event${n === 1 ? "" : "s"}`;
+    const bar = el("idfBar");
+    bar.innerHTML = `<span class="idf-tag">IOC</span><span class="idf-val" title="${escapeHtml(f.label)}">${escapeHtml(f.label)}</span>`
+      + `<span class="idf-n">${fmt(n)} matching event${n === 1 ? "" : "s"}${f.ids.length >= 500 ? " (first 500)" : ""}</span><span class="idf-sp"></span>`
+      + `<button class="idf-btn" id="idfBack">Back to IOC matches</button><button class="idf-btn" id="idfClear">Clear filter</button>`;
+    bar.hidden = false;
+    el("idfBack").onclick = () => { state.idFilter = null; state.view = "hunt"; state.huntOnly = "ioc"; closeDetail(); renderRail(); renderToolbar(); refresh(); };
+    el("idfClear").onclick = () => { state.idFilter = null; refresh(); };
+    renderStatus();
+    renderWindow();
+    viewport.scrollTop = 0;
+    requestAnimationFrame(() => requestAnimationFrame(calibrateRowHeight));
     return;
   }
   state.rows = await backend.queryTimeline({ ...state.filter });
@@ -767,9 +1025,15 @@ function renderHuntView() {
       host: t.host || null,
       engine: "manual",
     }));
-  const d = rules.concat(manual);
-  const manualNote = manual.length ? ` (${rules.length} rule + ${manual.length} analyst)` : "";
-  el("resultCount").textContent = `${fmt(d.length)} findings${manualNote}`;
+  let d = rules.concat(manual);
+  if (state.huntOnly === "ioc") {
+    d = rules.filter((x) => x.engine === "ioc");
+    el("resultCount").innerHTML = `${fmt(d.length)} IOC match${d.length === 1 ? "" : "es"} <button class="linkbtn" id="huntShowAll">Show all findings</button>`;
+    el("huntShowAll").onclick = () => { state.huntOnly = null; renderHuntView(); };
+  } else {
+    const manualNote = manual.length ? ` (${rules.length} rule + ${manual.length} analyst)` : "";
+    el("resultCount").textContent = `${fmt(d.length)} findings${manualNote}`;
+  }
   el("spTop").style.height = "0px";
   el("spBot").style.height = "0px";
   el("rows").innerHTML = d.map(huntRowHtml).join("") ||
@@ -777,18 +1041,21 @@ function renderHuntView() {
   // Clicking a finding jumps to its event in the timeline + opens the detail
   // pane (raw record + triage buttons live there).
   el("rows").querySelectorAll(".hitrow[data-event]").forEach((row) => {
-    row.addEventListener("click", () => openFindingEvent(row.dataset.event, row.dataset.ts || ""));
+    row.addEventListener("click", () => {
+      const det = row.dataset.rule ? d.find((x) => x.rule_id === row.dataset.rule && x.engine === "ioc") : null;
+      if (det) showIocEvents(det); else openFindingEvent(row.dataset.event, row.dataset.ts || "");
+    });
   });
   renderStatus();
 }
 
 function huntRowHtml(d) {
   const attack = (d.attack || []).map((t) => `<span class="att">${t}</span>`).join("");
-  const eng = d.engine === "correlation" ? "correlated" : "single-event";
+  const eng = d.engine === "correlation" ? "correlated" : d.engine === "ioc" ? "IOC match" : "single-event";
   const eid = (d.event_ids && d.event_ids.length) ? d.event_ids[0] : "";
   const tri = eid ? triageStateFor(eid) : "";
   const triBadge = tri ? `<span class="tri-badge ${tri}">${tri.replace("_"," ")}</span>` : "";
-  return `<div class="hitrow sev-border-${d.severity}" data-event="${eid}" data-ts="${escapeHtml(d.ts || "")}">
+  return `<div class="hitrow sev-border-${d.severity}" data-event="${eid}" data-ts="${escapeHtml(d.ts || "")}"${d.engine === "ioc" ? ` data-rule="${escapeHtml(d.rule_id)}"` : ""}>
     <div class="hit-main">
       <span class="sev-tag sev-${d.severity}">${d.severity}</span>
       <span class="hit-title">${escapeHtml(d.title)}</span>
@@ -796,7 +1063,7 @@ function huntRowHtml(d) {
     </div>
     <div class="hit-sub">
       <span class="hit-summary">${escapeHtml(d.summary)}</span>
-      <span class="hit-meta">${time(d.ts)} · ${d.host || "—"} · ${eng} · click to open ▸</span>
+      <span class="hit-meta">${time(d.ts)} · ${d.host || "—"} · ${eng} · ${d.engine === "ioc" ? "click to show all matching events" : "click to open"} ▸</span>
     </div>
   </div>`;
 }
@@ -1138,6 +1405,7 @@ function wireEvents() {
     // Findings section toggles the hunt view.
     if (e.target.closest("#findingsSection")) {
       state.view = state.view === "hunt" ? "timeline" : "hunt";
+      state.huntOnly = null;
       closeDetail();
       renderRail();
       renderToolbar();
@@ -1244,6 +1512,10 @@ function time(iso) {
 function ukDate(ymd) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || ""));
   return m ? `${m[3]}/${m[2]}/${m[1]}` : String(ymd || "");
+}
+function ukDateTime(ts) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/.exec(String(ts || ""));
+  return m ? `${m[3]}/${m[2]}/${m[1]} ${m[4]}:${m[5]}` : String(ts || "");
 }
 function short(id) { return (id || "").slice(0, 8); }
 function fmt(n) { return (n ?? 0).toLocaleString("en-GB"); }

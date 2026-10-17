@@ -1,0 +1,22 @@
+kind: event
+id: remote_access_session
+title: Inbound remote-access session (AnyDesk / TeamViewer / ScreenConnect)
+description: >
+  An inbound session or login recorded in a remote-access tool's own logs —
+  who connected (remote ID / name), when, and from which IP where logged.
+  Legitimate support sessions also land here; the value is the timeline of
+  hands-on access, which should be reconciled against sanctioned IT activity.
+severity: medium
+attack:
+  - T1219
+  - T1133      # external remote services
+detection:
+  any:
+    - match:
+        field: action
+        op: equals
+        values:
+          - remote_access.session_incoming
+          - remote_access.session_request
+          - remote_access.session_accepted
+          - remote_access.login

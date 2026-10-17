@@ -23,6 +23,12 @@ fn main() {
             commands::clear_triage,
             commands::list_triage,
             commands::export_findings,
+            commands::export_counts,
+            commands::export_report,
+            commands::ioc_preview,
+            commands::ioc_sweep,
+            commands::read_ioc_file,
+            commands::events_by_ids,
             commands::ingest_log,
             commands::daily_activity,
         ])

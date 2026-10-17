@@ -70,9 +70,11 @@ are recovered where possible. Extractors:
 |-----------|-----------|
 | Run keys | `...\CurrentVersion\Run` / `RunOnce` (autostart persistence) |
 | Services | service definitions and image paths |
-| ShimCache (AppCompatCache) | program execution / presence evidence |
-| UserAssist | GUI program execution counts (ROT13-decoded) |
-| BAM / DAM | background/desktop activity — program last-run times |
+| ShimCache (AppCompatCache) | presence marker only for now — full blob decoding is planned |
+| UserAssist | GUI program execution: ROT13-decoded path (known-folder GUIDs expanded), **run count**, focus count/time, and the **last-run time** |
+| BAM / DAM | per-user program **last-execution time** (decoded FILETIME), keyed by SID |
+| RunMRU | commands typed into the **Run dialog (Win+R)**, in most-recent-first order — hands-on-keyboard evidence; each lands on the command-line field so command-line rules apply |
+| RDP client MRU | `Terminal Server Client\Default` / `\Servers` — hosts this user **RDP'd out to**, with the username hint |
 | RDP config | terminal-server settings, saved connections |
 | Amcache | `InventoryApplicationFile` + legacy `Root\File` — program presence, SHA-1, with parse-time masquerade / staging flags |
 | ShellBags | folder-browsing history from BagMRU (NTUSER + UsrClass), flags volume/removable references |
@@ -97,6 +99,19 @@ are recovered where possible. Extractors:
 | Browser history | Chromium + Firefox — visits and downloads, with domain and event type |
 | LNK & Jump Lists | shell-link targets; auto/custom jump lists; flags **removable-media** (USB serial) and **network-share** (UNC) origins; MRU metadata |
 | Recycle Bin (`$I`) | original path, original size, and deletion time of deleted files (both format versions) |
+
+### Remote-access tools
+
+Commercial remote-access tools are a staple of ransomware affiliates. Their own
+logs record who connected, from where, when, and whether files moved — often
+surviving after the tool is uninstalled.
+
+| Artefact | What it surfaces |
+|----------|------------------|
+| AnyDesk `connection_trace.txt` | every incoming / outgoing / **rejected** session: time, auth type, remote AnyDesk ID |
+| AnyDesk `ad.trace` / `ad_svc.trace` | session requests, logins **with source IP**, accept/reject, file transfers, remote OS / client ID |
+| TeamViewer `Connections_incoming.txt` / `Connections.txt` | incoming and outgoing sessions: remote ID and name, start/end (duration), local user, connection type. Times are as logged (host local time) |
+| ScreenConnect (Application event log) | client session connects/disconnects, **file transfers** and **commands run** through the tool |
 
 Every source file is **SHA-256 hashed at ingest** for chain of custody, and the
 per-file **ingest log** records whether each parsed, was unsupported, or failed
@@ -136,12 +151,36 @@ bulk SRUM exfil).
    the timeline by triage state from the rail.
 4. **Pivot** — on any event, use **Pivot ±1m / 5m / 30m / 1h** to see everything
    around it; or set an explicit time range in the toolbar.
-5. **Export** — **CSV** (Excel / sharing) or **STIX 2.1** (TIP / MISP). Exports
-   include both rule detections and your analyst findings, carrying triage state
-   and notes.
-6. **Ingest log** — from the rail, see every file ingested and whether it parsed,
+5. **Export** — everything lives under the **Export ▾** menu in the top bar:
+   **CSV** (Excel / sharing) or **STIX 2.1** (TIP / MISP). A
+   dialog lets you choose which triage states to include — **Validated**,
+   **Unconfirmed**, **False positive**, **Dismissed** — with a live count for
+   each. It defaults to validated + unconfirmed, so reviewed noise stays out of
+   a client-facing export. Exports carry triage state and analyst notes.
+   **Export report** saves the self-contained HTML case report — findings by
+   ATT&CK tactic, severity scorecards, timeline, ATT&CK matrix, and the
+   **evidence chain-of-custody table** (every ingested file with its SHA-256).
+   Open it in any browser; print to PDF to archive. (CLI equivalent:
+   `fx report case.fxcase report.html`.)
+6. **IOC sweep** — click **IOC sweep** in the top bar, then paste an indicator
+   list or load one from a file (`.txt`, `.csv`, a threat-intel export…). fx
+   recognises SHA-256 / SHA-1 / MD5 hashes, IPv4 / IPv6, domains, URLs, email
+   addresses, file names, full paths and free text — one or more per line, `#`
+   comments ignored, and **defanged values are refanged** (`hxxp://`,
+   `evil[.]com`, `1.2.3[.]4`). A live preview counts what was recognised before
+   you run it. The sweep searches **every event in the open case, including the
+   raw record**, in a single pass — no re-ingest, so it works on a case processed
+   weeks ago. Matching is token-aware: `1.2.3.4` won't hit `1.2.3.45`, and
+   `evil.com` hits `cdn.evil.com` but not `notevil.com`; paths match whether the
+   artefact stored `C:\x\y`, `C:/x/y` or `/x/y`. The results table shows each
+   indicator's hit count, first sighting and which artefacts it appeared in.
+   **Each matched indicator becomes a finding** (*IOC match*, High; free text is
+   Medium) that you triage, export and report like any other — the report groups
+   them under **IOC matches**. Running a new sweep replaces the previous sweep's
+   findings; re-running the rule hunt keeps them.
+7. **Ingest log** — from the rail, see every file ingested and whether it parsed,
    was unsupported, or failed (with the failure reason).
-7. **Activity graph** — from the rail, a per-day event-count histogram across the
+8. **Activity graph** — from the rail, a per-day event-count histogram across the
    whole case. It surfaces volume that **no rule tagged**: a day whose event
    count stands well above the baseline is outlined and labelled, so a quiet
    ~25-event baseline with one 800-event day jumps straight out. The darker base
@@ -165,7 +204,7 @@ bulk SRUM exfil).
 ## Themes
 
 Three themes via the toolbar: **Daybreak** (light), **Midnight** (dark), and
-**Sunset** (warm dusk).
+**Slate** (a mid-tone grey-blue between the two).
 
 ---
 

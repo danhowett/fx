@@ -206,6 +206,17 @@ fn resolve_by_path_only(lower: &str, name: &str) -> Option<(ArtefactKind, IdMeth
         // Windows Timeline (ActivitiesCache.db). SQLite; distinctive filename.
         // The parser confirms by querying the Activity table.
         Some((ArtefactKind::WindowsTimeline, IdMethod::PathOnly, 0.9))
+    } else if name == "ad.trace"
+        || name == "ad_svc.trace"
+        || (name == "connection_trace.txt" && lower.contains("anydesk"))
+        || name.starts_with("connections_incoming")
+        || (name == "connections.txt" && lower.contains("teamviewer"))
+    {
+        // Remote-access tool logs (AnyDesk trace / connection_trace,
+        // TeamViewer Connections[_incoming].txt). Plain text, no magic; the
+        // tool-specific names (plus the vendor folder where the name is
+        // generic) are the signal.
+        Some((ArtefactKind::RemoteAccess, IdMethod::PathOnly, 0.85))
     } else if name.ends_with("consolehost_history.txt")
         || (name.ends_with("_history.txt") && lower.contains("psreadline"))
     {

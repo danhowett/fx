@@ -1,0 +1,26 @@
+kind: event
+id: runmru_hands_on_keyboard
+title: Interactive command via Run dialog (Win+R)
+description: >
+  A command typed into the Run dialog (RunMRU) that launches a shell, script
+  host, PowerShell, RDP client, a UNC path to an IP, or a URL — evidence of a
+  person at the keyboard (or an RDP session) rather than automation. Only the
+  most recent entry's time is exact; the MRU rank orders the rest.
+severity: medium
+attack:
+  - T1059      # command and scripting interpreter
+  - T1021.001  # RDP
+detection:
+  all:
+    - match:
+        field: action
+        op: equals
+        values: [execution.runmru]
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - "^\\s*(cmd|powershell|pwsh|wscript|cscript|mshta|rundll32|regsvr32|certutil|bitsadmin|wmic)(\\.exe)?\\b"
+          - "^\\s*mstsc(\\.exe)?\\b"
+          - "^\\s*\\\\\\\\[0-9]{1,3}\\."
+          - "https?://"

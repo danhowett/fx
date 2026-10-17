@@ -81,7 +81,9 @@ fn categorize(artefact: &str, action: &str) -> String {
     if action.starts_with("network")
         || action.starts_with("browser")
         || action.contains("rdp")
+        || action.starts_with("remote_access")
         || artefact == "BrowserHistory"
+        || artefact == "RemoteAccess"
     {
         return "network".into();
     }
@@ -419,19 +421,96 @@ pub async fn export_findings(
     state: tauri::State<'_, AppState>,
     format: String,
     path: String,
+    // Triage states to include ("validated", "unconfirmed", "false_positive",
+    // "dismissed"). None / empty = everything (the old behaviour). A finding
+    // nobody has triaged counts as "unconfirmed", matching what the UI shows.
+    states: Option<Vec<String>>,
 ) -> Result<usize, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
-    let mut dets = read_detections(store)?;
-    let triage = store.triage_map().map_err(|e| e.to_string())?;
+    let (dets, triage) = collect_findings(store)?;
     let tri_for = |event_ids: &[String]| -> (String, String) {
         for eid in event_ids {
-            if let Some((_, st, note)) = triage.iter().find(|(id, _, _)| id == eid) {
-                return (st.clone(), note.clone().unwrap_or_default());
+            if let Some((st, note)) = triage.get(eid) {
+                return (st.clone(), note.clone());
             }
         }
         (String::new(), String::new())
     };
+    let wanted: Option<std::collections::HashSet<String>> =
+        states.filter(|v| !v.is_empty()).map(|v| v.into_iter().collect());
+    let dets: Vec<DetectionDto> = match &wanted {
+        None => dets,
+        Some(w) => dets
+            .into_iter()
+            .filter(|d| w.contains(&effective_state(&tri_for(&d.event_ids).0)))
+            .collect(),
+    };
+    if dets.is_empty() {
+        return Err("No findings match the selected triage states.".into());
+    }
+
+    let content = match format.as_str() {
+        "csv" => findings_to_csv(&dets, &tri_for),
+        "stix" => findings_to_stix(&dets, &tri_for)?,
+        other => return Err(format!("unknown export format: {other}")),
+    };
+    std::fs::write(&path, content).map_err(|e| format!("write {path}: {e}"))?;
+    Ok(dets.len())
+}
+
+/// Per-triage-state finding counts for the export dialog, computed with exactly
+/// the same logic as `export_findings` so the numbers shown match the file.
+#[derive(serde::Serialize, Default)]
+pub struct ExportCounts {
+    pub validated: usize,
+    pub unconfirmed: usize,
+    pub false_positive: usize,
+    pub dismissed: usize,
+}
+
+#[tauri::command]
+pub async fn export_counts(state: tauri::State<'_, AppState>) -> Result<ExportCounts, String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    let (dets, triage) = collect_findings(store)?;
+    let mut c = ExportCounts::default();
+    for d in &dets {
+        let st = d
+            .event_ids
+            .iter()
+            .find_map(|e| triage.get(e).map(|(s, _)| s.clone()))
+            .unwrap_or_default();
+        match effective_state(&st).as_str() {
+            "validated" => c.validated += 1,
+            "false_positive" => c.false_positive += 1,
+            "dismissed" => c.dismissed += 1,
+            _ => c.unconfirmed += 1,
+        }
+    }
+    Ok(c)
+}
+
+/// A finding with no triage tag is shown (and exported) as unconfirmed.
+fn effective_state(s: &str) -> String {
+    if s.is_empty() { "unconfirmed".into() } else { s.to_string() }
+}
+
+/// Rule detections plus analyst-validated events no rule fired on, and an
+/// event_id -> (state, note) triage lookup. Shared by export + export_counts.
+fn collect_findings(
+    store: &CaseStore,
+) -> Result<
+    (Vec<DetectionDto>, std::collections::HashMap<String, (String, String)>),
+    String,
+> {
+    let mut dets = read_detections(store)?;
+    let triage: std::collections::HashMap<String, (String, String)> = store
+        .triage_map()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(id, st, note)| (id, (st, note.unwrap_or_default())))
+        .collect();
 
     // Merge in analyst-validated events that NO rule fired on, so manual
     // findings land in the export too. Any event already referenced by a rule
@@ -460,14 +539,7 @@ pub async fn export_findings(
         })
         .collect();
     dets.append(&mut manual);
-
-    let content = match format.as_str() {
-        "csv" => findings_to_csv(&dets, &tri_for),
-        "stix" => findings_to_stix(&dets, &tri_for)?,
-        other => return Err(format!("unknown export format: {other}")),
-    };
-    std::fs::write(&path, content).map_err(|e| format!("write {path}: {e}"))?;
-    Ok(dets.len())
+    Ok((dets, triage))
 }
 
 /// First line of a message, truncated to `max` chars, for a manual finding's
@@ -657,4 +729,89 @@ fn build_overview(store: &CaseStore) -> Result<CaseOverview, fx_store::StoreErro
 
 fn parse_rfc3339(s: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+}
+
+/// Write the self-contained HTML case report (findings by tactic, ATT&CK
+/// matrix, timeline, and the evidence chain-of-custody table with SHA-256s) —
+/// the same report as `fx report`. Returns the number of bytes written.
+#[tauri::command]
+pub async fn export_report(state: tauri::State<'_, AppState>, path: String) -> Result<usize, String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    let html = fx_hunt::report::generate_report(store).map_err(|e| e.to_string())?;
+    std::fs::write(&path, &html).map_err(|e| format!("write {path}: {e}"))?;
+    Ok(html.len())
+}
+
+// ── IOC sweep ────────────────────────────────────────────────────────────────
+
+/// Live preview of a pasted IOC list: how many indicators of each type were
+/// recognised, and how many tokens were ignored. Mirrors exactly what
+/// `ioc_sweep` will search for.
+#[derive(Serialize)]
+pub struct IocPreview {
+    pub total: usize,
+    pub by_kind: std::collections::BTreeMap<String, usize>,
+    pub skipped: usize,
+}
+
+#[tauri::command]
+pub async fn ioc_preview(text: String) -> Result<IocPreview, String> {
+    let p = fx_hunt::ioc::parse_iocs(&text);
+    let mut by_kind = std::collections::BTreeMap::new();
+    for i in &p.iocs {
+        *by_kind.entry(i.kind.label().to_string()).or_insert(0) += 1;
+    }
+    Ok(IocPreview { total: p.iocs.len(), by_kind, skipped: p.skipped.len() })
+}
+
+/// Sweep the open case for the IOC list. Post-processing — no re-ingest.
+/// Replaces the case's previous IOC findings; rule detections are untouched.
+#[tauri::command]
+pub async fn ioc_sweep(
+    state: tauri::State<'_, AppState>,
+    text: String,
+) -> Result<fx_hunt::ioc::SweepReport, String> {
+    let parsed = fx_hunt::ioc::parse_iocs(&text);
+    if parsed.iocs.is_empty() {
+        return Err("No indicators recognised. Paste one per line: hashes, IPs, domains, URLs, file names, paths or text.".into());
+    }
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    fx_hunt::ioc::sweep(store, &parsed).map_err(|e| e.to_string())
+}
+
+/// Read an IOC list file (txt / csv / any text; UTF-8 or UTF-16) for the
+/// sweep dialog. Capped at 20 MB.
+#[tauri::command]
+pub async fn read_ioc_file(path: String) -> Result<String, String> {
+    let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
+    if meta.len() > 20 * 1024 * 1024 {
+        return Err("IOC file is larger than 20 MB.".into());
+    }
+    let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+    let text = if bytes.starts_with(&[0xFF, 0xFE]) {
+        let u: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        String::from_utf16_lossy(&u)
+    } else if bytes.starts_with(&[0xFE, 0xFF]) {
+        let u: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        String::from_utf16_lossy(&u)
+    } else {
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    Ok(text)
+}
+
+/// Fetch specific events by id (time-ordered) — used to show every event an
+/// IOC matched. Capped so a pathological list can't flood the UI.
+#[tauri::command]
+pub async fn events_by_ids(
+    state: tauri::State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<Vec<EventDto>, String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    let ids: Vec<String> = ids.into_iter().take(5000).collect();
+    let rows = store.events_by_ids(&ids).map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().map(EventDto::from).collect())
 }
