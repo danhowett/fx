@@ -190,7 +190,7 @@ impl EventRule {
     pub fn references_raw(&self) -> bool {
         let mut hit = false;
         self.detection.for_each_field(&mut |f| {
-            if RAW_BACKED_FIELDS.contains(&f) {
+            if RAW_BACKED_FIELDS.contains(&f) || f.starts_with("evtx.") {
                 hit = true;
             }
         });
@@ -353,8 +353,99 @@ fn field_value(ev: &Event, field: &str) -> Option<String> {
             .pointer("/extras/domain")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        // ── Fields used by converted Sigma rules ───────────────────────────
+        // Process image as a Windows path; execution artefacts that record
+        // only a file name (Prefetch) get a leading '\' so Sigma's
+        // `Image|endswith: '\x.exe'` still matches.
+        "image" => win_image(ev.process.as_ref().and_then(|p| p.path.clone().filter(|s| !s.is_empty()).or_else(|| p.name.clone()))),
+        "parent_image" => win_image(ev.process.as_ref().and_then(|p| p.parent_name.clone())),
+        // File path in Windows form: $MFT stores volume-relative paths with
+        // '/', so normalise and assume the system volume.
+        "sigma.file_path" => ev.target.as_ref().and_then(|t| t.path.clone()).map(|p| {
+            let w = p.replace('/', "\\");
+            let b = w.as_bytes();
+            if (b.len() > 1 && b[1] == b':') || w.starts_with("\\\\") {
+                w
+            } else {
+                format!("C:\\{}", w.trim_start_matches('\\'))
+            }
+        }),
+        "sigma.registry_path" => ev.provenance.source_ref.as_deref().map(sigma_registry_path),
+        // Whole-record text for Sigma keyword searches.
+        "evtx.__text" => (!ev.raw.is_null()).then(|| ev.raw.to_string()),
+        f if f.starts_with("evtx.") => evtx_field(&ev.raw, &f[5..]),
         _ => None,
     }
+}
+
+fn win_image(p: Option<String>) -> Option<String> {
+    let p = p?;
+    if p.is_empty() {
+        return None;
+    }
+    Some(if p.contains('\\') || p.contains('/') { p.replace('/', "\\") } else { format!("\\{p}") })
+}
+
+/// A field from an EVTX record as Sigma names it: System fields (Channel,
+/// Provider_Name, Computer) or any EventData / UserData value.
+fn evtx_field(raw: &serde_json::Value, name: &str) -> Option<String> {
+    let sys = raw.pointer("/Event/System");
+    let v = match name {
+        "Channel" => sys.and_then(|s| s.get("Channel")).cloned(),
+        "Computer" => sys.and_then(|s| s.get("Computer")).cloned(),
+        "Provider_Name" => sys
+            .and_then(|s| s.pointer("/Provider/#attributes/Name").or_else(|| s.pointer("/Provider/Name")))
+            .cloned(),
+        _ => raw
+            .pointer("/Event/EventData")
+            .and_then(|e| e.get(name))
+            .or_else(|| {
+                // UserData has one wrapper element whose children are the fields.
+                raw.pointer("/Event/UserData")
+                    .and_then(|u| u.as_object())
+                    .and_then(|o| o.values().find_map(|inner| inner.get(name)))
+            })
+            .cloned(),
+    }?;
+    json_text(&v)
+}
+
+fn json_text(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Object(o) => o.get("#text").and_then(json_text),
+        serde_json::Value::Array(a) => Some(a.iter().filter_map(json_text).collect::<Vec<_>>().join(" ")),
+        serde_json::Value::Null => None,
+    }
+}
+
+/// fx registry key path (hive-relative, first segment = hive root name) →
+/// the HKLM\… / HKU\… form Sigma's TargetObject uses. ControlSet00N becomes
+/// CurrentControlSet; the hive is inferred from the first real key.
+fn sigma_registry_path(src: &str) -> String {
+    let mut parts: Vec<&str> = src.trim_start_matches('\\').split('\\').collect();
+    if !parts.is_empty() {
+        parts.remove(0); // hive root node name (ROOT, CsiTool, CMI-CreateHive{…})
+    }
+    let mut rest: Vec<String> = parts.iter().map(|s| s.to_string()).collect();
+    if let Some(first) = rest.first_mut() {
+        if first.len() == 13 && first.to_ascii_lowercase().starts_with("controlset0") {
+            *first = "CurrentControlSet".into();
+        }
+    }
+    let first = rest.first().map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+    let prefix = match first.as_str() {
+        "currentcontrolset" | "select" | "setup" | "mounteddevices" | "driverdatabase" => "HKLM\\SYSTEM",
+        "software" | "environment" | "console" | "control panel" | "keyboard layout" | "network" | "printers" => "HKU\\S",
+        "local settings" => "HKU\\S_Classes",
+        "sam" => "HKLM\\SAM",
+        "policy" | "policies" if rest.len() > 1 && rest[1].eq_ignore_ascii_case("secrets") => "HKLM\\SECURITY",
+        "root" if src.to_ascii_lowercase().contains("inventoryapplication") => "HKLM\\Amcache",
+        _ => "HKLM\\SOFTWARE",
+    };
+    format!("{prefix}\\{}", rest.join("\\"))
 }
 
 // ── Compiled rule set ────────────────────────────────────────────────────────
@@ -543,6 +634,126 @@ impl CompiledRules {
                 out.push(r);
             }
         }
+    }
+}
+
+// ── Gated rule set ───────────────────────────────────────────────────────────
+//
+// With thousands of rules (a Sigma pack), most can only ever match one kind of
+// event: an EVTX record from one channel with one event ID, a process start,
+// an $MFT file record. `GatedRules` reads those constraints out of each rule
+// once, then offers each event only the rules that could apply to its
+// (artefact, action, event ID). A compiled matcher is built lazily per such
+// key and cached, so millions of MFT rows never touch the EVTX-only rules and
+// each EVTX record only meets the handful written for its event ID.
+
+#[derive(Default, Clone)]
+struct Gate {
+    arts: Option<std::collections::HashSet<String>>,
+    actions: Option<std::collections::HashSet<String>>,
+    eids: Option<std::collections::HashSet<String>>,
+}
+
+const ALL_ARTEFACTS: &[&str] = &[
+    "Evtx", "Mft", "UsnJrnl", "LogFile", "Prefetch", "Amcache", "ShimCache", "RegistryRun", "RegistryService",
+    "UserAssist", "ShellBags", "BamDam", "Srum", "ScheduledTask", "Lnk", "JumpList", "Recycle", "BrowserHistory",
+    "PsHistory", "WindowsTimeline", "RemoteAccess", "RegistryGeneric", "Unclassified",
+];
+
+type Set = std::collections::HashSet<String>;
+
+fn meet(a: Option<Set>, b: Option<Set>) -> Option<Set> {
+    match (a, b) {
+        (None, x) | (x, None) => x,
+        (Some(x), Some(y)) => Some(x.intersection(&y).cloned().collect()),
+    }
+}
+fn join(a: Option<Set>, b: Option<Set>) -> Option<Set> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.union(&y).cloned().collect()),
+        _ => None,
+    }
+}
+
+/// The values a condition tree requires `field` to take, if it pins it down
+/// (None = unconstrained). Conservative: anything not provably limited is None.
+fn constraint(c: &Condition, field: &str) -> Option<Set> {
+    match c {
+        Condition::All { all } => all.iter().fold(None, |acc, x| meet(acc, constraint(x, field))),
+        Condition::Any { any } => {
+            if any.is_empty() {
+                return Some(Set::new()); // can never match
+            }
+            let mut it = any.iter().map(|x| constraint(x, field));
+            let first = it.next().unwrap();
+            it.fold(first, join)
+        }
+        Condition::Not { .. } => None,
+        Condition::Match { match_ } if match_.field == field => match match_.op {
+            MatchOp::Equals => Some(match_.values.iter().map(|v| v.to_ascii_lowercase()).collect()),
+            MatchOp::Regex if field == "artefact" => {
+                let res: Vec<regex::Regex> = match_
+                    .values
+                    .iter()
+                    .filter_map(|v| RegexBuilder::new(v).case_insensitive(match_.ci).build().ok())
+                    .collect();
+                Some(ALL_ARTEFACTS.iter().filter(|a| res.iter().any(|r| r.is_match(a))).map(|a| a.to_ascii_lowercase()).collect())
+            }
+            _ => None,
+        },
+        Condition::Match { .. } => None,
+    }
+}
+
+pub struct GatedRules<'a> {
+    rules: &'a [EventRule],
+    gates: Vec<Gate>,
+    cache: std::collections::HashMap<(String, String, String), (CompiledRules, Vec<usize>)>,
+    scratch: Vec<usize>,
+}
+
+impl<'a> GatedRules<'a> {
+    pub fn new(rules: &'a [EventRule]) -> Self {
+        let gates = rules
+            .iter()
+            .map(|r| {
+                let mut arts = constraint(&r.detection, "artefact");
+                if !r.artefacts.is_empty() {
+                    arts = meet(arts, Some(r.artefacts.iter().map(|a| a.to_ascii_lowercase()).collect()));
+                }
+                Gate { arts, actions: constraint(&r.detection, "action"), eids: constraint(&r.detection, "event.id") }
+            })
+            .collect();
+        GatedRules { rules, gates, cache: Default::default(), scratch: Vec::new() }
+    }
+
+    /// Indices of rules matching `ev` (same results as `CompiledRules` over
+    /// the whole set).
+    pub fn matching(&mut self, ev: &Event, hit: &mut Vec<bool>, out: &mut Vec<usize>) {
+        let art = format!("{:?}", ev.artefact).to_ascii_lowercase();
+        let action = ev.action.to_ascii_lowercase();
+        let eid = if ev.artefact == fx_core::ArtefactKind::Evtx { field_value(ev, "event.id").unwrap_or_default() } else { String::new() };
+        let key = (art, action, eid);
+        if !self.cache.contains_key(&key) {
+            let (a, ac, e) = (&key.0, &key.1, &key.2);
+            let idx: Vec<usize> = self
+                .gates
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| {
+                    g.arts.as_ref().map_or(true, |s| s.contains(a))
+                        && g.actions.as_ref().map_or(true, |s| s.contains(ac))
+                        && g.eids.as_ref().map_or(true, |s| s.contains(e))
+                })
+                .map(|(i, _)| i)
+                .collect();
+            let subset: Vec<EventRule> = idx.iter().map(|&i| self.rules[i].clone()).collect();
+            self.cache.insert(key.clone(), (CompiledRules::new(&subset), idx));
+        }
+        let (compiled, idx) = &self.cache[&key];
+        compiled.matching(ev, hit, &mut self.scratch);
+        out.clear();
+        out.extend(self.scratch.iter().map(|&i| idx[i]));
     }
 }
 

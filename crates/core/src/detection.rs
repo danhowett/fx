@@ -69,4 +69,7 @@ pub enum DetectionEngine {
     Correlation,
     /// A match from an analyst-supplied IOC list (post-processing sweep).
     Ioc,
+    /// A match from a community Sigma rule (post-processing, analyst-supplied
+    /// rule folder).
+    Sigma,
 }

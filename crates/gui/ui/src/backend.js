@@ -64,6 +64,13 @@ export const backend = {
       filters: [{ name: "IOC list", extensions: ["txt", "csv", "tsv", "ioc", "json", "log"] }, { name: "All files", extensions: ["*"] }],
     });
   },
+  pickSigmaFolder: async () => {
+    if (!hasTauri) return "C:\\sigma\\rules\\windows";
+    return window.__TAURI__.dialog.open({ directory: true, multiple: false, title: "Choose a Sigma rules folder (e.g. rules\\windows from a SigmaHQ release)" });
+  },
+  sigmaPreview: (config) => call("sigma_preview", { config }),
+  sigmaHunt: (config) => call("sigma_hunt", { config }),
+  sigmaSaved: () => call("sigma_saved", {}),
   ingestLog: () => call("ingest_log", {}),
   dailyActivity: () => call("daily_activity", {}),
   pickExportFile: async (format) => {
@@ -176,10 +183,30 @@ function sample(cmd, args) {
     return Promise.resolve(e ? JSON.stringify(rawFor(e), null, 2) : null);
   }
   if (cmd === "run_hunt" || cmd === "hunt_results") {
-    return Promise.resolve(sampleDetections());
+    return Promise.resolve(sampleDetections().concat(SAMPLE_SIGMA_DETS));
   }
   if (cmd === "export_findings") { return Promise.resolve(sampleDetections().length); }
   if (cmd === "export_report") { return Promise.resolve(0); }
+  if (cmd === "sigma_preview") {
+    return Promise.resolve({ files_seen: 2424, loaded: 2055, filtered: 330, folder_error: null,
+      skipped_by_reason: { "unsupported modifier |cidr": 16, "unsupported modifier |base64offset": 7, "log source not mapped (file_access)": 6, "keyword search with modifiers": 6, "other": 4 },
+      skipped_examples: [], loaded_by_source: { process_creation: 1038, registry_set: 180, file_event: 143, ps_script: 139, security: 117 } });
+  }
+  if (cmd === "sigma_hunt") {
+    const ids = SEED.slice(10, 14).map((e) => e.id);
+    SAMPLE_KV.sigma = { folder: args.config.folder, loaded: 2055, filtered: 330, files_seen: 2424,
+      skipped_by_reason: { "unsupported modifier |cidr": 16, "unsupported modifier |base64offset": 7, "log source not mapped (file_access)": 6, "keyword search with modifiers": 6, "other": 4 },
+      skipped_examples: [], loaded_by_source: { process_creation: 1038 }, folder_error: null, rules_hit: 2, findings: 5, errors: [],
+      hits: [
+        { rule_id: "sigma:demo-1", sigma_id: "demo-1", title: "Whoami Utility Execution", level: "medium", author: "Florian Roth", logsource: "process_creation", findings: 3, events: 3, first_seen: "2026-02-11T00:02:30", last_seen: "2026-02-11T00:03:30" },
+        { rule_id: "sigma:demo-2", sigma_id: "demo-2", title: "Suspicious Encoded PowerShell Command Line", level: "high", author: "Teymur Kheirkhabarov", logsource: "process_creation", findings: 2, events: 2, first_seen: "2026-02-11T00:05:00", last_seen: "2026-02-11T00:05:30" },
+      ] };
+    SAMPLE_SIGMA_DETS.length = 0;
+    SAMPLE_SIGMA_DETS.push({ rule_id: "sigma:demo-1", title: "Whoami Utility Execution", severity: "medium", attack: ["T1033"], summary: "whoami", event_ids: ids.slice(0, 3), ts: "2026-02-11T00:02:30", host: "WKSTN-07", engine: "sigma" },
+      { rule_id: "sigma:demo-2", title: "Suspicious Encoded PowerShell Command Line", severity: "high", attack: ["T1059.001"], summary: "powershell -enc", event_ids: ids.slice(3), ts: "2026-02-11T00:05:00", host: "WKSTN-07", engine: "sigma" });
+    return Promise.resolve(SAMPLE_KV.sigma);
+  }
+  if (cmd === "sigma_saved") { return Promise.resolve({ config: null, results: SAMPLE_KV.sigma || null }); }
   if (cmd === "events_by_ids") { const want = new Set(args.ids || []); return Promise.resolve(SEED.filter((e) => want.has(e.id))); }
   if (cmd === "ioc_saved") { return Promise.resolve({ text: SAMPLE_KV.ioc || "", results: SAMPLE_KV.iocResults || null }); }
   if (cmd === "ioc_save_list") { SAMPLE_KV.ioc = args.text; return Promise.resolve(); }
@@ -250,6 +277,7 @@ function demoDailyActivity() {
 // In-memory stand-ins for the demo/browser preview.
 const SAMPLE_KV = {};
 const SAMPLE_LABELS = [];
+const SAMPLE_SIGMA_DETS = [];
 
 function sampleDetections() {
   // Link each demo finding to a real SEED event (by message substring) so

@@ -47,7 +47,8 @@ impl CaseStore {
                     user_name, user_sid, user_domain,
                     process_name, process_path, process_pid, command_line, process_sha1, parent_name,
                     target_path, target_value, src_ip, dst_ip, logon_type,
-                    message, evidence_id, parser, parser_version, source_ref, raw
+                    message, evidence_id, parser, parser_version, source_ref,
+                    CASE WHEN artefact IN ('Evtx', 'BrowserHistory') THEN CAST(raw AS VARCHAR) ELSE '' END AS raw
              FROM events"
         } else {
             "SELECT id, strftime(ts, '%Y-%m-%dT%H:%M:%S') AS ts, ts_kind, artefact, action, host,
@@ -97,7 +98,13 @@ impl CaseStore {
     /// detections. IOC-sweep findings (engine = 'ioc') are kept: re-running the
     /// rules must not throw away an analyst's IOC sweep.
     pub fn write_detections(&self, dets: &[Detection]) -> Result<(), StoreError> {
-        self.connection().execute_batch("DELETE FROM detections WHERE engine <> 'ioc'")?;
+        self.connection().execute_batch("DELETE FROM detections WHERE engine NOT IN ('ioc', 'sigma')")?;
+        self.insert_detections(dets)
+    }
+
+    /// Replace the Sigma-run findings (and only those) with a new run's.
+    pub fn replace_sigma_detections(&self, dets: &[Detection]) -> Result<(), StoreError> {
+        self.connection().execute_batch("DELETE FROM detections WHERE engine = 'sigma'")?;
         self.insert_detections(dets)
     }
 
@@ -131,6 +138,7 @@ impl CaseStore {
                         DetectionEngine::SingleEvent => "single_event",
                         DetectionEngine::Correlation => "correlation",
                         DetectionEngine::Ioc => "ioc",
+                        DetectionEngine::Sigma => "sigma",
                     },
                     fmt_ts_helper(now),
                 ])?;

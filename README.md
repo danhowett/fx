@@ -117,6 +117,9 @@ around any event, and triage inline.
   URLs, paths, defanged or not) and hunt the whole case for it, post-processing,
   in one pass. The list and results are saved with the case; every match becomes
   a triageable, exportable finding.
+- **Sigma rules** — point fx at a SigmaHQ release and run ~2,000 community
+  Windows rules against a case on demand, on top of the built-in pack. Rules
+  that can't apply to triage data are skipped and counted, not guessed at.
 - **Tags** — right-click any event to tag it from a preset list or a new tag of
   your own; filter the timeline by tag from the rail.
 - **Per-day activity graph** — surface untagged volume spikes no rule flagged.

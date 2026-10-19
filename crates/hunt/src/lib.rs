@@ -13,6 +13,7 @@ pub mod correlation;
 pub mod event_rule;
 pub mod import;
 pub mod ioc;
+pub mod sigma;
 pub mod report;
 
 use correlation::{detection_from_row, CorrelationRule};
@@ -118,64 +119,11 @@ pub fn run(store: &CaseStore, rules: &RuleSet) -> HuntReport {
     let mut errors = rules.load_errors.clone();
 
     // ── Single-event engine ────────────────────────────────────────────────
-    // One streamed pass over events. Rules are pre-compiled into one combined
-    // matcher per event field (see `CompiledRules`), so a pack of hundreds of
-    // rules costs about the same per event as a pack of tens.
-    let ev_rules = &rules.event_rules;
-    if !ev_rules.is_empty() {
-        // Parse `raw` per row only if some loaded rule reads a raw-backed field
-        // (event.id / extras.*). Skipping it avoids a per-row JSON parse over
-        // the whole events table when no such rule applies.
-        let needs_raw = crate::event_rule::any_rule_needs_raw(ev_rules);
-        // The MFT parser emits one event per $SI timestamp (M/A/C/B) of a
-        // record, so a rule matching a file fired up to 4× for one file. Merge
-        // hits for the same (rule, evidence file, MFT record) into a single
-        // finding: earliest timestamp, all contributing event ids. Scoped to
-        // MFT on purpose — other parsers can share a source_ref across
-        // genuinely distinct entries (e.g. several values under one Run key).
-        let mut mft_seen: std::collections::HashMap<(String, Uuid, String), usize> =
-            std::collections::HashMap::new();
-        // Compile once: every field's conditions become one combined matcher,
-        // so per-event cost barely grows with the number of rules.
-        let compiled = crate::event_rule::CompiledRules::new(ev_rules);
-        let mut hit_buf: Vec<bool> = Vec::new();
-        let mut matched: Vec<usize> = Vec::new();
-        let scan = store.for_each_event(needs_raw, |ev| {
-            compiled.matching(ev, &mut hit_buf, &mut matched);
-            for &ri in &matched {
-                let rule = &ev_rules[ri];
-                {
-                    if ev.artefact == fx_core::ArtefactKind::Mft {
-                        if let Some(sref) = &ev.provenance.source_ref {
-                            let key = (rule.id.clone(), ev.provenance.evidence_id, sref.clone());
-                            if let Some(&idx) = mft_seen.get(&key) {
-                                let d = &mut detections[idx];
-                                d.event_ids.push(ev.id);
-                                if ev.timestamp < d.timestamp {
-                                    d.timestamp = ev.timestamp;
-                                }
-                                continue;
-                            }
-                            mft_seen.insert(key, detections.len());
-                        }
-                    }
-                    detections.push(Detection {
-                        id: Uuid::new_v4(),
-                        rule_id: rule.id.clone(),
-                        title: rule.title.clone(),
-                        severity: rule.severity,
-                        attack: rule.attack.clone(),
-                        summary: single_summary(rule, ev),
-                        event_ids: vec![ev.id],
-                        timestamp: ev.timestamp,
-                        host: ev.host.clone(),
-                        engine: DetectionEngine::SingleEvent,
-                    });
-                }
-            }
-        });
-        if let Err(e) = scan {
-            errors.push(format!("single-event scan: {e}"));
+    if !rules.event_rules.is_empty() {
+        let (dets, err) = scan_events(store, &rules.event_rules, DetectionEngine::SingleEvent);
+        detections.extend(dets);
+        if let Some(e) = err {
+            errors.push(e);
         }
     }
 
@@ -213,6 +161,154 @@ pub fn run(store: &CaseStore, rules: &RuleSet) -> HuntReport {
     HuntReport {
         detections: count,
         rules_run: rules.len(),
+        errors,
+    }
+}
+
+/// One streamed pass over every event, offering each to the compiled rule
+/// set. Rules are pre-compiled into one combined matcher per event field (see
+/// `CompiledRules`), so hundreds or thousands of rules cost about the same per
+/// event as tens.
+fn scan_events(store: &CaseStore, ev_rules: &[EventRule], engine: DetectionEngine) -> (Vec<Detection>, Option<String>) {
+    let mut detections: Vec<Detection> = Vec::new();
+    // Parse `raw` per row only if some loaded rule reads a raw-backed field
+    // (event.id / extras.* / Sigma EventData fields).
+    let needs_raw = crate::event_rule::any_rule_needs_raw(ev_rules);
+    // The MFT parser emits one event per $SI timestamp (M/A/C/B) of a record,
+    // so a rule matching a file fired up to 4x for one file. Merge hits for the
+    // same (rule, evidence file, MFT record) into a single finding: earliest
+    // timestamp, all contributing event ids. Scoped to MFT on purpose — other
+    // parsers can share a source_ref across genuinely distinct entries.
+    let mut mft_seen: std::collections::HashMap<(String, Uuid, String), usize> = std::collections::HashMap::new();
+    let mut compiled = crate::event_rule::GatedRules::new(ev_rules);
+    let mut hit_buf: Vec<bool> = Vec::new();
+    let mut matched: Vec<usize> = Vec::new();
+    let scan = store.for_each_event(needs_raw, |ev| {
+        compiled.matching(ev, &mut hit_buf, &mut matched);
+        for &ri in &matched {
+            let rule = &ev_rules[ri];
+            if ev.artefact == fx_core::ArtefactKind::Mft {
+                if let Some(sref) = &ev.provenance.source_ref {
+                    let key = (rule.id.clone(), ev.provenance.evidence_id, sref.clone());
+                    if let Some(&idx) = mft_seen.get(&key) {
+                        let d: &mut Detection = &mut detections[idx];
+                        d.event_ids.push(ev.id);
+                        if ev.timestamp < d.timestamp {
+                            d.timestamp = ev.timestamp;
+                        }
+                        continue;
+                    }
+                    mft_seen.insert(key, detections.len());
+                }
+            }
+            detections.push(Detection {
+                id: Uuid::new_v4(),
+                rule_id: rule.id.clone(),
+                title: rule.title.clone(),
+                severity: rule.severity,
+                attack: rule.attack.clone(),
+                summary: single_summary(rule, ev),
+                event_ids: vec![ev.id],
+                timestamp: ev.timestamp,
+                host: ev.host.clone(),
+                engine,
+            });
+        }
+    });
+    (detections, scan.err().map(|e| format!("single-event scan: {e}")))
+}
+
+/// Per-rule outcome of a Sigma run.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SigmaRuleHit {
+    pub rule_id: String,
+    pub sigma_id: String,
+    pub title: String,
+    pub level: String,
+    pub author: String,
+    pub logsource: String,
+    pub findings: usize,
+    pub events: usize,
+    pub first_seen: Option<String>,
+    pub last_seen: Option<String>,
+}
+
+/// Result of running a Sigma folder against the open case.
+#[derive(Debug, serde::Serialize)]
+pub struct SigmaRunReport {
+    pub folder: String,
+    pub loaded: usize,
+    pub filtered: usize,
+    pub files_seen: usize,
+    pub skipped_by_reason: std::collections::BTreeMap<String, usize>,
+    pub skipped_examples: Vec<sigma::SigmaSkip>,
+    pub loaded_by_source: std::collections::BTreeMap<String, usize>,
+    pub folder_error: Option<String>,
+    pub rules_hit: usize,
+    pub findings: usize,
+    pub hits: Vec<SigmaRuleHit>,
+    pub errors: Vec<String>,
+}
+
+/// Run already-loaded Sigma rules against the case. Replaces the previous
+/// Sigma findings only — built-in rule and IOC findings are untouched.
+pub fn run_sigma(store: &CaseStore, folder: &str, load: &sigma::SigmaLoad) -> SigmaRunReport {
+    let mut errors = Vec::new();
+    let mut dets = Vec::new();
+    if !load.rules.is_empty() {
+        let (d, err) = scan_events(store, &load.rules, DetectionEngine::Sigma);
+        dets = d;
+        if let Some(e) = err {
+            errors.push(e);
+        }
+    }
+    dets.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.timestamp.cmp(&b.timestamp)));
+    if let Err(e) = store.replace_sigma_detections(&dets) {
+        errors.push(format!("persist Sigma findings: {e}"));
+    }
+    let fmt = time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
+    let mut by_rule: std::collections::BTreeMap<String, SigmaRuleHit> = std::collections::BTreeMap::new();
+    for d in &dets {
+        let meta = load.meta.get(&d.rule_id);
+        let ts = d.timestamp.format(&fmt).ok();
+        let h = by_rule.entry(d.rule_id.clone()).or_insert_with(|| SigmaRuleHit {
+            rule_id: d.rule_id.clone(),
+            sigma_id: meta.map(|m| m.sigma_id.clone()).unwrap_or_default(),
+            title: d.title.clone(),
+            level: meta.map(|m| m.level.clone()).unwrap_or_default(),
+            author: meta.map(|m| m.author.clone()).unwrap_or_default(),
+            logsource: meta.map(|m| m.logsource.clone()).unwrap_or_default(),
+            findings: 0,
+            events: 0,
+            first_seen: None,
+            last_seen: None,
+        });
+        h.findings += 1;
+        h.events += d.event_ids.len();
+        if let Some(t) = ts {
+            if h.first_seen.as_ref().map_or(true, |f| &t < f) {
+                h.first_seen = Some(t.clone());
+            }
+            if h.last_seen.as_ref().map_or(true, |l| &t > l) {
+                h.last_seen = Some(t);
+            }
+        }
+    }
+    let rank = |l: &str| match l { "critical" => 0, "high" => 1, "medium" => 2, "low" => 3, _ => 4 };
+    let mut hits: Vec<SigmaRuleHit> = by_rule.into_values().collect();
+    hits.sort_by(|a, b| rank(&a.level).cmp(&rank(&b.level)).then(b.findings.cmp(&a.findings)));
+    SigmaRunReport {
+        folder: folder.to_string(),
+        loaded: load.loaded,
+        filtered: load.filtered,
+        files_seen: load.files_seen,
+        skipped_by_reason: load.skipped_by_reason.clone(),
+        skipped_examples: load.skipped_examples.clone(),
+        loaded_by_source: load.loaded_by_source.clone(),
+        folder_error: load.folder_error.clone(),
+        rules_hit: hits.len(),
+        findings: dets.len(),
+        hits,
         errors,
     }
 }
@@ -349,6 +445,8 @@ mod embedded_rules_tests {
                       Not { not } => lits(not, out), Match { match_ } => out.extend(match_.values.iter().cloned()) }
         }
         for r in rules { lits(&r.detection, &mut corpus); }
+        let mut gated = crate::event_rule::GatedRules::new(rules);
+        let (mut gh, mut go) = (Vec::new(), Vec::new());
         for v in &corpus {
             for field in ["process.command_line", "process.name", "process.path", "target.path", "message", "action", "process.parent_name"] {
                 for art in ["evtx", "mft", "prefetch"] {
@@ -357,8 +455,9 @@ mod embedded_rules_tests {
                     ex.insert("artefact".to_string(), art.to_string());
                     let ev = event_from_example(&ex);
                     compiled.matching(&ev, &mut hit, &mut out);
+                    gated.matching(&ev, &mut gh, &mut go);
                     for (ri, r2) in rules.iter().enumerate() {
-                        if r2.matches(&ev) != out.contains(&ri) {
+                        if r2.matches(&ev) != out.contains(&ri) || out.contains(&ri) != go.contains(&ri) {
                             failures.push(format!("{}: engines disagree on {field}={v:?} ({art})", r2.id));
                         }
                     }

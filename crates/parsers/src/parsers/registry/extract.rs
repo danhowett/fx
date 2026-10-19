@@ -574,6 +574,15 @@ impl Extractor for ShellBags {
         sink: &mut dyn EventSink,
         outcome: &mut ParseOutcome,
     ) {
+        // Node path of this key under BagMRU ("" for the root, "0\3" for a
+        // child). Each numbered value N here is the child node "<node>\N".
+        let (bag_root, node) = match key_path.to_ascii_lowercase().find(r"\bagmru") {
+            Some(ix) => {
+                let end = ix + r"\bagmru".len();
+                (key_path[..end].to_string(), key_path[end..].trim_start_matches('\\').to_string())
+            }
+            None => return,
+        };
         for v in key.value_iter() {
             let name = super::value_name(&v);
             // Only numbered slot values hold child shell items.
@@ -584,11 +593,19 @@ impl Extractor for ShellBags {
             if bytes.len() < 4 {
                 continue;
             }
-            let folder = shell_item_name(&bytes);
-            // Skip slots that yielded nothing readable (GUID/control-panel items).
-            let Some(folder) = folder else { continue };
+            let child = if node.is_empty() { name.clone() } else { format!("{node}\\{name}") };
+            // Parse the shell item properly; items we can't name (GUID-only
+            // device / control-panel items) are skipped rather than mis-named.
+            let Some(item) = parse_shell_item(&bytes) else { continue };
+            let full = shellbag_remember(&ctx.source_path, &bag_root, &child, &item);
+            // Roots (This PC, Network…) are remembered for path building but
+            // aren't a folder the user browsed, so they don't get an event.
+            if item.kind == ShellItemKind::Root {
+                continue;
+            }
+            let folder = full.clone().unwrap_or_else(|| item.name.clone());
 
-            let is_volume = looks_like_volume(&folder);
+            let is_volume = item.kind == ShellItemKind::Volume || looks_like_volume(&folder);
             let mut message = format!("ShellBag (folder browsed): {folder}");
             if is_volume {
                 message.push_str("  [VOLUME/REMOVABLE]");
@@ -609,7 +626,10 @@ impl Extractor for ShellBags {
                 json!({
                     "key": key_path,
                     "slot": name,
+                    "node": child,
                     "folder": folder,
+                    "item_name": item.name,
+                    "item_type": format!("0x{:02x}", item.class),
                     "volume_or_removable": is_volume,
                     "shell_item_bytes": bytes.len(),
                 }),
@@ -619,81 +639,226 @@ impl Extractor for ShellBags {
     }
 }
 
-/// Extract a human-readable folder name from a shell-item (ITEMIDLIST) blob.
-/// Folder shell items embed the name as ASCII and/or UTF-16LE; we scan for the
-/// longest plausible printable run of each and prefer the UTF-16 one (the long
-/// name in modern items). Returns None when nothing readable is found (e.g. a
-/// GUID/known-folder item), so those slots are skipped rather than mis-named.
-fn shell_item_name(bytes: &[u8]) -> Option<String> {
-    let utf16 = longest_utf16le(bytes);
-    let ascii = longest_ascii(bytes);
-    let pick = match (utf16, ascii) {
-        (Some(u), Some(a)) => {
-            if u.chars().count() >= a.chars().count() {
-                u
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellItemKind {
+    Root,
+    Volume,
+    Folder,
+    Network,
+}
+
+#[derive(Debug, Clone)]
+struct ShellItem {
+    kind: ShellItemKind,
+    class: u8,
+    name: String,
+}
+
+/// Parse one shell item (an ITEMIDLIST entry stored in a BagMRU slot) into a
+/// name, following the item's real structure rather than scanning for text:
+///
+/// * 0x1F root folder: a GUID, mapped to its known name (This PC, Network…)
+/// * 0x2X volume: ASCII drive string at offset 3 ("C:\")
+/// * 0x3X file entry: 8.3 name at offset 14, long name from the 0xBEEF0004
+///   extension block (UTF-16, offset depends on the block version)
+/// * 0x4X network location: ASCII path at offset 5 ("\\server\share")
+/// * 0x74 delegate (users-files) item: an embedded file entry after "CFSF"
+///
+/// Scanning the blob for "the longest readable run" (the previous approach)
+/// picked up size/attribute bytes decoded as UTF-16, which showed as stray
+/// CJK characters before names, or as junk like "F]|lF]Zw." for item types
+/// it couldn't read. Unknown or unreadable items now return None.
+fn parse_shell_item(b: &[u8]) -> Option<ShellItem> {
+    if b.len() < 4 {
+        return None;
+    }
+    let class = b[2];
+    let item = |kind, name: String| clean_name(&name).map(|name| ShellItem { kind, class, name });
+    match class {
+        0x1F => {
+            let guid = guid_at(b, 4)?;
+            known_folder_name(&guid).and_then(|n| item(ShellItemKind::Root, n.to_string()))
+        }
+        0x20..=0x2F => {
+            let s = ascii_z(b, 3)?;
+            let s = s.trim_end_matches('\\');
+            if s.len() >= 2 && s.as_bytes()[1] == b':' {
+                item(ShellItemKind::Volume, format!("{s}\\"))
             } else {
-                a
+                None
             }
         }
-        (Some(u), None) => u,
-        (None, Some(a)) => a,
-        (None, None) => return None,
+        0x30..=0x3F | 0xB1 => file_entry_name(b, 0).and_then(|n| item(ShellItemKind::Folder, n)),
+        0x40..=0x4F => ascii_z(b, 5).and_then(|n| item(ShellItemKind::Network, n)),
+        0x74 => {
+            // Delegate item: "CFSF" then an embedded file-entry item.
+            let at = find(b, b"CFSF")?;
+            let inner = at + 4;
+            file_entry_name(b, inner)
+                .or_else(|| beef0004_long_name(b))
+                .and_then(|n| item(ShellItemKind::Folder, n))
+        }
+        _ => beef0004_long_name(b).and_then(|n| item(ShellItemKind::Folder, n)),
+    }
+}
+
+/// File-entry item starting at `base` (its size field). Prefers the long name
+/// in the BEEF0004 extension; falls back to the primary (8.3) name.
+fn file_entry_name(b: &[u8], base: usize) -> Option<String> {
+    let class = *b.get(base + 2)?;
+    let unicode = class & 0x04 != 0;
+    let off = base + 14;
+    let primary = if unicode { utf16_z(b, off) } else { ascii_z(b, off) };
+    beef0004_long_name(&b[base..]).or(primary)
+}
+
+/// Long name from the first 0xBEEF0004 extension block, if present.
+fn beef0004_long_name(b: &[u8]) -> Option<String> {
+    let sig = find(b, &[0x04, 0x00, 0xEF, 0xBE])?;
+    if sig < 4 {
+        return None;
+    }
+    let ext = sig - 4;
+    let size = u16::from_le_bytes([*b.get(ext)?, *b.get(ext + 1)?]) as usize;
+    let version = u16::from_le_bytes([*b.get(ext + 2)?, *b.get(ext + 3)?]);
+    // Offset of the long name within the block, by extension version
+    // (per the libfwsi documentation of the BEEF0004 block).
+    let rel = match version {
+        3..=6 => 20,
+        7 => 38,
+        8 => 42,
+        v if v >= 9 => 46,
+        _ => return None,
     };
-    let pick = pick.trim().trim_matches('\0').to_string();
-    if pick.chars().count() >= 2 && pick.chars().any(|c| c.is_alphanumeric()) {
-        Some(pick)
-    } else {
-        None
-    }
+    let end = if size >= rel && ext + size <= b.len() { ext + size } else { b.len() };
+    utf16_z(&b[..end], ext + rel)
 }
 
-/// Longest run of printable ASCII (>=3 chars), a common folder-name encoding.
-fn longest_ascii(bytes: &[u8]) -> Option<String> {
-    let mut best = String::new();
-    let mut cur = String::new();
-    for &b in bytes {
-        if (0x20..=0x7e).contains(&b) {
-            cur.push(b as char);
-        } else {
-            if cur.chars().count() > best.chars().count() {
-                best = cur.clone();
-            }
-            cur.clear();
-        }
+/// Reject names that aren't plausible folder names (control characters,
+/// decoding replacement characters, or nothing alphanumeric).
+fn clean_name(s: &str) -> Option<String> {
+    let t = s.trim().trim_matches('\0');
+    if t.is_empty()
+        || t.chars().any(|c| c.is_control() || c == '\u{FFFD}')
+        || !t.chars().any(|c| c.is_alphanumeric())
+    {
+        return None;
     }
-    if cur.chars().count() > best.chars().count() {
-        best = cur;
-    }
-    (best.chars().count() >= 3).then_some(best)
+    Some(t.to_string())
 }
 
-/// Longest run of printable UTF-16LE (>=3 chars) — the long name in modern
-/// shell items.
-fn longest_utf16le(bytes: &[u8]) -> Option<String> {
-    let mut best: Vec<u16> = Vec::new();
-    let mut cur: Vec<u16> = Vec::new();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        let u = u16::from_le_bytes([bytes[i], bytes[i + 1]]);
-        // printable BMP range, excluding controls
-        if (0x20..=0xd7ff).contains(&u) && u != 0 {
-            cur.push(u);
-        } else {
-            if cur.len() > best.len() {
-                best = cur.clone();
-            }
-            cur.clear();
+fn ascii_z(b: &[u8], off: usize) -> Option<String> {
+    let rest = b.get(off..)?;
+    let end = rest.iter().position(|&c| c == 0).unwrap_or(rest.len());
+    let s = &rest[..end];
+    if s.is_empty() || !s.iter().all(|&c| (0x20..0x7f).contains(&c)) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(s).into_owned())
+}
+
+fn utf16_z(b: &[u8], off: usize) -> Option<String> {
+    let mut units = Vec::new();
+    let mut i = off;
+    while i + 1 < b.len() {
+        let u = u16::from_le_bytes([b[i], b[i + 1]]);
+        if u == 0 {
+            break;
         }
+        units.push(u);
         i += 2;
     }
-    if cur.len() > best.len() {
-        best = cur;
+    if units.is_empty() {
+        return None;
     }
-    if best.len() >= 3 {
-        Some(String::from_utf16_lossy(&best))
-    } else {
-        None
-    }
+    String::from_utf16(&units).ok()
+}
+
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+fn guid_at(b: &[u8], off: usize) -> Option<String> {
+    let g = b.get(off..off + 16)?;
+    Some(format!(
+        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        u32::from_le_bytes([g[0], g[1], g[2], g[3]]),
+        u16::from_le_bytes([g[4], g[5]]),
+        u16::from_le_bytes([g[6], g[7]]),
+        g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15]
+    ))
+}
+
+/// Root-folder GUIDs seen in BagMRU, mapped to the names Explorer shows.
+fn known_folder_name(guid: &str) -> Option<&'static str> {
+    Some(match guid {
+        "20d04fe0-3aea-1069-a2d8-08002b30309d" => "This PC",
+        "208d2c60-3aea-1069-a2d7-08002b30309d" => "Network",
+        "f02c1a0d-be21-4350-88b0-7367fc96ef3c" => "Network",
+        "59031a47-3f72-44a7-89c5-5595fe6b30ee" => "User folder",
+        "031e4825-7b94-4dc3-b131-e946b44c8dd5" => "Libraries",
+        "679f85cb-0220-4080-b29b-5540cc05aab6" => "Quick access",
+        "645ff040-5081-101b-9f08-00aa002f954e" => "Recycle Bin",
+        "21ec2020-3aea-1069-a2dd-08002b30309d" => "Control Panel",
+        "26ee0668-a00a-44d7-9371-beb064c98683" => "Control Panel",
+        "374de290-123f-4565-9164-39c4925e467b" => "Downloads",
+        "b4bfcc3a-db2c-424c-b029-7fe99a87c641" => "Desktop",
+        "d3162b92-9365-467a-956b-92703aca08af" => "Documents",
+        "088e3905-0323-4b02-9826-5d99428e115f" => "Downloads",
+        "24ad3ad4-a569-4530-98e1-ab02f9417aa8" => "Pictures",
+        "3dfdf296-dbec-4fb4-81d1-6a3438bcf4de" => "Music",
+        "f86fa3ab-70d2-4fc7-9c99-fcbf05467f3a" => "Videos",
+        "018d5c66-4533-4307-9b53-224de2ed1fe6" => "OneDrive",
+        _ => return None,
+    })
+}
+
+thread_local! {
+    /// BagMRU node -> name, per hive, so each slot can be shown as a full
+    /// path ("C:\Users\x\AppData\Roaming") instead of just its last folder.
+    /// The registry walk visits a key before its subkeys, so a node's parent
+    /// is always known by the time the node itself is read.
+    static SHELLBAG_NODES: std::cell::RefCell<(String, std::collections::HashMap<String, ShellItem>)> =
+        std::cell::RefCell::new((String::new(), std::collections::HashMap::new()));
+}
+
+/// Record a node's item and return its full path, built from its ancestors.
+/// Roots like "This PC" are omitted when a drive letter follows them.
+fn shellbag_remember(source: &str, bag_root: &str, node: &str, item: &ShellItem) -> Option<String> {
+    SHELLBAG_NODES.with(|cell| {
+        let mut st = cell.borrow_mut();
+        if st.0 != source {
+            st.0 = source.to_string();
+            st.1.clear();
+        }
+        st.1.insert(format!("{bag_root}|{node}"), item.clone());
+        let parts: Vec<&str> = node.split('\\').collect();
+        let mut chain: Vec<ShellItem> = Vec::new();
+        for i in 1..=parts.len() {
+            let key = format!("{bag_root}|{}", parts[..i].join("\\"));
+            match st.1.get(&key) {
+                Some(it) => chain.push(it.clone()),
+                None => return None, // ancestor unknown (e.g. deleted key): name only
+            }
+        }
+        // Drop root items that precede a volume or network path.
+        let start = chain
+            .iter()
+            .rposition(|it| matches!(it.kind, ShellItemKind::Volume | ShellItemKind::Network))
+            .unwrap_or(0);
+        let mut out = String::new();
+        for it in &chain[start..] {
+            if out.is_empty() {
+                out.push_str(&it.name);
+            } else {
+                if !out.ends_with('\\') {
+                    out.push('\\');
+                }
+                out.push_str(&it.name);
+            }
+        }
+        Some(out)
+    })
 }
 
 /// Does the extracted name look like a drive-letter volume (e.g. "E:\" or
@@ -1195,6 +1360,54 @@ mod decode_tests {
         assert_eq!(s.run_count, 4); // XP stores count + 5
         assert_eq!(s.last_run, None); // zero FILETIME = unknown
         assert!(decode_userassist(&[0u8; 10]).is_none());
+    }
+
+    #[test]
+    fn shell_items_parse_cleanly() {
+        // Volume item: "C:\"
+        let mut vol = vec![0x19, 0x00, 0x2F];
+        vol.extend_from_slice(b"C:\\\0");
+        vol.resize(0x19, 0);
+        let v = parse_shell_item(&vol).unwrap();
+        assert_eq!(v.name, "C:\\");
+        assert_eq!(v.kind, ShellItemKind::Volume);
+
+        // File-entry item: 8.3 name + BEEF0004 v9 long name. The bytes before
+        // the names are what the old text-scan mis-decoded as CJK characters.
+        let long = "Users";
+        let mut fe = vec![0u8, 0, 0x31, 0x00];
+        fe.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // size
+        fe.extend_from_slice(&[0x45, 0x58, 0x87, 0x7E]); // FAT datetime (noise)
+        fe.extend_from_slice(&[0x11, 0x00]); // attributes
+        fe.extend_from_slice(b"Users\0"); // 8.3 name (even length incl NUL)
+        let ext_start = fe.len();
+        let mut ext = vec![0u8, 0, 0x09, 0x00, 0x04, 0x00, 0xEF, 0xBE];
+        ext.extend_from_slice(&[0x45, 0x58, 0x87, 0x7E, 0x45, 0x58, 0x87, 0x7E]); // c/a times
+        ext.extend_from_slice(&[0x2E, 0x00]); // identifier
+        ext.resize(46, 0x5A); // version-9 fields (noise)
+        for u in long.encode_utf16() { ext.extend_from_slice(&u.to_le_bytes()); }
+        ext.extend_from_slice(&[0, 0]);
+        let el = ext.len() as u16;
+        ext[0..2].copy_from_slice(&el.to_le_bytes());
+        fe.extend_from_slice(&ext);
+        let total = fe.len() as u16;
+        fe[0..2].copy_from_slice(&total.to_le_bytes());
+        let _ = ext_start;
+        let f = parse_shell_item(&fe).unwrap();
+        assert_eq!(f.name, "Users");
+
+        // Unknown item with no readable structure is skipped, not mis-named.
+        assert!(parse_shell_item(&[0x10, 0x00, 0x00, 0x46, 0x5D, 0x7C, 0x6C, 0x46, 0x5D, 0x5A, 0x77, 0x2E, 0, 0, 0, 0]).is_none());
+
+        // Full path from ancestors: This PC / C:\ / Users -> "C:\Users"
+        let mut root = vec![0x14, 0x00, 0x1F, 0x50];
+        root.extend_from_slice(&[0xE0, 0x4F, 0xD0, 0x20, 0xEA, 0x3A, 0x69, 0x10, 0xA2, 0xD8, 0x08, 0x00, 0x2B, 0x30, 0x30, 0x9D]);
+        let r = parse_shell_item(&root).unwrap();
+        assert_eq!(r.name, "This PC");
+        shellbag_remember("hive-t", "bag", "0", &r);
+        shellbag_remember("hive-t", "bag", "0\\1", &v);
+        let p = shellbag_remember("hive-t", "bag", "0\\1\\0", &f).unwrap();
+        assert_eq!(p, "C:\\Users");
     }
 
     #[test]

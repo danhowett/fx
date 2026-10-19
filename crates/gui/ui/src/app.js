@@ -26,6 +26,8 @@ const state = {
   labels: [],       // [{event_id, tag}] analyst tags
   detailW: 440, detailWide: false, rawFont: 12, rawWrap: true,
   ioc: null,        // {text, results} saved IOC hunt for the open case
+  iocTab: "ioc",    // "ioc" | "sigma" tab in the IOC hunt view
+  sigma: undefined, // last Sigma run report for the open case (undefined = not loaded yet)
   idFilter: null,   // {label, ids, key}: timeline shows exactly these events (IOC matches); dropped when any other filter changes
   filter: { text: "", category: null, artefact: null, triage: null, flagged_only: false, limit: 5000, offset: 0 },
   selectedId: null,
@@ -43,6 +45,8 @@ async function init() {
   state.rawWrap = !!loadPref("fx.rawWrap", 1);
   applyDetailWidth();
   window.addEventListener("resize", applyDetailWidth);
+  let mtResize = null;
+  window.addEventListener("resize", () => { clearTimeout(mtResize); mtResize = setTimeout(() => { if (state.view === "timeline" && state.overview) renderMiniTimeline(); }, 150); });
   // Escape hatch: clicking the overlay backdrop dismisses it, so a stuck
   // operation can never trap the UI.
   const ov = el("overlay");
@@ -90,6 +94,8 @@ async function renderCase(overview, label) {
   state.triage = (await backend.listTriage()) || [];
   try { state.labels = (await backend.listLabels()) || []; } catch (e) { state.labels = []; }
   state.ioc = null;
+  state.sigma = undefined;
+  state.days = null;
   state.view = "timeline";
   renderRail();
   renderToolbar();
@@ -496,6 +502,13 @@ async function onNewCase() {
 
     showOverlay("Running detections…", "Hunting for financially-motivated-actor TTPs.");
     await backend.runHunt(null);
+    // Optional: community Sigma rules on every new case (off by default). A
+    // missing / empty folder is ignored silently — built-in results stand.
+    const sc = sigmaConfig();
+    if (sc.auto && sc.folder) {
+      showOverlay("Running Sigma rules…", "Community rules from " + sc.folder);
+      try { await backend.sigmaHunt({ folder: sc.folder, filter: sc.filter }); } catch (e) { /* built-in results stand */ }
+    }
 
     hideOverlay();
     await renderCase(overview, `case · ${baseName(casePath)}`);
@@ -552,6 +565,9 @@ function renderRail() {
     ${renderLabelSummary()}
     <section>
       <h2>Category</h2>
+      <div class="facet allev ${allEventsActive() ? "active" : ""}" id="allEventsLink" title="Show the whole timeline with every filter cleared">
+        <span class="swatch" style="background:var(--ink-faint)"></span><span class="name">All events</span><span class="count">${fmt(o.total_events)}</span>
+      </div>
       ${catFacets}
     </section>
     <section>
@@ -684,6 +700,7 @@ function renderToolbar() {
       ${hasRange ? `<span class="chip" id="trClear">clear range ✕</span>` : ""}
     </span>
     ${activeFilterChips()}
+    ${!inHunt && !allEventsActive() ? `<button class="clear-all" id="clearAllBtn" title="Clear search, category, artefact, triage, flagged and date filters">Clear all filters</button>` : ""}
     <span class="spacer"></span>
     <span class="result-count" id="resultCount"></span>`;
 
@@ -691,6 +708,8 @@ function renderToolbar() {
   const from = el("trFrom"), to = el("trTo");
   if (from) from.addEventListener("change", () => { state.filter.after = fromLocalInput(from.value); state.filter.offset = 0; renderToolbar(); refresh(); });
   if (to) to.addEventListener("change", () => { state.filter.before = fromLocalInput(to.value); state.filter.offset = 0; renderToolbar(); refresh(); });
+  const ca = el("clearAllBtn");
+  if (ca) ca.addEventListener("click", clearAllFilters);
   const clr = el("trClear");
   if (clr) clr.addEventListener("click", () => { state.filter.after = null; state.filter.before = null; state.filter.offset = 0; renderToolbar(); refresh(); });
 }
@@ -729,11 +748,23 @@ async function openIocHunt() {
   renderRail(); renderToolbar(); refresh();
 }
 
+function iocTabs() {
+  const t = state.iocTab || "ioc";
+  return `<div class="iocv-tabs" role="tablist">
+    <button role="tab" class="iocv-tab ${t === "ioc" ? "on" : ""}" data-tab="ioc" aria-selected="${t === "ioc"}">Indicators</button>
+    <button role="tab" class="iocv-tab ${t === "sigma" ? "on" : ""}" data-tab="sigma" aria-selected="${t === "sigma"}">Sigma rules</button>
+  </div>`;
+}
+function wireIocTabs() {
+  document.querySelectorAll(".iocv-tab").forEach((b) => { b.onclick = () => { state.iocTab = b.dataset.tab; renderIocView(); }; });
+}
+
 function renderIocView() {
+  if ((state.iocTab || "ioc") === "sigma") { renderSigmaView(); return; }
   const io = state.ioc || { text: "", results: null };
   el("resultCount").textContent = "IOC hunt";
   el("spTop").style.height = "0px"; el("spBot").style.height = "0px";
-  el("rows").innerHTML = `<div class="iocv" id="iocView">
+  el("rows").innerHTML = iocTabs() + `<div class="iocv" id="iocView">
     <div class="iocv-left">
       <h2 class="iocv-h">Indicators</h2>
       <p class="iocv-sub">One per line: hashes, IPs, domains, URLs, file names, paths or text. Defanged values work. The list is saved with this case.</p>
@@ -747,6 +778,7 @@ function renderIocView() {
     </div>
     <div class="iocv-right" id="iocRight"></div>
   </div>`;
+  wireIocTabs();
   renderIocResults(io.results);
   const ta = el("iocText");
   ta.oninput = () => {
@@ -821,15 +853,15 @@ function renderIocResults(r) {
     + `<td class="n">${x.events ? fmt(x.events) : "—"}</td>`
     + `<td class="ts">${x.first_seen ? escapeHtml(ukDateTime(x.first_seen)) : ""}</td>`
     + `<td class="ts">${x.last_seen && x.events > 1 ? escapeHtml(ukDateTime(x.last_seen)) : ""}</td>`
-    + `<td class="where">${Object.entries(x.artefacts || {}).map(([k, n]) => `${escapeHtml(k)} ${fmt(n)}`).join(", ")}</td></tr>`;
+    + `<td class="where">${Object.entries(x.artefacts || {}).map(([k, n]) => `${escapeHtml(k)} ${fmt(n)}`).join(", ")}</td><td class="go">${x.events ? "›" : ""}</td></tr>`;
   box.innerHTML = `<div class="iocv-sumrow">
       <div class="iocv-sum"><span class="big">${fmt(r.matched)}</span> of ${fmt(r.iocs)} indicator${r.iocs === 1 ? "" : "s"} found <span class="faint">across ${fmt(r.events_scanned)} events</span></div>
       ${r.matched ? `<button class="topbtn" id="iocAsFindings">Show as findings</button>` : ""}
     </div>
     <div class="ioc-table-wrap"><table class="ioc-table">
-      <thead><tr><th>Indicator</th><th>Type</th><th style="text-align:right">Events</th><th>First seen</th><th>Last seen</th><th>Where</th></tr></thead>
-      <tbody>${hits.map(row).join("") || `<tr class="miss"><td colspan="6">No indicator appears in this case.</td></tr>`}</tbody>
-      ${misses.length ? `<tbody><tr class="sep" id="iocMissToggle"><td colspan="6">${fmt(misses.length)} not found, click to show</td></tr></tbody><tbody id="iocMisses" hidden>${misses.map(row).join("")}</tbody>` : ""}
+      <thead><tr><th>Indicator</th><th>Type</th><th style="text-align:right">Events</th><th>First seen</th><th>Last seen</th><th>Where</th><th></th></tr></thead>
+      <tbody>${hits.map(row).join("") || `<tr class="miss"><td colspan="7">No indicator appears in this case.</td></tr>`}</tbody>
+      ${misses.length ? `<tbody><tr class="sep" id="iocMissToggle"><td colspan="7">${fmt(misses.length)} not found, click to show</td></tr></tbody><tbody id="iocMisses" hidden>${misses.map(row).join("")}</tbody>` : ""}
     </table></div>
     <p class="iocv-note">Running the hunt again replaces these results and their findings.</p>`;
   const t = el("iocMissToggle");
@@ -839,17 +871,276 @@ function renderIocResults(r) {
   box.querySelectorAll("tr.hit[data-val]").forEach((tr) => {
     tr.onclick = () => {
       const v = tr.dataset.val;
-      const det = (state.detections || []).find((d) => d.engine === "ioc" && d.rule_id.endsWith(":" + v));
-      if (det) showIocEvents(det);
+      // IOC finding ids are stored lower-cased ("ioc:<type>:<value>"), so
+      // match case-insensitively — paths and hashes keep their case here.
+      const want = (":" + v).toLowerCase();
+      const det = (state.detections || []).find((d) => d.engine === "ioc" && d.rule_id.toLowerCase().endsWith(want));
+      if (det) showIocEvents(det, v);
+      else toast("No events stored for this indicator — run the hunt again");
+    };
+  });
+}
+
+// ── All events / mini timeline ───────────────────────────────────────────────
+// Back to the whole timeline: every filter (search, category, artefact,
+// triage, flagged, dates, IOC / tag / Sigma event filters) cleared.
+function clearAllFilters() {
+  state.view = "timeline"; state.idFilter = null; state.huntOnly = null;
+  state.filter = { text: "", category: null, artefact: null, triage: null, flagged_only: false, limit: 5000, offset: 0 };
+  if (el("search")) el("search").value = "";
+  closeDetail(); renderRail(); renderToolbar(); refresh();
+}
+function allEventsActive() {
+  const f = state.filter || {};
+  return state.view === "timeline" && !state.idFilter && !f.text && !f.category && !f.artefact && !f.triage && !f.flagged_only && !f.after && !f.before;
+}
+
+// A narrow, time-proportional histogram of the whole case above the event
+// list: shows where activity sits across the case's span (gaps included),
+// the flagged share in red, and the current time filter. Click a bar to
+// filter to that slice; drag across it to choose any range.
+async function renderMiniTimeline() {
+  const box = el("miniTl");
+  if (!box) return;
+  if (!state.days) {
+    try {
+      state.days = ((await backend.dailyActivity()) || [])
+        .filter((d) => d && /^\d{4}-\d{2}-\d{2}$/.test(d.day))
+        .sort((a, b) => (a.day < b.day ? -1 : 1));
+    } catch (e) { state.days = []; }
+  }
+  if (state.view !== "timeline") return;
+  const days = state.days;
+  if (!days.length) { box.hidden = true; return; }
+  box.hidden = false;
+  const collapsed = !!loadPref("fx.miniTlCollapsed", false);
+  box.classList.toggle("collapsed", collapsed);
+  const DAY = 86400000;
+  const t0 = Date.parse(days[0].day + "T00:00:00Z"), t1 = Date.parse(days[days.length - 1].day + "T00:00:00Z") + DAY;
+  const W = Math.max(200, box.clientWidth - 24), H = 40;
+  const span = Math.round((t1 - t0) / DAY);
+  const nb = Math.max(1, Math.min(span, Math.floor(W / 3)));
+  const binMs = (t1 - t0) / nb;
+  const bins = Array.from({ length: nb }, () => ({ total: 0, flagged: 0 }));
+  for (const d of days) {
+    const i = Math.min(nb - 1, Math.floor((Date.parse(d.day + "T00:00:00Z") - t0) / binMs));
+    bins[i].total += d.total || 0; bins[i].flagged += d.flagged || 0;
+  }
+  const max = Math.max(1, ...bins.map((b) => b.total));
+  const useLog = max > 50 * (medianOf(bins.filter((b) => b.total).map((b) => b.total)) || 1);
+  // Square-root scale by default (quiet days stay visible next to a spike);
+  // log scale when one slice dwarfs the rest.
+  const h = (v) => (v <= 0 ? 0 : Math.max(2, (useLog ? Math.log10(v + 1) / Math.log10(max + 1) : Math.sqrt(v / max)) * (H - 2)));
+  const bw = W / nb;
+  let bars = "";
+  bins.forEach((b, i) => {
+    if (!b.total) return;
+    const x = (i * bw).toFixed(2), w = Math.max(1, bw - (bw > 3 ? 1 : 0)).toFixed(2);
+    const th = h(b.total), fh = b.flagged ? Math.max(1.5, th * (b.flagged / b.total)) : 0;
+    bars += `<rect class="mt-bar" x="${x}" y="${(H - th).toFixed(2)}" width="${w}" height="${th.toFixed(2)}"/>`;
+    if (fh) bars += `<rect class="mt-flag" x="${x}" y="${(H - fh).toFixed(2)}" width="${w}" height="${fh.toFixed(2)}"/>`;
+  });
+  // Current time filter: dim everything outside it.
+  const f = state.filter || {};
+  const fa = f.after ? Date.parse(f.after) : null, fb = f.before ? Date.parse(f.before) : null;
+  const xOf = (t) => Math.max(0, Math.min(W, ((t - t0) / (t1 - t0)) * W));
+  let shade = "";
+  if (fa || fb) {
+    const a = fa ? xOf(fa) : 0, b = fb ? xOf(fb) : W;
+    if (a > 0) shade += `<rect class="mt-out" x="0" y="0" width="${a.toFixed(1)}" height="${H}"/>`;
+    if (b < W) shade += `<rect class="mt-out" x="${b.toFixed(1)}" y="0" width="${(W - b).toFixed(1)}" height="${H}"/>`;
+  }
+  const dmy = (t) => { const d = new Date(t); return `${String(d.getUTCDate()).padStart(2, "0")}/${String(d.getUTCMonth() + 1).padStart(2, "0")}/${d.getUTCFullYear()}`; };
+  const rangeLbl = fa || fb ? `Showing ${fa ? dmy(fa) : "start"} – ${fb ? dmy(fb) : "end"}` : `${fmt(days.reduce((a, d) => a + d.total, 0))} events across ${fmt(span)} day${span === 1 ? "" : "s"}${useLog ? " · log scale" : ""}`;
+  box.innerHTML = `<svg id="mtSvg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Events over time; click or drag to filter">${bars}${shade}<rect class="mt-hover" id="mtHover" x="0" y="0" width="0" height="${H}"/><rect class="mt-sel" id="mtSel" x="0" y="0" width="0" height="${H}" visibility="hidden"/></svg>
+    <div class="mt-tip" id="mtTip" hidden></div>
+    <div class="mt-axis"><span>${dmy(t0)}</span><span class="sp"></span><span>${rangeLbl}</span>${fa || fb ? `<button class="mt-btn" id="mtReset">Show all dates</button>` : ""}<button class="mt-btn" id="mtToggle">${collapsed ? "Show timeline" : "Hide"}</button><span class="sp"></span><span>${dmy(t1 - DAY)}</span></div>`;
+  el("mtToggle").onclick = () => { savePref("fx.miniTlCollapsed", !collapsed); renderMiniTimeline(); };
+  if (el("mtReset")) el("mtReset").onclick = () => { state.filter.after = null; state.filter.before = null; state.filter.offset = 0; renderToolbar(); renderRail(); refresh(); };
+  if (collapsed) return;
+  const svg = el("mtSvg"), tip = el("mtTip"), hov = el("mtHover"), sel = el("mtSel");
+  const toX = (ev) => { const r = svg.getBoundingClientRect(); return Math.max(0, Math.min(W, ((ev.clientX - r.left) / r.width) * W)); };
+  const binAt = (x) => Math.min(nb - 1, Math.floor(x / bw));
+  const iso = (ms) => new Date(ms).toISOString().slice(0, 19) + "Z";
+  let dragFrom = null;
+  svg.onpointermove = (ev) => {
+    const x = toX(ev), i = binAt(x), b = bins[i];
+    const bs = t0 + i * binMs, be = t0 + (i + 1) * binMs - 1000;
+    hov.setAttribute("x", (i * bw).toFixed(2)); hov.setAttribute("width", bw.toFixed(2));
+    const r = svg.getBoundingClientRect();
+    tip.hidden = false;
+    tip.style.left = (12 + ((x / W) * r.width)) + "px";
+    tip.textContent = `${dmy(bs)}${binMs > DAY * 1.01 ? " – " + dmy(be) : ""} · ${fmt(b.total)} event${b.total === 1 ? "" : "s"}${b.flagged ? ` · ${fmt(b.flagged)} flagged` : ""}`;
+    if (dragFrom != null) {
+      const a = Math.min(dragFrom, x), c = Math.max(dragFrom, x);
+      sel.setAttribute("visibility", "visible"); sel.setAttribute("x", a.toFixed(1)); sel.setAttribute("width", (c - a).toFixed(1));
+    }
+  };
+  svg.onpointerleave = () => { tip.hidden = true; hov.setAttribute("width", "0"); };
+  svg.onpointerdown = (ev) => { dragFrom = toX(ev); svg.setPointerCapture(ev.pointerId); };
+  svg.onpointerup = (ev) => {
+    if (dragFrom == null) return;
+    const x = toX(ev), a = Math.min(dragFrom, x), c = Math.max(dragFrom, x);
+    dragFrom = null;
+    let from, to;
+    if (c - a < 4) { const i = binAt(x); if (!bins[i].total) { sel.setAttribute("visibility", "hidden"); return; } from = t0 + i * binMs; to = t0 + (i + 1) * binMs - 1000; }
+    else { from = t0 + (a / W) * (t1 - t0); to = t0 + (c / W) * (t1 - t0); }
+    state.filter.after = iso(from); state.filter.before = iso(to); state.filter.offset = 0;
+    closeDetail(); renderToolbar(); renderRail(); refresh();
+  };
+}
+
+// ── Sigma rules tab ──────────────────────────────────────────────────────────
+// Community Sigma rules from a folder the analyst chooses, run on demand
+// against the open case (post-processing, like the IOC hunt). fx's built-in
+// rules always run regardless; Sigma only ever adds findings.
+const SIGMA_LEVELS = [["low", "Low"], ["medium", "Medium"], ["high", "High"], ["critical", "Critical"]];
+function sigmaConfig() {
+  const c = loadPref("fx.sigma", null) || {};
+  return {
+    folder: c.folder || "",
+    auto: !!c.auto,
+    filter: { min_level: (c.filter && c.filter.min_level) || "medium", statuses: (c.filter && c.filter.statuses) || ["stable", "test"] },
+  };
+}
+function saveSigmaConfig(c) { savePref("fx.sigma", c); }
+
+async function renderSigmaView() {
+  const c = sigmaConfig();
+  el("resultCount").textContent = "IOC hunt · Sigma rules";
+  el("spTop").style.height = "0px"; el("spBot").style.height = "0px";
+  if (state.sigma === undefined) {
+    try { const s = await backend.sigmaSaved(); state.sigma = (s && s.results) || null; } catch (e) { state.sigma = null; }
+  }
+  el("rows").innerHTML = iocTabs() + `<div class="iocv" id="iocView">
+    <div class="iocv-left">
+      <h2 class="iocv-h">Sigma rules</h2>
+      <p class="iocv-sub">Run community Sigma rules against this case. fx's built-in rules always run; Sigma rules add to them and never replace them.</p>
+      <label class="sg-lbl">Rules folder</label>
+      <div class="sg-folder">
+        <span class="sg-path" id="sgPath" title="${escapeHtml(c.folder)}">${c.folder ? escapeHtml(c.folder) : "No folder chosen"}</span>
+        <button class="topbtn" id="sgPick">Choose…</button>
+      </div>
+      <p class="sg-help">Download the latest <b>core</b> release from <span class="sg-link">github.com/SigmaHQ/sigma/releases</span>, unzip it, and choose its <code>rules\\windows</code> folder. Update by swapping in a newer release.</p>
+      <div class="sg-row">
+        <label class="sg-lbl" for="sgLevel">Minimum level</label>
+        <select id="sgLevel">${SIGMA_LEVELS.map(([k, l]) => `<option value="${k}" ${c.filter.min_level === k ? "selected" : ""}>${l}</option>`).join("")}</select>
+      </div>
+      <div class="sg-row">
+        <span class="sg-lbl">Status</span>
+        ${["stable", "test", "experimental"].map((s) => `<label class="sg-chk"><input type="checkbox" data-status="${s}" ${c.filter.statuses.includes(s) ? "checked" : ""}> ${s[0].toUpperCase() + s.slice(1)}</label>`).join("")}
+      </div>
+      <div class="ioc-preview" id="sgPreview">${c.folder ? "Checking the folder…" : "Choose a folder to see how many rules will run."}</div>
+      <label class="sg-chk sg-auto"><input type="checkbox" id="sgAuto" ${c.auto ? "checked" : ""}> Also run these rules on every new case</label>
+      <div class="iocv-actions">
+        <span class="iocv-drop"></span>
+        <button class="btn-primary" id="sgGo" ${c.folder ? "" : "disabled"}>Run Sigma hunt</button>
+      </div>
+    </div>
+    <div class="iocv-right" id="sgRight"></div>
+  </div>`;
+  wireIocTabs();
+  renderSigmaResults(state.sigma);
+  const update = (patch) => { const n = Object.assign(sigmaConfig(), patch); saveSigmaConfig(n); return n; };
+  el("sgPick").onclick = async () => {
+    const dir = await backend.pickSigmaFolder();
+    if (!dir) return;
+    update({ folder: dir });
+    renderSigmaView();
+  };
+  el("sgLevel").onchange = () => { const cur = sigmaConfig(); update({ filter: { ...cur.filter, min_level: el("sgLevel").value } }); sigmaPreview(); };
+  document.querySelectorAll("[data-status]").forEach((cb) => {
+    cb.onchange = () => {
+      const st = [...document.querySelectorAll("[data-status]")].filter((x) => x.checked).map((x) => x.dataset.status);
+      const cur = sigmaConfig(); update({ filter: { ...cur.filter, statuses: st } }); sigmaPreview();
+    };
+  });
+  el("sgAuto").onchange = () => update({ auto: el("sgAuto").checked });
+  el("sgGo").onclick = runSigmaHunt;
+  if (c.folder) sigmaPreview();
+}
+
+let sigmaPreviewSeq = 0;
+async function sigmaPreview() {
+  const c = sigmaConfig(), box = el("sgPreview"), go = el("sgGo");
+  if (!box || !c.folder) return;
+  const seq = ++sigmaPreviewSeq;
+  box.textContent = "Checking the folder…";
+  try {
+    const p = await backend.sigmaPreview({ folder: c.folder, filter: c.filter });
+    if (seq !== sigmaPreviewSeq || !el("sgPreview")) return;
+    if (p.folder_error) { box.innerHTML = `<span class="warn">${escapeHtml(p.folder_error)}</span>`; go.disabled = true; return; }
+    const skipped = Object.values(p.skipped_by_reason || {}).reduce((a, b) => a + b, 0);
+    box.innerHTML = p.loaded
+      ? `<b>${fmt(p.loaded)} rule${p.loaded === 1 ? "" : "s"} ready</b> from ${fmt(p.files_seen)} files · ${fmt(p.filtered)} filtered by level/status${skipped ? ` · <span class="warn" title="${escapeHtml(Object.entries(p.skipped_by_reason).map(([r, n]) => n + " × " + r).join("\n"))}">${fmt(skipped)} can't run on triage data</span>` : ""}`
+      : `<span class="warn">No rules to run from this folder${p.files_seen ? ` (${fmt(p.files_seen)} files, ${fmt(p.filtered)} filtered, ${fmt(skipped)} unsupported)` : " — is it a Sigma rules folder?"}.</span>`;
+    go.disabled = !p.loaded;
+    go.textContent = p.loaded ? `Run Sigma hunt (${fmt(p.loaded)})` : "Run Sigma hunt";
+  } catch (e) { if (el("sgPreview")) box.textContent = String(e && e.message ? e.message : e); }
+}
+
+async function runSigmaHunt() {
+  const c = sigmaConfig();
+  if (!c.folder || el("sgGo").disabled) return;
+  showOverlay("Running Sigma rules…", "Loading the rules and checking every event in the case. Large cases take a few minutes.");
+  try {
+    const r = await backend.sigmaHunt({ folder: c.folder, filter: c.filter });
+    state.sigma = r;
+    try { state.detections = (await backend.huntResults()) || []; } catch (e) {}
+    try { state.triage = (await backend.listTriage()) || state.triage; } catch (e) {}
+    hideOverlay();
+    renderRail();
+    if (state.view === "ioc" && state.iocTab === "sigma") renderSigmaResults(r);
+  } catch (e) {
+    hideOverlay();
+    alert("Sigma hunt failed:\n" + (e && e.message ? e.message : e));
+  }
+}
+
+function renderSigmaResults(r) {
+  const box = el("sgRight"); if (!box) return;
+  if (!r) {
+    box.innerHTML = `<div class="iocv-empty"><h3>No Sigma results yet</h3><p>Choose a rules folder on the left, then run the hunt. Each rule that matches becomes a finding you can triage, export and report, with the rule's author credited.</p></div>`;
+    return;
+  }
+  const skipped = Object.entries(r.skipped_by_reason || {}).sort((a, b) => b[1] - a[1]);
+  const nSkip = skipped.reduce((a, [, n]) => a + n, 0);
+  const lvl = (l) => `<span class="sev-pill sev-${l === "informational" ? "low" : l}">${escapeHtml(l)}</span>`;
+  box.innerHTML = `<div class="iocv-sumrow">
+      <div class="iocv-sum"><span class="big">${fmt(r.rules_hit)}</span> of ${fmt(r.loaded)} rules matched · ${fmt(r.findings)} finding${r.findings === 1 ? "" : "s"}</div>
+      ${r.findings ? `<button class="topbtn" id="sgAsFindings">Show as findings</button>` : ""}
+    </div>
+    <div class="ioc-table-wrap"><table class="ioc-table sg-table">
+      <thead><tr><th>Level</th><th>Rule</th><th>Log source</th><th style="text-align:right">Findings</th><th>First seen</th><th>Last seen</th><th></th></tr></thead>
+      <tbody>${r.hits.map((h) => `<tr class="hit" data-rule="${escapeHtml(h.rule_id)}" title="Show every matching event${h.author ? "\nRule by " + escapeHtml(h.author) : ""}">
+        <td>${lvl(h.level)}</td><td class="sg-title">${escapeHtml(h.title)}${h.author ? `<span class="sg-by">by ${escapeHtml(h.author)}</span>` : ""}</td>
+        <td class="where">${escapeHtml(h.logsource)}</td><td class="n">${fmt(h.findings)}</td>
+        <td class="ts">${h.first_seen ? escapeHtml(ukDateTime(h.first_seen)) : ""}</td><td class="ts">${h.last_seen && h.findings > 1 ? escapeHtml(ukDateTime(h.last_seen)) : ""}</td><td class="go">›</td></tr>`).join("")
+        || `<tr class="miss"><td colspan="7">No Sigma rule matched this case.</td></tr>`}</tbody>
+    </table></div>
+    ${nSkip ? `<details class="sg-skipped"><summary>${fmt(nSkip)} rule${nSkip === 1 ? "" : "s"} couldn't run on triage data</summary><ul>${skipped.map(([why, n]) => `<li><b>${fmt(n)}</b> ${escapeHtml(why)}</li>`).join("")}</ul></details>` : ""}
+    <p class="iocv-note">Running Sigma again replaces these results and their findings. Built-in rule and IOC findings are never touched. Sigma rules are by their authors, under the Detection Rule License 1.1.</p>`;
+  const af = el("sgAsFindings");
+  if (af) af.onclick = () => { state.view = "hunt"; state.huntOnly = "sigma"; renderRail(); renderToolbar(); refresh(); };
+  box.querySelectorAll("tr.hit[data-rule]").forEach((tr) => {
+    tr.onclick = () => {
+      const rid = tr.dataset.rule;
+      const dets = (state.detections || []).filter((d) => d.engine === "sigma" && d.rule_id === rid);
+      const ids = [...new Set(dets.flatMap((d) => d.event_ids || []))];
+      if (!ids.length) { toast("No events stored for this rule — run the Sigma hunt again"); return; }
+      state.view = "timeline"; state.huntOnly = null;
+      state.filter = { text: "", category: null, artefact: null, triage: null, flagged_only: false, limit: 5000, offset: 0 };
+      state.idFilter = { kind: "sigma", label: dets[0].title, ids: ids.slice(0, 5000), key: JSON.stringify(state.filter) };
+      closeDetail(); renderRail(); renderToolbar(); refresh();
     };
   });
 }
 
 // Show every event an IOC finding matched, in time order, in the timeline.
-function showIocEvents(det) {
+function showIocEvents(det, shownAs) {
   const ids = det.event_ids || [];
   if (!ids.length) return;
-  const label = det.rule_id.replace(/^ioc:[^:]*:/, "");
+  const label = shownAs || det.rule_id.replace(/^ioc:[^:]*:/, "");
   state.view = "timeline";
   state.huntOnly = null;
   state.filter = { text: "", category: null, artefact: null, triage: null, flagged_only: false, limit: 5000, offset: 0 };
@@ -1004,6 +1295,8 @@ async function refresh() {
   el("app").dataset.view = state.view;
   const ib = el("iocBtn"); if (ib) ib.classList.toggle("active", state.view === "ioc");
   if (el("idfBar") && (state.view !== "timeline" || !state.idFilter)) el("idfBar").hidden = true;
+  if (el("miniTl")) el("miniTl").hidden = state.view !== "timeline";
+  if (state.view === "timeline") renderMiniTimeline();
   if (state.view === "ioc") { renderIocView(); return; }
   if (state.view === "hunt") {
     renderHuntView();
@@ -1018,6 +1311,10 @@ async function refresh() {
     return;
   }
   if (state.idFilter && state.idFilter.key !== JSON.stringify(state.filter)) state.idFilter = null;
+  // Keep the "Clear all filters" button in step with the filters actually
+  // applied (search typing / IOC / tag filters change them without a toolbar
+  // re-render).
+  if (state.view === "timeline" && !!el("clearAllBtn") === allEventsActive()) renderToolbar();
   if (!state.idFilter && el("idfBar")) el("idfBar").hidden = true;
   if (state.idFilter) {
     const f = state.idFilter;
@@ -1026,14 +1323,14 @@ async function refresh() {
     const n = state.rows.length;
     el("resultCount").textContent = `${fmt(n)} event${n === 1 ? "" : "s"}`;
     const bar = el("idfBar");
-    const isIoc = f.kind === "ioc";
-    bar.classList.toggle("is-tag", !isIoc);
-    bar.innerHTML = `<span class="idf-tag">${isIoc ? "IOC" : "Tag"}</span><span class="idf-val" title="${escapeHtml(f.label)}">${escapeHtml(f.label)}</span>`
-      + `<span class="idf-n">${fmt(n)} ${isIoc ? "matching" : "tagged"} event${n === 1 ? "" : "s"}${isIoc && f.ids.length >= 500 ? " (first 500)" : ""}</span><span class="idf-sp"></span>`
-      + (isIoc ? `<button class="idf-btn" id="idfBack">Back to IOC hunt</button>` : "")
+    const isIoc = f.kind === "ioc", isSigma = f.kind === "sigma";
+    bar.classList.toggle("is-tag", f.kind === "tag");
+    bar.innerHTML = `<span class="idf-tag">${isIoc ? "IOC" : isSigma ? "Sigma" : "Tag"}</span><span class="idf-val" title="${escapeHtml(f.label)}">${escapeHtml(f.label)}</span>`
+      + `<span class="idf-n">${fmt(n)} ${isIoc || isSigma ? "matching" : "tagged"} event${n === 1 ? "" : "s"}${isIoc && f.ids.length >= 500 ? " (first 500)" : ""}</span><span class="idf-sp"></span>`
+      + (isIoc || isSigma ? `<button class="idf-btn" id="idfBack">${isSigma ? "Back to Sigma results" : "Back to IOC hunt"}</button>` : "")
       + `<button class="idf-btn" id="idfClear">Clear filter</button>`;
     bar.hidden = false;
-    if (el("idfBack")) el("idfBack").onclick = () => { state.idFilter = null; state.view = "ioc"; closeDetail(); renderRail(); renderToolbar(); refresh(); };
+    if (el("idfBack")) el("idfBack").onclick = () => { state.iocTab = isSigma ? "sigma" : "ioc"; state.idFilter = null; state.view = "ioc"; closeDetail(); renderRail(); renderToolbar(); refresh(); };
     el("idfClear").onclick = () => { state.idFilter = null; refresh(); };
     renderStatus();
     renderWindow();
@@ -1115,9 +1412,10 @@ function renderHuntView() {
       engine: "manual",
     }));
   let d = rules.concat(manual);
-  if (state.huntOnly === "ioc") {
-    d = rules.filter((x) => x.engine === "ioc");
-    el("resultCount").innerHTML = `${fmt(d.length)} IOC match${d.length === 1 ? "" : "es"} <button class="linkbtn" id="huntShowAll">Show all findings</button>`;
+  if (state.huntOnly === "ioc" || state.huntOnly === "sigma") {
+    const sg = state.huntOnly === "sigma";
+    d = rules.filter((x) => x.engine === state.huntOnly);
+    el("resultCount").innerHTML = `${fmt(d.length)} ${sg ? "Sigma finding" : "IOC match"}${d.length === 1 ? "" : sg ? "s" : "es"} <button class="linkbtn" id="huntShowAll">Show all findings</button>`;
     el("huntShowAll").onclick = () => { state.huntOnly = null; renderHuntView(); };
   } else {
     const manualNote = manual.length ? ` (${rules.length} rule + ${manual.length} analyst)` : "";
@@ -1140,7 +1438,7 @@ function renderHuntView() {
 
 function huntRowHtml(d) {
   const attack = (d.attack || []).map((t) => `<span class="att">${t}</span>`).join("");
-  const eng = d.engine === "correlation" ? "correlated" : d.engine === "ioc" ? "IOC match" : "single-event";
+  const eng = d.engine === "correlation" ? "correlated" : d.engine === "ioc" ? "IOC match" : d.engine === "sigma" ? "Sigma" : "single-event";
   const eid = (d.event_ids && d.event_ids.length) ? d.event_ids[0] : "";
   const tri = eid ? triageStateFor(eid) : "";
   const triBadge = tri ? `<span class="tri-badge ${tri}">${tri.replace("_"," ")}</span>` : "";
@@ -1679,6 +1977,7 @@ function wireEvents() {
       refresh();
       return;
     }
+    if (e.target.closest("#allEventsLink")) { clearAllFilters(); return; }
     if (e.target.closest("#activityLink")) {
       state.view = state.view === "activity" ? "timeline" : "activity";
       closeDetail();

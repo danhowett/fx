@@ -34,6 +34,9 @@ fn main() {
             commands::list_labels,
             commands::add_label,
             commands::remove_label,
+            commands::sigma_preview,
+            commands::sigma_hunt,
+            commands::sigma_saved,
             commands::ingest_log,
             commands::daily_activity,
         ])

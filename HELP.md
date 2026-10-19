@@ -188,6 +188,29 @@ bulk SRUM exfil).
    the previous results and their findings; re-running the rule hunt keeps them.
    You can also right-click any event and choose **Add file name / path to IOC
    hunt**.
+   **Sigma rules** (second tab in the IOC hunt view) runs community Sigma
+   rules against the open case, on demand. Download the latest *core* release
+   from github.com/SigmaHQ/sigma/releases, unzip it, click **Choose…** and pick
+   its `rules\windows` folder; fx remembers it. Pick a minimum level (default
+   Medium) and statuses (default Stable + Test); a live line shows how many
+   rules will run and how many can't apply to triage data. **Run Sigma hunt**
+   checks every event; each rule that matches becomes a *Sigma* finding (rule
+   author credited, Detection Rule License 1.1). Click a rule to see every
+   matching event. fx's built-in rules always run regardless — Sigma only adds
+   findings, and a missing or empty folder is simply ignored. Tick **Also run
+   these rules on every new case** to include them automatically.
+   How rules map to triage data: Windows event-log rules (Security, System,
+   PowerShell, Defender, Sysmon…) run against EVTX from that channel and event
+   ID, reading Sigma's field names from the record. `process_creation` rules run
+   against process-start events (Security 4688, Sysmon 1) — so they need
+   command-line auditing or Sysmon on the host — and image-only rules also run
+   against Amcache (which records the full path; Prefetch, which records only
+   the file name, is deliberately excluded). `file_event` rules on the file path also run
+   against $MFT, and `registry_*` rules on the key / value also run against
+   fx's registry artefacts. Rules fx can't evaluate faithfully (non-Windows
+   sources, `cidr` / `base64offset` / `fieldref` modifiers, aggregations) are
+   skipped and counted, never half-converted. CLI:
+   `fx hunt case.fxcase --sigma <folder> [--sigma-level medium] [--sigma-status stable,test]`.
 7. **Ingest log** — from the rail, see every file ingested and whether it parsed,
    was unsupported, or failed (with the failure reason).
 8. **Activity graph** — from the rail, a per-day event-count histogram across the

@@ -41,7 +41,7 @@ fn run(args: &[String]) -> anyhow::Result<ExitCode> {
         Some("import-iocs") => cmd_import_iocs(&args[2..]),
         _ => {
             eprintln!(
-                "usage:\n  fx ingest <collection_dir> <case.fxcase> [--name N] [--examiner W]\n  fx summary <case.fxcase>\n  fx hunt <case.fxcase> [--rules DIR]\n  fx report <case.fxcase> <out.html>     write an HTML case report\n  fx import-iocs <pack.json> <out_dir>   convert an external IOC pack to rules"
+                "usage:\n  fx ingest <collection_dir> <case.fxcase> [--name N] [--examiner W]\n  fx summary <case.fxcase>\n  fx hunt <case.fxcase> [--rules DIR] [--sigma DIR [--sigma-level medium] [--sigma-status stable,test]]\n  fx report <case.fxcase> <out.html>     write an HTML case report\n  fx import-iocs <pack.json> <out_dir>   convert an external IOC pack to rules"
             );
             Ok(ExitCode::FAILURE)
         }
@@ -233,11 +233,25 @@ fn cmd_hunt(args: &[String]) -> anyhow::Result<ExitCode> {
 
     // Default rule dir sits next to the hunt crate; overridable with --rules.
     let mut rules_dir = PathBuf::from("crates/hunt/rules");
+    let mut sigma_dir: Option<PathBuf> = None;
+    let mut sigma_filter = fx_hunt::sigma::SigmaFilter::default();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--rules" => {
                 rules_dir = PathBuf::from(args.get(i + 1).cloned().unwrap_or_default());
+                i += 2;
+            }
+            "--sigma" => {
+                sigma_dir = Some(PathBuf::from(args.get(i + 1).cloned().unwrap_or_default()));
+                i += 2;
+            }
+            "--sigma-level" => {
+                sigma_filter.min_level = args.get(i + 1).cloned().unwrap_or_else(|| "medium".into());
+                i += 2;
+            }
+            "--sigma-status" => {
+                sigma_filter.statuses = args.get(i + 1).map(|s| s.split(',').map(|x| x.trim().to_string()).collect()).unwrap_or_default();
                 i += 2;
             }
             other => anyhow::bail!("unknown flag: {other}"),
@@ -262,6 +276,35 @@ fn cmd_hunt(args: &[String]) -> anyhow::Result<ExitCode> {
     let report = fx_hunt::run(&store, &rules);
     for e in &report.errors {
         eprintln!("  hunt error: {e}");
+    }
+
+    // Optional community Sigma rules, run on top of the built-in pack. A
+    // missing or empty folder is reported and the built-in results stand.
+    if let Some(dir) = &sigma_dir {
+        let load = fx_hunt::sigma::load_dir(dir, &sigma_filter);
+        if let Some(e) = &load.folder_error {
+            eprintln!("  sigma: {e} (built-in rules only)");
+        } else {
+            println!(
+                "Sigma: {} rules loaded from {} ({} files, {} filtered by level/status, {} skipped)",
+                load.loaded,
+                dir.display(),
+                load.files_seen,
+                load.filtered,
+                load.skipped_by_reason.values().sum::<usize>()
+            );
+            for (reason, n) in &load.skipped_by_reason {
+                println!("    skipped {n:>4}  {reason}");
+            }
+            let sr = fx_hunt::run_sigma(&store, &dir.to_string_lossy(), &load);
+            for e in &sr.errors {
+                eprintln!("  sigma error: {e}");
+            }
+            println!("Sigma: {} findings from {} rules", sr.findings, sr.rules_hit);
+            for h in sr.hits.iter().take(40) {
+                println!("    [{:<8}] {:<60} {:>5} finding(s)", h.level.to_uppercase(), h.title, h.findings);
+            }
+        }
     }
     println!("\n{} detections from {} rules:\n", report.detections, report.rules_run);
 

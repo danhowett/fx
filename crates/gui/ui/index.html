@@ -173,11 +173,21 @@
   }
   .topbtn:hover { border-color: var(--focus); }
   #newCaseBtn { color: var(--ink); border-color: var(--focus); }
-  .topbar .search {
-    margin-left: auto;
-    position: relative;
-    width: 340px;
+  .searchgroup { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  .topbar .search { position: relative; width: 340px; }
+  .topbar-end { display: flex; align-items: center; gap: 6px; padding-left: 10px; border-left: 1px solid var(--line); }
+  /* Hover / focus tooltip (instant, unlike the native title delay). */
+  .has-tip { position: relative; }
+  .has-tip .tip {
+    position: absolute; top: calc(100% + 8px); right: 0; z-index: 1500; width: 280px;
+    background: var(--ink); color: var(--bg); font: 400 11.5px/1.5 var(--sans); text-align: left;
+    padding: 8px 10px; border-radius: 7px; box-shadow: 0 8px 24px rgba(0,0,0,.3);
+    opacity: 0; transform: translateY(-3px); pointer-events: none; transition: opacity .12s, transform .12s;
+    white-space: normal;
   }
+  .has-tip .tip b { font-weight: 600; }
+  .has-tip:hover .tip, .has-tip:focus-visible .tip { opacity: 1; transform: none; transition-delay: .25s; }
+  @media (prefers-reduced-motion: reduce) { .has-tip .tip { transition: none; } }
   .search input {
     width: 100%;
     background: var(--surface-2);
@@ -231,8 +241,34 @@
   .ioc-table tr.miss td { color: var(--ink-faint); }
   .ioc-table td.where { color: var(--ink-dim); font-size: 11.5px; }
   .ioc-table td.ts { white-space: nowrap; color: var(--ink-dim); }
-  .ioc-table tr.hit[data-val] { cursor: pointer; }
-  .ioc-table tr.hit[data-val]:hover td { background: var(--surface-2); }
+  /* Clickable result rows (IOC indicators and Sigma rules): hand cursor on the
+     whole row (including over text), hover tint, and a chevron cue. */
+  .ioc-table tr.hit[data-val], .ioc-table tr.hit[data-rule] { cursor: pointer; }
+  .ioc-table tr.hit[data-val] td, .ioc-table tr.hit[data-rule] td { cursor: pointer; user-select: none; }
+  .ioc-table tr.hit[data-val]:hover td, .ioc-table tr.hit[data-rule]:hover td { background: var(--surface-2); }
+  .ioc-table td.go { width: 18px; color: var(--ink-faint); text-align: right; padding-left: 0; }
+  .ioc-table tr.hit:hover td.go { color: var(--focus); }
+  /* Mini timeline strip above the event list */
+  .minitl { flex: none; position: relative; border-bottom: 1px solid var(--line); background: var(--surface); padding: 6px 12px 4px; }
+  .minitl[hidden] { display: none; }
+  .minitl svg { display: block; width: 100%; height: 40px; cursor: crosshair; touch-action: none; }
+  .minitl .mt-bar { fill: color-mix(in srgb, var(--focus) 45%, transparent); }
+  .minitl .mt-flag { fill: var(--alert); opacity: .85; }
+  .minitl .mt-out { fill: var(--bg); opacity: .55; }
+  .minitl .mt-sel { fill: color-mix(in srgb, var(--focus) 22%, transparent); stroke: var(--focus); stroke-width: 1; }
+  .minitl .mt-hover { fill: color-mix(in srgb, var(--ink) 12%, transparent); }
+  .minitl .mt-axis { display: flex; align-items: center; gap: 10px; font-size: 10.5px; color: var(--ink-faint); margin-top: 2px; }
+  .minitl .mt-axis .sp { flex: 1; }
+  .minitl .mt-tip { position: absolute; top: -2px; transform: translate(-50%, -100%); background: var(--ink); color: var(--bg); font-size: 11px; padding: 4px 8px; border-radius: 5px; white-space: nowrap; pointer-events: none; z-index: 20; }
+  .minitl .mt-tip[hidden] { display: none; }
+  .minitl .mt-btn { font: 500 10.5px var(--sans); color: var(--ink-dim); background: none; border: 1px solid var(--line); border-radius: 4px; padding: 1px 7px; cursor: pointer; }
+  .minitl .mt-btn:hover { color: var(--ink); border-color: var(--ink-faint); }
+  .minitl.collapsed svg, .minitl.collapsed .mt-tip { display: none; }
+  .clear-all { font: 500 11.5px var(--sans); color: var(--ink); background: none; border: 1px solid color-mix(in srgb, var(--alert) 55%, var(--line)); border-radius: 12px; padding: 3px 10px; cursor: pointer; white-space: nowrap; }
+  .clear-all:hover { background: color-mix(in srgb, var(--alert) 12%, transparent); }
+  .clear-all::before { content: "✕"; font-size: 10px; margin-right: 5px; color: var(--alert); }
+  .allev { cursor: pointer; }
+  .allev.active .name { color: var(--ink); font-weight: 600; }
   .linkbtn { background: none; border: 0; padding: 0 0 0 8px; color: var(--focus); font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
   .ioc-table tr.sep td { background: var(--surface-2); color: var(--ink-faint); font-size: 11px; cursor: pointer; }
 
@@ -700,6 +736,28 @@
   .iocv-sum .faint { color: var(--ink-faint); }
   .iocv .ioc-table-wrap { max-height: none; }
   .iocv-note { font-size: 11.5px; color: var(--ink-faint); margin: 0; }
+  .iocv-tabs { display: flex; gap: 2px; padding: 8px 18px 0; border-bottom: 1px solid var(--line); background: var(--surface); }
+  .iocv-tab { font: 500 12.5px var(--sans); color: var(--ink-dim); background: none; border: 0; border-bottom: 2px solid transparent; padding: 7px 12px 8px; cursor: pointer; }
+  .iocv-tab:hover { color: var(--ink); }
+  .iocv-tab.on { color: var(--ink); border-bottom-color: var(--focus); }
+  .app[data-view="ioc"] .iocv { height: calc(100% - 40px); }
+  .sg-lbl { display: block; font-size: 11px; font-weight: 600; color: var(--ink-faint); margin: 4px 0 5px; }
+  .sg-folder { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .sg-path { flex: 1; min-width: 0; font: 11.5px var(--mono); color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sg-help { font-size: 11.5px; color: var(--ink-faint); line-height: 1.5; margin: 0 0 12px; }
+  .sg-help code { font: 11px var(--mono); }
+  .sg-link { color: var(--focus); user-select: all; }
+  .sg-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .sg-row .sg-lbl { margin: 0; min-width: 96px; }
+  .sg-row select { font: 12px var(--sans); color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+  .sg-chk { font-size: 12px; color: var(--ink-dim); display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  .sg-auto { margin: 4px 0 12px; }
+  .iocv .ioc-preview .warn { color: var(--ink-faint); }
+  .sg-table td.sg-title { color: var(--ink); }
+  .sg-by { display: block; font-size: 10.5px; color: var(--ink-faint); margin-top: 1px; }
+  .sg-skipped { margin: 0 0 10px; font-size: 12px; color: var(--ink-dim); }
+  .sg-skipped summary { cursor: pointer; color: var(--ink-faint); }
+  .sg-skipped ul { margin: 6px 0 0; padding-left: 18px; line-height: 1.6; }
   .idf-bar.is-tag { background: color-mix(in srgb, var(--focus) 9%, var(--surface)); }
   .idf-bar.is-tag .idf-tag { color: var(--focus); border-color: color-mix(in srgb, var(--focus) 55%, transparent); }
   .prov-note { color: var(--ink-faint); font-size: 11px; margin-top: 8px; line-height: 1.5; }
@@ -815,7 +873,6 @@
     <span class="brand">fx<span class="dot">.</span></span>
     <button class="topbtn" id="newCaseBtn">+ New case</button>
     <button class="topbtn" id="openCaseBtn">Open case</button>
-    <button class="topbtn" id="iocBtn" title="Hunt the open case for your own list of IOCs (hashes, IPs, domains, URLs, file names, paths)">IOC hunt</button>
     <div class="menuwrap" id="exportMenuWrap">
       <button class="topbtn" id="exportMenuBtn" aria-haspopup="menu" aria-expanded="false">Export <span class="chev">▾</span></button>
       <div class="menu" id="exportMenu" role="menu">
@@ -825,12 +882,19 @@
         <button class="menuitem" role="menuitem" id="exportReportTop"><span class="mi-t">Case report (HTML)</span><span class="mi-s">Findings, ATT&amp;CK matrix and evidence hashes</span></button>
       </div>
     </div>
-    <button class="topbtn" id="themeBtn" title="Switch theme">◐ Theme</button>
-    <button class="topbtn" id="helpBtn" title="About fx / help">?</button>
     <span class="case-name" id="caseName">no case open</span>
-    <div class="search">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-      <input id="search" type="text" placeholder="Filter path, user, message…  (⌘K)" spellcheck="false" />
+    <div class="searchgroup">
+      <div class="search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <input id="search" type="text" placeholder="Filter path, user, message…  (⌘K)" spellcheck="false" />
+      </div>
+      <button class="topbtn has-tip" id="iocBtn" aria-describedby="iocTip">IOC hunt
+        <span class="tip" id="iocTip" role="tooltip"><b>Search for many values at once.</b> Paste or drop a list of IOCs (hashes, IPs, domains, URLs, file names, paths) and hunt the whole case in one pass. Defanged values work.</span>
+      </button>
+    </div>
+    <div class="topbar-end">
+      <button class="topbtn" id="themeBtn" title="Switch theme">◐ Theme</button>
+      <button class="topbtn" id="helpBtn" title="About fx / help" aria-label="Help">?</button>
     </div>
   </div>
 
@@ -869,6 +933,7 @@
   <div class="main">
     <div class="toolbar" id="toolbar"></div>
     <div class="idf-bar" id="idfBar" hidden></div>
+    <div class="minitl" id="miniTl" hidden></div>
     <div class="grid-head">
       <span>Time (UTC)</span><span>Kind</span><span>Artefact</span><span>User</span><span>Event</span>
     </div>

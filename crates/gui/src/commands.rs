@@ -887,3 +887,75 @@ pub async fn events_by_ids(
     let rows = store.events_by_ids(&ids).map_err(|e| e.to_string())?;
     Ok(rows.into_iter().map(EventDto::from).collect())
 }
+
+// ── Sigma rules (post-processing, analyst-supplied folder) ──────────────────
+
+/// Sigma folder + filter, as remembered by the GUI.
+#[derive(serde::Deserialize, serde::Serialize, Clone)]
+pub struct SigmaConfig {
+    pub folder: String,
+    #[serde(default)]
+    pub filter: fx_hunt::sigma::SigmaFilter,
+}
+
+/// Load a Sigma folder and report what would run (no hunt).
+#[tauri::command]
+pub async fn sigma_preview(config: SigmaConfig) -> Result<fx_hunt::sigma::SigmaLoad, String> {
+    let folder = config.folder.clone();
+    let filter = config.filter.clone();
+    tauri::async_runtime::spawn_blocking(move || fx_hunt::sigma::load_dir(std::path::Path::new(&folder), &filter))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Run a Sigma folder against the open case. Replaces only previous Sigma
+/// findings; the built-in rules' and IOC hunt's findings are untouched. The
+/// config and results are saved with the case.
+#[tauri::command]
+pub async fn sigma_hunt(state: tauri::State<'_, AppState>, config: SigmaConfig) -> Result<fx_hunt::SigmaRunReport, String> {
+    let load = fx_hunt::sigma::load_dir(std::path::Path::new(&config.folder), &config.filter);
+    if let Some(e) = &load.folder_error {
+        return Err(e.clone());
+    }
+    if load.loaded == 0 {
+        return Err(format!(
+            "No Sigma rules could be loaded from that folder ({} files, {} filtered out by level/status, {} skipped). Check it's a Sigma rules folder, e.g. rules\\windows from a SigmaHQ release.",
+            load.files_seen,
+            load.filtered,
+            load.skipped_by_reason.values().sum::<usize>()
+        ));
+    }
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    let report = fx_hunt::run_sigma(store, &config.folder, &load);
+    // Sigma findings start as "unconfirmed", like rule findings.
+    if let Ok(dets) = store.detections() {
+        for d in dets.iter().filter(|d| d.engine == "sigma") {
+            for eid in d.event_ids.split(',').filter(|s| !s.trim().is_empty()) {
+                let _ = store.set_triage_if_absent(eid.trim(), "unconfirmed", None);
+            }
+        }
+    }
+    if let Ok(j) = serde_json::to_string(&config) {
+        let _ = store.kv_set("sigma.config", &j);
+    }
+    if let Ok(j) = serde_json::to_string(&report) {
+        let _ = store.kv_set("sigma.results", &j);
+    }
+    Ok(report)
+}
+
+/// The Sigma config and last results saved with the open case (if any).
+#[derive(serde::Serialize)]
+pub struct SigmaSaved {
+    pub config: Option<serde_json::Value>,
+    pub results: Option<serde_json::Value>,
+}
+
+#[tauri::command]
+pub async fn sigma_saved(state: tauri::State<'_, AppState>) -> Result<SigmaSaved, String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    let get = |k: &str| store.kv_get(k).ok().flatten().and_then(|j| serde_json::from_str(&j).ok());
+    Ok(SigmaSaved { config: get("sigma.config"), results: get("sigma.results") })
+}
