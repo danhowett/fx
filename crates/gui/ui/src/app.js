@@ -23,6 +23,9 @@ const state = {
   triage: [],        // [{event_id, triage_state, note}]
   view: "timeline", // "timeline" | "hunt"
   huntOnly: null,   // "ioc" = findings view filtered to IOC matches (set by the IOC sweep)
+  labels: [],       // [{event_id, tag}] analyst tags
+  detailW: 440, detailWide: false, rawFont: 12, rawWrap: true,
+  ioc: null,        // {text, results} saved IOC hunt for the open case
   idFilter: null,   // {label, ids, key}: timeline shows exactly these events (IOC matches); dropped when any other filter changes
   filter: { text: "", category: null, artefact: null, triage: null, flagged_only: false, limit: 5000, offset: 0 },
   selectedId: null,
@@ -35,6 +38,11 @@ const viewport = el("viewport");
 
 async function init() {
   hideOverlay();              // guarantee the overlay starts hidden
+  state.detailW = loadPref("fx.detailW", 440);
+  state.rawFont = loadPref("fx.rawFont", 12);
+  state.rawWrap = !!loadPref("fx.rawWrap", 1);
+  applyDetailWidth();
+  window.addEventListener("resize", applyDetailWidth);
   // Escape hatch: clicking the overlay backdrop dismisses it, so a stuck
   // operation can never trap the UI.
   const ov = el("overlay");
@@ -80,6 +88,8 @@ async function renderCase(overview, label) {
     || (backend.isLive() ? `case ${short(overview.case_id)}` : "sample case · demo data");
   state.detections = await backend.huntResults();
   state.triage = (await backend.listTriage()) || [];
+  try { state.labels = (await backend.listLabels()) || []; } catch (e) { state.labels = []; }
+  state.ioc = null;
   state.view = "timeline";
   renderRail();
   renderToolbar();
@@ -113,7 +123,15 @@ function wireCaseButtons() {
   if (expStixTop) expStixTop.addEventListener("click", () => exportFindings("stix"));
   wireExportMenu();
   const iocBtn = el("iocBtn");
-  if (iocBtn) iocBtn.addEventListener("click", () => openIocSweep());
+  if (iocBtn) iocBtn.addEventListener("click", () => openIocHunt());
+  // Files dropped on the window go to the IOC list when that view is open.
+  backend.onFileDrop((type, paths) => {
+    const v = el("iocView");
+    if (!v) return;
+    if (type === "over" || type === "enter") v.classList.add("drag");
+    else if (type === "leave") v.classList.remove("drag");
+    else if (type === "drop") { v.classList.remove("drag"); paths.forEach((p) => iocAppendFile(p).catch((e) => alert("Could not load " + p + ":\n" + e))); }
+  });
   const expRepTop = el("exportReportTop");
   if (expRepTop) expRepTop.addEventListener("click", () => exportReport());
   // Help modal.
@@ -531,6 +549,7 @@ function renderRail() {
       <div class="actlink-sub">events per day · spot untagged spikes</div>
     </section>
     ${renderTriageSummary()}
+    ${renderLabelSummary()}
     <section>
       <h2>Category</h2>
       ${catFacets}
@@ -573,6 +592,16 @@ function renderTriageSummary() {
     })
     .join("");
   return `<section><h2>Triage</h2>${rows}</section>`;
+}
+
+// Analyst tags in the rail: counts per tag, click to show those events.
+function renderLabelSummary() {
+  const c = labelCounts();
+  const tags = Object.keys(c).sort((a, b) => c[b] - c[a] || a.localeCompare(b));
+  if (!tags.length) return "";
+  const active = state.idFilter && state.idFilter.kind === "tag" ? state.idFilter.label : null;
+  return `<section><h2>Tags</h2>${tags.map((t) => `<div class="tri-sum lbl-sum ${active === t ? "active" : ""}" data-label="${escapeHtml(t)}">
+      <span class="dot lbl-dot"></span><span class="lbl">${escapeHtml(t)}</span><span class="cnt">${fmt(c[t])}</span></div>`).join("")}</section>`;
 }
 
 function facetRow(kind, label, count, color, value) {
@@ -683,91 +712,135 @@ async function exportFindings(format) {
   }
 }
 
-// IOC sweep: paste or load an indicator list and hunt the open case for it.
-// Post-processing — nothing is re-ingested. Each matched indicator becomes a
-// finding (so it can be triaged, exported and reported); a new sweep replaces
-// the previous sweep's findings, and re-running the rules keeps them.
-let iocPreviewTimer = null;
-function openIocSweep() {
-  const m = el("iocModal");
-  el("iocInput").hidden = false; el("iocResults").hidden = true;
+// ── IOC hunt view ────────────────────────────────────────────────────────────
+// A main-area view: the analyst's indicator list on the left (saved with the
+// case), the last run's results on the right. Post-processing — nothing is
+// re-ingested. Each matched indicator becomes a finding; a new run replaces the
+// previous run's findings, and re-running the rules keeps them.
+let iocPreviewTimer = null, iocSaveTimer = null;
+async function openIocHunt() {
+  if (state.view === "ioc") { state.view = "timeline"; renderRail(); renderToolbar(); refresh(); return; }
+  closeDetail();
+  state.view = "ioc";
+  if (!state.ioc) {
+    try { state.ioc = (await backend.iocSaved()) || { text: "", results: null }; }
+    catch (e) { state.ioc = { text: "", results: null }; }
+  }
+  renderRail(); renderToolbar(); refresh();
+}
+
+function renderIocView() {
+  const io = state.ioc || { text: "", results: null };
+  el("resultCount").textContent = "IOC hunt";
+  el("spTop").style.height = "0px"; el("spBot").style.height = "0px";
+  el("rows").innerHTML = `<div class="iocv" id="iocView">
+    <div class="iocv-left">
+      <h2 class="iocv-h">Indicators</h2>
+      <p class="iocv-sub">One per line: hashes, IPs, domains, URLs, file names, paths or text. Defanged values work. The list is saved with this case.</p>
+      <textarea id="iocText" spellcheck="false" placeholder="185.220.101.4&#10;evil[.]example&#10;44d88612fea8a8f36de82e1278abb02f&#10;C:\\Users\\Public\\svc.exe">${escapeHtml(io.text || "")}</textarea>
+      <div class="ioc-preview" id="iocPreview">No indicators yet.</div>
+      <div class="iocv-actions">
+        <button class="topbtn" id="iocLoad">Load file…</button>
+        <span class="iocv-drop">or drop a file here</span>
+        <button class="btn-primary" id="iocGo" disabled>Run hunt</button>
+      </div>
+    </div>
+    <div class="iocv-right" id="iocRight"></div>
+  </div>`;
+  renderIocResults(io.results);
   const ta = el("iocText");
-  const preview = async () => {
-    const text = ta.value;
-    if (!text.trim()) { el("iocPreview").textContent = "No indicators yet."; el("iocGo").disabled = true; el("iocGo").textContent = "Sweep"; return; }
-    try {
-      const p = await backend.iocPreview(text);
-      const kinds = Object.entries(p.by_kind || {}).sort((x, y) => y[1] - x[1]).map(([k, n]) => `${fmt(n)} ${escapeHtml(k)}`).join(" · ");
-      el("iocPreview").innerHTML = p.total
-        ? `<b>${fmt(p.total)} indicator${p.total === 1 ? "" : "s"}</b>: ${kinds}${p.skipped ? ` <span class="warn">(${p.skipped} too short to search, ignored)</span>` : ""}`
-        : `No indicators recognised${p.skipped ? ` (${p.skipped} ignored)` : ""}.`;
-      el("iocGo").disabled = !p.total;
-      el("iocGo").textContent = p.total ? `Sweep ${fmt(p.total)} indicator${p.total === 1 ? "" : "s"}` : "Sweep";
-    } catch (e) { el("iocPreview").textContent = String(e && e.message ? e.message : e); }
+  ta.oninput = () => {
+    state.ioc.text = ta.value;
+    clearTimeout(iocPreviewTimer); iocPreviewTimer = setTimeout(iocPreview, 180);
+    clearTimeout(iocSaveTimer); iocSaveTimer = setTimeout(() => { backend.iocSaveList(ta.value).catch(() => {}); }, 800);
   };
-  ta.oninput = () => { clearTimeout(iocPreviewTimer); iocPreviewTimer = setTimeout(preview, 180); };
-  const close = () => { m.classList.remove("show"); document.removeEventListener("keydown", onKey, true); };
-  const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
-  el("iocCancel").onclick = close;
-  el("iocClose").onclick = close;
-  el("iocAgain").onclick = () => { el("iocResults").hidden = true; el("iocInput").hidden = false; ta.focus(); };
-  el("iocFindings").onclick = () => { close(); state.view = "hunt"; state.huntOnly = "ioc"; closeDetail(); renderRail(); renderToolbar(); refresh(); };
-  m.onclick = (e) => { if (e.target === m) close(); };
   el("iocLoad").onclick = async () => {
-    try {
-      const path = await backend.pickIocFile();
-      if (!path) return;
-      const text = await backend.readIocFile(path);
-      ta.value = (ta.value.trim() ? ta.value.trimEnd() + "\n" : "") + text;
-      preview();
-    } catch (e) { alert("Could not load the file:\n" + (e && e.message ? e.message : e)); }
+    try { const path = await backend.pickIocFile(); if (path) await iocAppendFile(path); }
+    catch (e) { alert("Could not load the file:\n" + (e && e.message ? e.message : e)); }
   };
-  el("iocGo").onclick = async () => {
-    if (el("iocGo").disabled) return;
-    m.classList.remove("show");
-    showOverlay("Sweeping for IOCs…", "Searching every event in the case. Large cases take a minute or two.");
-    try {
-      const r = await backend.iocSweep(ta.value);
-      hideOverlay();
-      renderIocResults(r);
-      m.classList.add("show");
-      try { state.detections = (await backend.huntResults()) || []; } catch (e) {}
-      renderRail();
-      if (state.view === "hunt") refresh();
-    } catch (e) {
-      hideOverlay(); m.classList.add("show");
-      alert("IOC sweep failed:\n" + (e && e.message ? e.message : e));
-    }
+  el("iocGo").onclick = runIocHunt;
+  // Browser-preview drop (the desktop app delivers drops via onFileDrop).
+  const v = el("iocView");
+  v.ondragover = (e) => { e.preventDefault(); v.classList.add("drag"); };
+  v.ondragleave = () => v.classList.remove("drag");
+  v.ondrop = (e) => {
+    e.preventDefault(); v.classList.remove("drag");
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) f.text().then((t) => iocAppendText(t));
   };
-  document.addEventListener("keydown", onKey, true);
-  m.classList.add("show");
-  preview();
-  ta.focus();
+  iocPreview();
+  renderStatus();
+}
+
+async function iocAppendFile(path) { iocAppendText(await backend.readIocFile(path)); }
+function iocAppendText(text) {
+  const ta = el("iocText"); if (!ta) return;
+  ta.value = (ta.value.trim() ? ta.value.trimEnd() + "\n" : "") + text;
+  ta.oninput();
+}
+
+async function iocPreview() {
+  const ta = el("iocText"); if (!ta) return;
+  const text = ta.value, go = el("iocGo");
+  if (!text.trim()) { el("iocPreview").textContent = "No indicators yet."; go.disabled = true; go.textContent = "Run hunt"; return; }
+  try {
+    const p = await backend.iocPreview(text);
+    const kinds = Object.entries(p.by_kind || {}).sort((x, y) => y[1] - x[1]).map(([k, n]) => `${fmt(n)} ${escapeHtml(k)}`).join(" · ");
+    el("iocPreview").innerHTML = p.total
+      ? `<b>${fmt(p.total)} indicator${p.total === 1 ? "" : "s"}</b>: ${kinds}${p.skipped ? ` <span class="warn">(${p.skipped} too short to search, ignored)</span>` : ""}`
+      : `No indicators recognised${p.skipped ? ` (${p.skipped} ignored)` : ""}.`;
+    go.disabled = !p.total;
+    go.textContent = p.total ? `Run hunt (${fmt(p.total)})` : "Run hunt";
+  } catch (e) { el("iocPreview").textContent = String(e && e.message ? e.message : e); }
+}
+
+async function runIocHunt() {
+  const ta = el("iocText"); if (!ta || el("iocGo").disabled) return;
+  showOverlay("Hunting for IOCs…", "Searching every event in the case. Large cases take a minute or two.");
+  try {
+    const r = await backend.iocSweep(ta.value);
+    state.ioc = { text: ta.value, results: r };
+    try { state.detections = (await backend.huntResults()) || []; } catch (e) {}
+    hideOverlay();
+    renderRail();
+    if (state.view === "ioc") renderIocResults(r);
+  } catch (e) {
+    hideOverlay();
+    alert("IOC hunt failed:\n" + (e && e.message ? e.message : e));
+  }
 }
 
 function renderIocResults(r) {
-  el("iocInput").hidden = true; el("iocResults").hidden = false;
-  el("iocSummary").innerHTML = `<b>${fmt(r.matched)}</b> of ${fmt(r.iocs)} indicator${r.iocs === 1 ? "" : "s"} found across ${fmt(r.events_scanned)} events. `
-    + (r.matched ? "Each match is now a finding you can triage and export." : "No indicator appears in this case.");
+  const box = el("iocRight"); if (!box) return;
+  if (!r) {
+    box.innerHTML = `<div class="iocv-empty"><h3>No results yet</h3><p>Add indicators on the left, then run the hunt. Every matched indicator becomes a finding you can triage, export and report, and you can open every event it matched.</p></div>`;
+    return;
+  }
   const hits = r.results.filter((x) => x.events > 0), misses = r.results.filter((x) => !x.events);
   const row = (x) => `<tr class="${x.events ? "hit" : "miss"}"${x.events ? ` data-val="${escapeHtml(x.value)}" title="Show every matching event"` : ""}><td class="v">${escapeHtml(x.value)}</td><td>${escapeHtml(x.kind_label)}</td>`
     + `<td class="n">${x.events ? fmt(x.events) : "—"}</td>`
     + `<td class="ts">${x.first_seen ? escapeHtml(ukDateTime(x.first_seen)) : ""}</td>`
+    + `<td class="ts">${x.last_seen && x.events > 1 ? escapeHtml(ukDateTime(x.last_seen)) : ""}</td>`
     + `<td class="where">${Object.entries(x.artefacts || {}).map(([k, n]) => `${escapeHtml(k)} ${fmt(n)}`).join(", ")}</td></tr>`;
-  el("iocTable").innerHTML = `<thead><tr><th>Indicator</th><th>Type</th><th style="text-align:right">Events</th><th>First seen</th><th>Where</th></tr></thead><tbody>`
-    + hits.map(row).join("")
-    + (misses.length ? `<tr class="sep" id="iocMissToggle"><td colspan="5">${fmt(misses.length)} not found, click to ${hits.length ? "show" : "hide"}</td></tr>` : "")
-    + `</tbody><tbody id="iocMisses"${hits.length ? " hidden" : ""}>${misses.map(row).join("")}</tbody>`;
+  box.innerHTML = `<div class="iocv-sumrow">
+      <div class="iocv-sum"><span class="big">${fmt(r.matched)}</span> of ${fmt(r.iocs)} indicator${r.iocs === 1 ? "" : "s"} found <span class="faint">across ${fmt(r.events_scanned)} events</span></div>
+      ${r.matched ? `<button class="topbtn" id="iocAsFindings">Show as findings</button>` : ""}
+    </div>
+    <div class="ioc-table-wrap"><table class="ioc-table">
+      <thead><tr><th>Indicator</th><th>Type</th><th style="text-align:right">Events</th><th>First seen</th><th>Last seen</th><th>Where</th></tr></thead>
+      <tbody>${hits.map(row).join("") || `<tr class="miss"><td colspan="6">No indicator appears in this case.</td></tr>`}</tbody>
+      ${misses.length ? `<tbody><tr class="sep" id="iocMissToggle"><td colspan="6">${fmt(misses.length)} not found, click to show</td></tr></tbody><tbody id="iocMisses" hidden>${misses.map(row).join("")}</tbody>` : ""}
+    </table></div>
+    <p class="iocv-note">Running the hunt again replaces these results and their findings.</p>`;
   const t = el("iocMissToggle");
   if (t) t.onclick = () => { const b = el("iocMisses"); b.hidden = !b.hidden; t.firstChild.textContent = `${fmt(misses.length)} not found, click to ${b.hidden ? "show" : "hide"}`; };
-  el("iocFindings").hidden = !r.matched;
-  el("iocTable").querySelectorAll("tr.hit[data-val]").forEach((tr) => {
+  const af = el("iocAsFindings");
+  if (af) af.onclick = () => { state.view = "hunt"; state.huntOnly = "ioc"; renderRail(); renderToolbar(); refresh(); };
+  box.querySelectorAll("tr.hit[data-val]").forEach((tr) => {
     tr.onclick = () => {
       const v = tr.dataset.val;
       const det = (state.detections || []).find((d) => d.engine === "ioc" && d.rule_id.endsWith(":" + v));
-      if (!det || !det.event_ids || !det.event_ids.length) return;
-      el("iocModal").classList.remove("show");
-      showIocEvents(det);
+      if (det) showIocEvents(det);
     };
   });
 }
@@ -780,10 +853,20 @@ function showIocEvents(det) {
   state.view = "timeline";
   state.huntOnly = null;
   state.filter = { text: "", category: null, artefact: null, triage: null, flagged_only: false, limit: 5000, offset: 0 };
-  state.idFilter = { label, ids, key: JSON.stringify(state.filter) };
+  state.idFilter = { kind: "ioc", label, ids, key: JSON.stringify(state.filter) };
   closeDetail();
   renderRail(); renderToolbar();
   refresh();
+}
+
+// Show every event carrying an analyst tag.
+function showTagEvents(tag) {
+  const ids = (state.labels || []).filter((l) => l.tag === tag).map((l) => l.event_id);
+  if (!ids.length) return;
+  state.view = "timeline"; state.huntOnly = null;
+  state.filter = { text: "", category: null, artefact: null, triage: null, flagged_only: false, limit: 5000, offset: 0 };
+  state.idFilter = { kind: "tag", label: tag, ids, key: JSON.stringify(state.filter) };
+  closeDetail(); renderRail(); renderToolbar(); refresh();
 }
 
 // Export menu: one top-bar button for all exports. Items keep their original
@@ -918,7 +1001,10 @@ function clearChip(kind, value) {
 
 // ── Timeline (virtualized) ───────────────────────────────────────────────────
 async function refresh() {
+  el("app").dataset.view = state.view;
+  const ib = el("iocBtn"); if (ib) ib.classList.toggle("active", state.view === "ioc");
   if (el("idfBar") && (state.view !== "timeline" || !state.idFilter)) el("idfBar").hidden = true;
+  if (state.view === "ioc") { renderIocView(); return; }
   if (state.view === "hunt") {
     renderHuntView();
     return;
@@ -940,11 +1026,14 @@ async function refresh() {
     const n = state.rows.length;
     el("resultCount").textContent = `${fmt(n)} event${n === 1 ? "" : "s"}`;
     const bar = el("idfBar");
-    bar.innerHTML = `<span class="idf-tag">IOC</span><span class="idf-val" title="${escapeHtml(f.label)}">${escapeHtml(f.label)}</span>`
-      + `<span class="idf-n">${fmt(n)} matching event${n === 1 ? "" : "s"}${f.ids.length >= 500 ? " (first 500)" : ""}</span><span class="idf-sp"></span>`
-      + `<button class="idf-btn" id="idfBack">Back to IOC matches</button><button class="idf-btn" id="idfClear">Clear filter</button>`;
+    const isIoc = f.kind === "ioc";
+    bar.classList.toggle("is-tag", !isIoc);
+    bar.innerHTML = `<span class="idf-tag">${isIoc ? "IOC" : "Tag"}</span><span class="idf-val" title="${escapeHtml(f.label)}">${escapeHtml(f.label)}</span>`
+      + `<span class="idf-n">${fmt(n)} ${isIoc ? "matching" : "tagged"} event${n === 1 ? "" : "s"}${isIoc && f.ids.length >= 500 ? " (first 500)" : ""}</span><span class="idf-sp"></span>`
+      + (isIoc ? `<button class="idf-btn" id="idfBack">Back to IOC hunt</button>` : "")
+      + `<button class="idf-btn" id="idfClear">Clear filter</button>`;
     bar.hidden = false;
-    el("idfBack").onclick = () => { state.idFilter = null; state.view = "hunt"; state.huntOnly = "ioc"; closeDetail(); renderRail(); renderToolbar(); refresh(); };
+    if (el("idfBack")) el("idfBack").onclick = () => { state.idFilter = null; state.view = "ioc"; closeDetail(); renderRail(); renderToolbar(); refresh(); };
     el("idfClear").onclick = () => { state.idFilter = null; refresh(); };
     renderStatus();
     renderWindow();
@@ -1202,7 +1291,7 @@ function rowHtml(e) {
     <span class="c kind">${e.ts_kind}</span>
     <span class="c art" style="color:${color}">${e.artefact}</span>
     <span class="c user">${e.user ? escapeHtml(e.user) : "—"}</span>
-    <span class="c msg">${triBadge}${pill}${escapeHtml(e.message)}</span>
+    <span class="c msg">${triBadge}${labelChips(e.id)}${pill}${escapeHtml(e.message)}</span>
   </div>`;
 }
 
@@ -1226,51 +1315,70 @@ async function select(id) {
   el("app").classList.add("detail-open");
 
   const raw = await backend.eventRaw(id);
+  if (state.selectedId !== id) return; // another row was clicked meanwhile
+  const pretty = raw ? prettyJson(raw) : "";
+  const note = triageNoteFor(id);
+  const cur = triageStateFor(id);
+  const fact = (k, v, mono) => v ? `<span class="df"><span class="dk">${k}</span><span class="dv${mono ? " mono" : ""}">${escapeHtml(String(v))}</span></span>` : "";
   el("detail").innerHTML = `
+    <div class="detail-resizer" id="detResizer" title="Drag to resize · double-click to reset"></div>
     <div class="detail-head">
-      <span class="close" id="detClose">✕</span>
-      <div class="action">${e.action}</div>
-      <div class="when">${time(e.ts)} · ${e.ts_kind}</div>
+      <div class="dh-top">
+        <div class="dh-title">
+          <div class="action">${escapeHtml(e.action)}</div>
+          <div class="when">${time(e.ts)} · ${escapeHtml(e.ts_kind)}</div>
+        </div>
+        <button class="dh-icon" id="detWide" title="${state.detailWide ? "Restore width" : "Widen panel"}">${state.detailWide ? "⇥" : "⇤"}</button>
+        <button class="dh-icon" id="detClose" title="Close (Esc)">✕</button>
+      </div>
+      <div class="dfacts">
+        ${fact("Artefact", e.artefact)}${fact("Category", e.category)}${fact("Host", e.host, true)}${fact("User", e.user, true)}
+        ${e.source_ref ? fact("Source", e.source_ref, true) : ""}
+      </div>
+      ${e.flagged ? `<div class="dflag">${escapeHtml(flagReason(e))}</div>` : ""}
+      <div class="dactions">
+        <div class="seg" role="group" aria-label="Triage">
+          ${TRI_STATES.map(([k, label]) => `<button class="tri-btn tri-${k} ${cur === k ? "active" : ""}" data-state="${k}">${label}</button>`).join("")}
+          ${cur ? `<button class="tri-btn tri-clear" data-state="" title="Clear triage">✕</button>` : ""}
+        </div>
+        <div class="seg pivot" role="group" aria-label="Pivot">
+          <span class="seg-lbl">Pivot</span>
+          <button class="pv-btn" data-pivot="60">±1m</button><button class="pv-btn" data-pivot="300">±5m</button><button class="pv-btn" data-pivot="1800">±30m</button><button class="pv-btn" data-pivot="3600">±1h</button>
+        </div>
+      </div>
+      <div class="dtags">
+        ${labelsFor(id).map((t) => `<span class="lbl-chip big">${escapeHtml(t)}<button class="x" data-untag="${escapeHtml(t)}" title="Remove tag">×</button></span>`).join("")}
+        <button class="add-tag" id="detAddTag">+ Tag</button>
+        <button class="add-tag" id="detNoteBtn"${note ? " hidden" : ""}>+ Note</button>
+      </div>
+      <textarea id="triNote" class="tri-note"${note ? "" : " hidden"} placeholder="Analyst note — saved with the triage state">${escapeHtml(note)}</textarea>
     </div>
-    <section>
-      <h3>Event</h3>
-      <dl class="kv">
-        <dt>Artefact</dt><dd>${e.artefact}</dd>
-        <dt>Category</dt><dd>${e.category}</dd>
-        <dt>Host</dt><dd>${e.host || "—"}</dd>
-        <dt>User</dt><dd>${e.user ? escapeHtml(e.user) : "—"}</dd>
-        ${e.source_ref ? `<dt>Source</dt><dd style="font-family:var(--mono);font-size:11px">${escapeHtml(e.source_ref)}</dd>` : ""}
-      </dl>
-      <div class="pivot-btns">
-        <span class="pivot-label">Pivot around this event:</span>
-        <button class="pv-btn" data-pivot="60">±1m</button>
-        <button class="pv-btn" data-pivot="300">±5m</button>
-        <button class="pv-btn" data-pivot="1800">±30m</button>
-        <button class="pv-btn" data-pivot="3600">±1h</button>
+    <div class="dmsg" id="detMsg">${escapeHtml(e.message)}</div>
+    <div class="draw">
+      <div class="draw-bar">
+        <span class="draw-h">Raw record</span>
+        <span class="info" title="Every event traces to a hashed evidence file via its parser and source reference. This is the record as parsed, retained losslessly for defensibility.">ⓘ</span>
+        <span class="sp"></span>
+        <button class="mini" id="rawSmaller" title="Smaller text">A−</button>
+        <button class="mini" id="rawBigger" title="Larger text">A+</button>
+        <button class="mini ${state.rawWrap ? "on" : ""}" id="rawWrap" title="Wrap long lines">Wrap</button>
+        <button class="mini" id="rawCopy" title="Copy raw record">Copy</button>
       </div>
-    </section>
-    <section>
-      <h3>Triage</h3>
-      <div class="triage-btns">
-        <button class="tri-btn tri-validated"       data-state="validated">Validated</button>
-        <button class="tri-btn tri-unconfirmed"      data-state="unconfirmed">Unconfirmed</button>
-        <button class="tri-btn tri-false_positive"   data-state="false_positive">False positive</button>
-        <button class="tri-btn tri-dismissed"        data-state="dismissed">Dismissed</button>
-        <button class="tri-btn tri-clear"            data-state="">Clear</button>
-      </div>
-      <textarea id="triNote" class="tri-note" placeholder="Analyst note (optional)…">${escapeHtml(triageNoteFor(id))}</textarea>
-    </section>
-    ${e.flagged ? `<section><h3>Why flagged</h3><div class="prov-note" style="color:var(--alert)">${escapeHtml(flagReason(e))}</div></section>` : ""}
-    <section>
-      <h3>Message</h3>
-      <div style="font-size:12.5px;line-height:1.6;color:var(--ink)">${escapeHtml(e.message)}</div>
-    </section>
-    <section>
-      <h3>Raw record</h3>
-      <pre class="raw">${raw ? escapeHtml(raw) : "no raw record"}</pre>
-      <div class="prov-note">Every event traces to a hashed evidence file via its parser and source reference — this is the record as parsed, retained losslessly for defensibility.</div>
-    </section>`;
+      <pre class="raw" id="rawPre" style="font-size:${state.rawFont}px" data-wrap="${state.rawWrap ? 1 : 0}">${pretty ? highlightJson(pretty) : "no raw record"}</pre>
+    </div>`;
   el("detClose").onclick = closeDetail;
+  el("detWide").onclick = () => { state.detailWide = !state.detailWide; applyDetailWidth(); select(id); };
+  wireDetailResizer();
+
+  const pre = el("rawPre");
+  const setFont = (d) => { state.rawFont = Math.max(9, Math.min(18, state.rawFont + d)); pre.style.fontSize = state.rawFont + "px"; savePref("fx.rawFont", state.rawFont); };
+  el("rawSmaller").onclick = () => setFont(-1);
+  el("rawBigger").onclick = () => setFont(1);
+  el("rawWrap").onclick = () => { state.rawWrap = !state.rawWrap; pre.dataset.wrap = state.rawWrap ? 1 : 0; el("rawWrap").classList.toggle("on", state.rawWrap); savePref("fx.rawWrap", state.rawWrap ? 1 : 0); };
+  el("rawCopy").onclick = async () => {
+    try { await navigator.clipboard.writeText(pretty || raw || ""); el("rawCopy").textContent = "Copied"; setTimeout(() => { if (el("rawCopy")) el("rawCopy").textContent = "Copy"; }, 1200); }
+    catch (err) { alert("Could not copy: " + err); }
+  };
 
   // Pivot buttons: set a time window around this event and show the timeline.
   document.querySelectorAll("#detail .pv-btn").forEach((btn) => {
@@ -1288,27 +1396,168 @@ async function select(id) {
     };
   });
 
-  // Highlight the current triage state and wire the buttons.
-  const cur = triageStateFor(id);
   document.querySelectorAll("#detail .tri-btn").forEach((btn) => {
-    if (btn.dataset.state === cur) btn.classList.add("active");
-    btn.onclick = async () => {
-      const st = btn.dataset.state;
-      const note = (el("triNote") && el("triNote").value.trim()) || null;
-      try {
-        if (st === "") { await backend.clearTriage(id); removeTriage(id); }
-        else { await backend.setTriage(id, st, note); upsertTriage(id, st, note); }
-        // re-render this event's detail + the rail summary + the row badge
-        await select(id);
-        renderRail();
-        renderWindowIfTimeline();
-        if (state.view === "hunt") renderHuntView();
-        if (state.view === "activity") renderActivityGraph(); // flagged base reflects triage live
-      } catch (err) {
-        alert("Could not save triage: " + (err && err.message ? err.message : err));
-      }
-    };
+    btn.onclick = () => setTriageFor(id, btn.dataset.state, (el("triNote") && el("triNote").value.trim()) || null);
   });
+  // A note on an already-triaged event saves when the box loses focus; on an
+  // untriaged event it is saved with the first triage click (or marks it
+  // Unconfirmed, so a note is never silently dropped).
+  el("triNote").onblur = () => {
+    const v = el("triNote").value.trim() || null;
+    if ((v || "") === (triageNoteFor(id) || "")) return;
+    setTriageFor(id, triageStateFor(id) || "unconfirmed", v, true);
+  };
+  el("detNoteBtn").onclick = () => { el("triNote").hidden = false; el("detNoteBtn").hidden = true; el("triNote").focus(); };
+  el("detAddTag").onclick = (ev) => {
+    const r = ev.currentTarget.getBoundingClientRect();
+    openEventMenu(e, r.left, r.bottom + 4, { tagsOnly: true });
+  };
+  document.querySelectorAll("#detail [data-untag]").forEach((b) => { b.onclick = () => toggleLabel(id, b.dataset.untag); });
+}
+
+// Triage write shared by the detail pane and the right-click menu.
+async function setTriageFor(id, st, note, quiet) {
+  try {
+    if (st === "") { await backend.clearTriage(id); removeTriage(id); }
+    else { await backend.setTriage(id, st, note); upsertTriage(id, st, note); }
+    if (state.selectedId === id && !quiet) await select(id);
+    renderRail();
+    renderWindowIfTimeline();
+    if (state.view === "hunt") renderHuntView();
+    if (state.view === "activity") renderActivityGraph(); // flagged base reflects triage live
+  } catch (err) {
+    alert("Could not save triage: " + (err && err.message ? err.message : err));
+  }
+}
+
+// ── Analyst tags ─────────────────────────────────────────────────────────────
+// Free-text labels on events, defined by the analyst. Triage (Validated /
+// Unconfirmed / False positive / Dismissed) stays the built-in vocabulary; tags
+// are the analyst's own. Tags used in this case plus the analyst's personal tag
+// list (remembered on this machine across cases) are offered in the menu.
+function tagLibrary() { const v = loadPref("fx.tagLibrary", []); return Array.isArray(v) ? v : []; }
+function rememberTag(t) { const lib = tagLibrary(); if (!lib.includes(t)) { lib.push(t); savePref("fx.tagLibrary", lib); } }
+function forgetTag(t) { savePref("fx.tagLibrary", tagLibrary().filter((x) => x !== t)); }
+function labelsFor(id) { return (state.labels || []).filter((l) => l.event_id === id).map((l) => l.tag); }
+function labelCounts() { const c = {}; (state.labels || []).forEach((l) => (c[l.tag] = (c[l.tag] || 0) + 1)); return c; }
+function labelChips(id) {
+  const t = labelsFor(id);
+  if (!t.length) return "";
+  const shown = t.slice(0, 2).map((x) => `<span class="lbl-chip">${escapeHtml(x)}</span>`).join("");
+  return shown + (t.length > 2 ? `<span class="lbl-chip more">+${t.length - 2}</span>` : "");
+}
+async function toggleLabel(id, tag) {
+  tag = (tag || "").trim();
+  if (!tag) return;
+  const has = labelsFor(id).includes(tag);
+  try {
+    if (has) { await backend.removeLabel(id, tag); state.labels = state.labels.filter((l) => !(l.event_id === id && l.tag === tag)); }
+    else { await backend.addLabel(id, tag); state.labels.push({ event_id: id, tag }); rememberTag(tag); }
+  } catch (err) { alert("Could not save tag: " + (err && err.message ? err.message : err)); return; }
+  if (state.idFilter && state.idFilter.kind === "tag") state.idFilter.ids = state.labels.filter((l) => l.tag === state.idFilter.label).map((l) => l.event_id);
+  renderRail();
+  renderWindowIfTimeline();
+  if (state.selectedId === id) select(id);
+}
+
+// ── Right-click menu on a timeline row ──────────────────────────────────────
+function closeEventMenu() { const m = el("ctxMenu"); if (m) m.remove(); document.removeEventListener("mousedown", ctxOutside, true); document.removeEventListener("keydown", ctxKey, true); }
+function ctxOutside(ev) { const m = el("ctxMenu"); if (m && !m.contains(ev.target)) closeEventMenu(); }
+function ctxKey(ev) { if (ev.key === "Escape") { ev.preventDefault(); closeEventMenu(); } }
+function openEventMenu(e, x, y, opts) {
+  opts = opts || {};
+  closeEventMenu();
+  const applied = new Set(labelsFor(e.id));
+  const used = labelCounts();
+  const all = [...new Set([...Object.keys(used), ...tagLibrary()])].sort((a, b) => a.localeCompare(b));
+  const cur = triageStateFor(e.id);
+  // The event's file: its target path, else the first Windows path in the text.
+  const pm = /[A-Za-z]:\\[^\s"'|<>*?]+/.exec(e.message || "");
+  const path = e.target || e.target_path || (pm ? pm[0].replace(/[.,;:)\]]+$/, "") : "");
+  const base = path ? path.split(/[\\/]/).pop() : "";
+  const m = document.createElement("div");
+  m.className = "ctx"; m.id = "ctxMenu"; m.setAttribute("role", "menu");
+  m.innerHTML = `
+    <div class="ctx-h">Tag</div>
+    ${all.length ? `<div class="ctx-tags">${all.map((t) => `<span class="ctx-tag ${applied.has(t) ? "on" : ""}"><button class="ctx-tag-b" data-tag="${escapeHtml(t)}">${applied.has(t) ? "✓ " : ""}${escapeHtml(t)}</button>${used[t] ? "" : `<button class="ctx-forget" data-forget="${escapeHtml(t)}" title="Remove from your tag list">×</button>`}</span>`).join("")}</div>` : `<div class="ctx-empty">No tags yet. Type one below and press Enter.</div>`}
+    <div class="ctx-new"><input id="ctxNewTag" maxlength="60" placeholder="New tag… (Enter)" spellcheck="false"></div>
+    ${opts.tagsOnly ? "" : `
+    <div class="ctx-sep"></div>
+    <div class="ctx-h">Triage</div>
+    <div class="ctx-tri">${TRI_STATES.map(([k, label]) => `<button class="tri-btn tri-${k} ${cur === k ? "active" : ""}" data-tri="${k}">${label}</button>`).join("")}${cur ? `<button class="tri-btn" data-tri="">Clear</button>` : ""}</div>
+    <div class="ctx-sep"></div>
+    ${base ? `<button class="ctx-item" data-ioc="${escapeHtml(base)}">Add file name to IOC hunt <span class="ctx-v">${escapeHtml(base)}</span></button>` : ""}
+    ${path && path !== base ? `<button class="ctx-item" data-ioc="${escapeHtml(path)}">Add path to IOC hunt</button>` : ""}
+    <button class="ctx-item" data-copy="1">Copy event text</button>`}`;
+  document.body.appendChild(m);
+  // Keep the menu on screen.
+  const r = m.getBoundingClientRect();
+  m.style.left = Math.max(8, Math.min(x, window.innerWidth - r.width - 8)) + "px";
+  m.style.top = Math.max(8, Math.min(y, window.innerHeight - r.height - 8)) + "px";
+  m.querySelectorAll("[data-tag]").forEach((b) => { b.onclick = () => { closeEventMenu(); toggleLabel(e.id, b.dataset.tag); }; });
+  m.querySelectorAll("[data-forget]").forEach((b) => { b.onclick = (ev) => { ev.stopPropagation(); forgetTag(b.dataset.forget); b.parentElement.remove(); }; });
+  const inp = el("ctxNewTag");
+  inp.onkeydown = (ev) => { if (ev.key === "Enter" && inp.value.trim()) { const t = inp.value.trim(); closeEventMenu(); if (!labelsFor(e.id).includes(t)) toggleLabel(e.id, t); } };
+  m.querySelectorAll("[data-tri]").forEach((b) => { b.onclick = () => { closeEventMenu(); setTriageFor(e.id, b.dataset.tri, triageNoteFor(e.id) || null); }; });
+  m.querySelectorAll("[data-ioc]").forEach((b) => { b.onclick = async () => { closeEventMenu(); await addToIocList(b.dataset.ioc); }; });
+  const cp = m.querySelector("[data-copy]");
+  if (cp) cp.onclick = () => { closeEventMenu(); navigator.clipboard.writeText(`${time(e.ts)}\t${e.artefact}\t${e.message || ""}`).catch(() => {}); };
+  setTimeout(() => { document.addEventListener("mousedown", ctxOutside, true); document.addEventListener("keydown", ctxKey, true); }, 0);
+  if (opts.tagsOnly) inp.focus();
+}
+
+async function addToIocList(value) {
+  if (!state.ioc) { try { state.ioc = (await backend.iocSaved()) || { text: "", results: null }; } catch (e) { state.ioc = { text: "", results: null }; } }
+  const lines = (state.ioc.text || "").split(/\r?\n/).map((l) => l.trim());
+  if (lines.includes(value)) { toast(`Already in the IOC hunt list`); return; }
+  state.ioc.text = (state.ioc.text && state.ioc.text.trim() ? state.ioc.text.trimEnd() + "\n" : "") + value;
+  try { await backend.iocSaveList(state.ioc.text); } catch (e) {}
+  toast(`Added to the IOC hunt list`);
+}
+
+function toast(msg) {
+  let t = el("toast");
+  if (!t) { t = document.createElement("div"); t.id = "toast"; t.className = "toast"; document.body.appendChild(t); }
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 1800);
+}
+
+// ── Detail panel width ───────────────────────────────────────────────────────
+function loadPref(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }
+function savePref(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+function applyDetailWidth() {
+  // Never squeeze the timeline below a usable width (rail 248px + ~600px).
+  const max = Math.max(320, Math.min(Math.round(window.innerWidth * 0.7), window.innerWidth - 248 - 600));
+  const w = state.detailWide ? max : Math.max(320, Math.min(max, state.detailW));
+  el("app").style.setProperty("--detail-w", w + "px");
+}
+function wireDetailResizer() {
+  const h = el("detResizer");
+  if (!h) return;
+  h.onmousedown = (ev) => {
+    ev.preventDefault();
+    state.detailWide = false;
+    const startX = ev.clientX, startW = el("detail").getBoundingClientRect().width;
+    document.body.classList.add("resizing");
+    const move = (m) => { state.detailW = startW + (startX - m.clientX); applyDetailWidth(); };
+    const up = () => {
+      document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up);
+      document.body.classList.remove("resizing"); savePref("fx.detailW", state.detailW);
+      if (el("detWide")) { el("detWide").textContent = "⇤"; el("detWide").title = "Widen panel"; }
+    };
+    document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
+  };
+  h.ondblclick = () => { state.detailW = 440; state.detailWide = false; applyDetailWidth(); savePref("fx.detailW", 440); };
+}
+
+// Raw record: pretty-print JSON when possible and colour keys/strings/numbers.
+function prettyJson(raw) {
+  try { return JSON.stringify(JSON.parse(raw), null, 2); } catch (e) { return raw; }
+}
+function highlightJson(text) {
+  return escapeHtml(text).replace(/(&quot;(?:[^&]|&(?!quot;))*?&quot;)(\s*:)?|\b(true|false|null)\b|(-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)/g,
+    (m, str, colon, lit, num) => str ? (colon ? `<span class="jk">${str}</span>${colon}` : `<span class="js">${str}</span>`)
+      : lit ? `<span class="jl">${lit}</span>` : `<span class="jn">${num}</span>`);
 }
 
 // ── Triage state (client-side cache mirrors the backend) ─────────────────────
@@ -1400,6 +1649,16 @@ function wireEvents() {
     const row = e.target.closest(".evrow");
     if (row) select(row.dataset.id);
   });
+  // Right-click a row: tag it, triage it, or add its file to the IOC hunt.
+  el("rows").addEventListener("contextmenu", (e) => {
+    const row = e.target.closest(".evrow");
+    if (!row) return;
+    e.preventDefault();
+    const ev = state.rows.find((r) => r.id === row.dataset.id);
+    if (!ev) return;
+    select(ev.id);
+    openEventMenu(ev, e.clientX, e.clientY);
+  });
 
   el("rail").addEventListener("click", (e) => {
     // Findings section toggles the hunt view.
@@ -1429,6 +1688,8 @@ function wireEvents() {
       return;
     }
     // Triage summary row toggles a triage-state filter (in the timeline view).
+    const lblRow = e.target.closest(".lbl-sum");
+    if (lblRow) { showTagEvents(lblRow.dataset.label); return; }
     const triRow = e.target.closest(".tri-sum");
     if (triRow && triRow.dataset.triage) {
       const v = triRow.dataset.triage;
@@ -1474,7 +1735,7 @@ function wireEvents() {
   });
   document.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); search.focus(); }
-    if (e.key === "Escape") closeDetail();
+    if (e.key === "Escape" && !el("ctxMenu")) closeDetail();
     // Keyboard navigation of the timeline — precise movement through a long list
     // without fighting trackpad momentum. Ignored while typing in a field.
     if (state.view !== "timeline") return;

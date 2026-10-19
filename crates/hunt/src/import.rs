@@ -199,6 +199,7 @@ pub fn import_pack(pack: &IocPack) -> ImportResult {
             severity: map_severity(&r.severity),
             attack,
             detection,
+            tests: Default::default(),
             // We don't constrain by artefact: the pack's per-rule `sources`
             // is advisory, and our field-based matching already scopes
             // correctly (an event_id match only fires on EVTX, a filename

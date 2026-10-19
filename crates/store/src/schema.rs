@@ -127,6 +127,10 @@ CREATE TABLE IF NOT EXISTS detections (
 );
 "#;
 
+/// Per-case UI state (saved IOC hunt list, last results). Idempotent; run on
+/// create and on open so older case files pick it up.
+pub const CASE_KV_DDL: &str = "CREATE TABLE IF NOT EXISTS case_kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);";
+
 /// Indexes created after bulk load (cheaper to build once data is in). Called
 /// separately from DDL so ingest can defer them until after the first load.
 pub const INDEXES: &str = r#"

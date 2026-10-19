@@ -11,7 +11,7 @@
 //! loads. `raw` is written as a JSON string into DuckDB's JSON type.
 
 use crate::evidence::{hash_artefact, hash_unclassified};
-use crate::schema::{DDL, INDEXES, SCHEMA_VERSION};
+use crate::schema::{CASE_KV_DDL, DDL, INDEXES, SCHEMA_VERSION};
 use duckdb::{params, Connection};
 use fx_core::{Event, EventSink, IdentifiedArtefact, UnclassifiedFile};
 use std::path::Path;
@@ -90,6 +90,10 @@ impl CaseStore {
             });
         }
         let case_id = Uuid::parse_str(&case_id).unwrap_or_else(|_| Uuid::nil());
+        // Small key/value table for per-case UI state (the saved IOC hunt list
+        // and its last results). Created lazily so older case files gain it on
+        // open without a schema-version bump.
+        conn.execute_batch(CASE_KV_DDL)?;
         Ok(Self { conn, case_id })
     }
 
@@ -239,6 +243,55 @@ impl CaseStore {
         self.conn.execute(
             "INSERT INTO tags (event_id, tag, note, tagged_utc) VALUES (?, ?, ?, ?)",
             params![event_id, format!("triage:{state}"), note, fmt_ts(now)],
+        )?;
+        Ok(())
+    }
+
+    /// Add an analyst label (free-text tag such as "Lateral movement") to an
+    /// event. Stored in `tags` as `label:<text>`, alongside triage rows.
+    pub fn add_label(&self, event_id: &str, label: &str) -> Result<(), StoreError> {
+        let now = OffsetDateTime::now_utc();
+        self.conn.execute(
+            "INSERT INTO tags (event_id, tag, note, tagged_utc) VALUES (?, ?, NULL, ?) ON CONFLICT DO NOTHING",
+            params![event_id, format!("label:{}", label.trim()), fmt_ts(now)],
+        )?;
+        Ok(())
+    }
+
+    /// Remove one analyst label from an event.
+    pub fn remove_label(&self, event_id: &str, label: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "DELETE FROM tags WHERE event_id = ? AND tag = ?",
+            params![event_id, format!("label:{}", label.trim())],
+        )?;
+        Ok(())
+    }
+
+    /// Every (event_id, label) pair in the case.
+    pub fn labels(&self) -> Result<Vec<(String, String)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT CAST(event_id AS VARCHAR), substr(tag, 7) FROM tags WHERE tag LIKE 'label:%' ORDER BY tagged_utc",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Read a per-case UI value (see `CASE_KV_DDL`).
+    pub fn kv_get(&self, key: &str) -> Result<Option<String>, StoreError> {
+        self.conn.execute_batch(CASE_KV_DDL)?;
+        let mut stmt = self.conn.prepare("SELECT v FROM case_kv WHERE k = ?")?;
+        let mut rows = stmt.query(params![key])?;
+        Ok(match rows.next()? { Some(r) => Some(r.get(0)?), None => None })
+    }
+
+    /// Write a per-case UI value.
+    pub fn kv_set(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        self.conn.execute_batch(CASE_KV_DDL)?;
+        self.conn.execute(
+            "INSERT INTO case_kv (k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v",
+            params![key, value],
         )?;
         Ok(())
     }
@@ -544,6 +597,38 @@ pub struct TriagedEvent {
     pub action: String,
     pub artefact: String,
     pub message: String,
+}
+
+#[cfg(test)]
+mod label_kv_tests {
+    use super::*;
+
+    #[test]
+    fn labels_and_kv_round_trip_and_survive_reopen() {
+        let dir = std::env::temp_dir().join(format!("fx-lbl-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("c.fxcase");
+        let id = Uuid::new_v4().to_string();
+        {
+            let store = CaseStore::create(&path, "t", None, "UTC").unwrap();
+            store.add_label(&id, "Lateral movement").unwrap();
+            store.add_label(&id, "Lateral movement").unwrap(); // idempotent
+            store.add_label(&id, "Patient zero").unwrap();
+            store.set_triage(&id, "validated", Some("n")).unwrap();
+            store.kv_set("ioc_hunt.list", "evil.example").unwrap();
+            store.kv_set("ioc_hunt.list", "evil.example\n1.2.3.4").unwrap();
+        }
+        let store = CaseStore::open(&path).unwrap();
+        let mut l = store.labels().unwrap();
+        l.sort();
+        assert_eq!(l, vec![(id.clone(), "Lateral movement".into()), (id.clone(), "Patient zero".into())]);
+        // Labels never leak into triage, and triage never shows as a label.
+        assert_eq!(store.triage_map().unwrap().len(), 1);
+        store.remove_label(&id, "Patient zero").unwrap();
+        assert_eq!(store.labels().unwrap().len(), 1);
+        assert_eq!(store.kv_get("ioc_hunt.list").unwrap().as_deref(), Some("evil.example\n1.2.3.4"));
+        assert_eq!(store.kv_get("missing").unwrap(), None);
+    }
 }
 
 #[cfg(test)]

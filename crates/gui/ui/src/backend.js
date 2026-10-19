@@ -40,6 +40,23 @@ export const backend = {
   iocSweep: (text) => call("ioc_sweep", { text }),
   readIocFile: (path) => call("read_ioc_file", { path }),
   eventsByIds: (ids) => call("events_by_ids", { ids }),
+  iocSaved: () => call("ioc_saved", {}),
+  iocSaveList: (text) => call("ioc_save_list", { text }),
+  listLabels: () => call("list_labels", {}),
+  addLabel: (eventId, tag) => call("add_label", { eventId, tag }),
+  removeLabel: (eventId, tag) => call("remove_label", { eventId, tag }),
+  // Files dropped onto the window (Tauri delivers paths, not File objects).
+  onFileDrop: async (handler) => {
+    try {
+      const wv = window.__TAURI__ && window.__TAURI__.webview && window.__TAURI__.webview.getCurrentWebview();
+      if (!wv || !wv.onDragDropEvent) return false;
+      await wv.onDragDropEvent((ev) => {
+        const p = ev.payload || {};
+        handler(p.type, p.paths || []);
+      });
+      return true;
+    } catch (e) { return false; }
+  },
   pickIocFile: async () => {
     if (!hasTauri) return null;
     return window.__TAURI__.dialog.open({
@@ -164,13 +181,19 @@ function sample(cmd, args) {
   if (cmd === "export_findings") { return Promise.resolve(sampleDetections().length); }
   if (cmd === "export_report") { return Promise.resolve(0); }
   if (cmd === "events_by_ids") { const want = new Set(args.ids || []); return Promise.resolve(SEED.filter((e) => want.has(e.id))); }
+  if (cmd === "ioc_saved") { return Promise.resolve({ text: SAMPLE_KV.ioc || "", results: SAMPLE_KV.iocResults || null }); }
+  if (cmd === "ioc_save_list") { SAMPLE_KV.ioc = args.text; return Promise.resolve(); }
+  if (cmd === "list_labels") { return Promise.resolve(SAMPLE_LABELS.slice()); }
+  if (cmd === "add_label") { if (!SAMPLE_LABELS.some((l) => l.event_id === args.eventId && l.tag === args.tag)) SAMPLE_LABELS.push({ event_id: args.eventId, tag: args.tag }); return Promise.resolve(); }
+  if (cmd === "remove_label") { const i = SAMPLE_LABELS.findIndex((l) => l.event_id === args.eventId && l.tag === args.tag); if (i >= 0) SAMPLE_LABELS.splice(i, 1); return Promise.resolve(); }
   if (cmd === "ioc_preview") {
     const lines = (args.text || "").split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
     return Promise.resolve({ total: lines.length, by_kind: lines.length ? { "mixed (preview)": lines.length } : {}, skipped: 0 });
   }
   if (cmd === "ioc_sweep") {
     const lines = (args.text || "").split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
-    return Promise.resolve({ iocs: lines.length, matched: Math.min(2, lines.length), events_scanned: 4217, skipped: [],
+    SAMPLE_KV.ioc = args.text;
+    return Promise.resolve(SAMPLE_KV.iocResults = { iocs: lines.length, matched: Math.min(2, lines.length), events_scanned: 4217, skipped: [],
       results: lines.map((v, i) => ({ value: v, kind: "text", kind_label: "text", events: i < 2 ? 3 - i : 0,
         first_seen: i < 2 ? "2026-02-11T02:14:00" : null, last_seen: i < 2 ? "2026-02-11T02:31:00" : null,
         artefacts: i < 2 ? { Evtx: 2, Mft: 1 - i } : {} })) });
@@ -224,6 +247,10 @@ function demoDailyActivity() {
 }
 
 // Detections the shipped rule pack would produce against the sample intrusion.
+// In-memory stand-ins for the demo/browser preview.
+const SAMPLE_KV = {};
+const SAMPLE_LABELS = [];
+
 function sampleDetections() {
   // Link each demo finding to a real SEED event (by message substring) so
   // clicking a finding opens that event — mirroring the real backend.

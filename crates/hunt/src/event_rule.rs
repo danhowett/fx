@@ -34,6 +34,81 @@ pub struct EventRule {
     /// Optional: only consider events from these artefacts (perf + precision).
     #[serde(default)]
     pub artefacts: Vec<String>,
+    /// Optional self-tests: example events this rule must / must not match.
+    /// Checked by the test suite for every embedded rule, so a rule edit that
+    /// stops catching its target, or starts catching benign noise, fails CI.
+    #[serde(default, skip_serializing_if = "RuleTests::is_empty")]
+    pub tests: RuleTests,
+}
+
+/// Example events for a rule. Each example is a map of field name → value
+/// (the same dotted names rules use, plus `artefact`, e.g. `mft`, `evtx`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RuleTests {
+    #[serde(default, rename = "match")]
+    pub should_match: Vec<std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
+    pub no_match: Vec<std::collections::BTreeMap<String, String>>,
+}
+
+impl RuleTests {
+    pub fn is_empty(&self) -> bool {
+        self.should_match.is_empty() && self.no_match.is_empty()
+    }
+}
+
+/// Build a synthetic event from a rule-test example (see [`RuleTests`]).
+pub fn event_from_example(ex: &std::collections::BTreeMap<String, String>) -> Event {
+    use fx_core::{ArtefactKind, ProcessInfo, Provenance, Target, TimestampKind};
+    let g = |k: &str| ex.get(k).cloned();
+    let artefact: ArtefactKind = g("artefact")
+        .and_then(|a| serde_json::from_value(serde_json::Value::String(a.to_ascii_lowercase())).ok())
+        .unwrap_or(ArtefactKind::Evtx);
+    let has_proc = ["process.name", "process.path", "process.command_line", "process.parent_name", "process.hash_sha1"]
+        .iter()
+        .any(|k| ex.contains_key(*k));
+    let mut raw = serde_json::json!({});
+    if let Some(id) = g("event.id") {
+        raw["Event"] = serde_json::json!({"System": {"EventID": id.parse::<u64>().unwrap_or(0)}});
+    }
+    for (k, v) in ex {
+        if let Some(x) = k.strip_prefix("extras.") {
+            raw["extras"][x] = serde_json::Value::String(v.clone());
+        }
+    }
+    Event {
+        id: uuid::Uuid::new_v4(),
+        timestamp: time::OffsetDateTime::UNIX_EPOCH,
+        timestamp_kind: TimestampKind::Recorded,
+        artefact,
+        action: g("action").unwrap_or_else(|| "test.event".into()),
+        host: g("host"),
+        user: fx_core::Principal { name: g("user.name"), sid: g("user.sid"), domain: g("user.domain") },
+        process: has_proc.then(|| ProcessInfo {
+            name: g("process.name"),
+            path: g("process.path"),
+            command_line: g("process.command_line"),
+            parent_name: g("process.parent_name"),
+            hash_sha1: g("process.hash_sha1"),
+            ..Default::default()
+        }),
+        target: g("target.path").or(g("target.value_name")).map(|_| Target {
+            path: g("target.path"),
+            value_name: g("target.value_name"),
+            hash_sha1: None,
+            size: None,
+        }),
+        network: None,
+        message: g("message").unwrap_or_default(),
+        provenance: Provenance {
+            evidence_id: uuid::Uuid::nil(),
+            source_path: String::new(),
+            parser: "rule-test".into(),
+            parser_version: "0".into(),
+            source_ref: None,
+        },
+        raw,
+    }
 }
 
 /// A boolean tree of field predicates. YAML-friendly: each node is a map with
@@ -279,6 +354,195 @@ fn field_value(ev: &Event, field: &str) -> Option<String> {
             .and_then(|v| v.as_str())
             .map(str::to_string),
         _ => None,
+    }
+}
+
+// ── Compiled rule set ────────────────────────────────────────────────────────
+//
+// `EventRule::matches` walks every rule for every event and tests each value in
+// turn, so cost grows linearly with the number of rules × values. That was fine
+// at a few dozen rules, but a large research-derived pack would multiply hunt
+// time on multi-million-event cases.
+//
+// `CompiledRules` evaluates the same rules with the same results, but turns
+// every field condition ("leaf") into one regex and, per event field, runs ALL
+// leaves for that field as a single `RegexSet` pass. The per-event cost is then
+// roughly one scan per distinct field (~a dozen), nearly independent of how many
+// rules exist. The boolean all/any/not trees are evaluated afterwards against a
+// bitmap of which leaves matched, which is trivially cheap.
+
+/// A rule's condition tree with leaves replaced by indices into the leaf table.
+#[derive(Debug, Clone)]
+enum CTree {
+    All(Vec<CTree>),
+    Any(Vec<CTree>),
+    Not(Box<CTree>),
+    Leaf(usize),
+}
+
+impl CTree {
+    fn eval(&self, hit: &[bool]) -> bool {
+        match self {
+            CTree::All(v) => v.iter().all(|c| c.eval(hit)),
+            CTree::Any(v) => v.iter().any(|c| c.eval(hit)),
+            CTree::Not(c) => !c.eval(hit),
+            CTree::Leaf(i) => hit[*i],
+        }
+    }
+}
+
+/// All leaves that read one event field.
+struct FieldPlan {
+    field: String,
+    /// Leaves using `exists` (non-empty check, no regex).
+    exists: Vec<usize>,
+    /// Leaves matched by regex, in `set` order.
+    leaves: Vec<usize>,
+    /// One combined matcher for `leaves`; `None` falls back to `singles`.
+    set: Option<regex::RegexSet>,
+    singles: Vec<regex::Regex>,
+}
+
+/// Never matches anything (used for a leaf whose every value failed to compile —
+/// the same outcome the per-value path gives an invalid pattern).
+const NEVER: &str = r"[^\s\S]";
+
+/// Translate one leaf into a single pattern with the leaf's semantics.
+fn leaf_pattern(m: &FieldMatch) -> String {
+    let parts: Vec<String> = m
+        .values
+        .iter()
+        .filter_map(|v| match m.op {
+            MatchOp::Regex => {
+                // Keep only values that compile, as the per-value path ignores
+                // invalid ones (they simply never match).
+                RegexBuilder::new(v).case_insensitive(m.ci).build().ok()?;
+                Some(format!("(?:{v})"))
+            }
+            MatchOp::Equals => Some(format!(r"\A{}\z", regex::escape(v))),
+            MatchOp::Contains => Some(regex::escape(v)),
+            MatchOp::StartsWith => Some(format!(r"\A{}", regex::escape(v))),
+            MatchOp::EndsWith => Some(format!(r"{}\z", regex::escape(v))),
+            MatchOp::Exists => None,
+        })
+        .collect();
+    if parts.is_empty() {
+        return NEVER.to_string();
+    }
+    let flag = if m.ci { "(?i)" } else { "" };
+    format!("{flag}(?:{})", parts.join("|"))
+}
+
+/// The event-rule set compiled for fast, rule-count-independent evaluation.
+pub struct CompiledRules {
+    trees: Vec<CTree>,
+    /// Per rule: lower-cased artefact names it is limited to (empty = any).
+    artefacts: Vec<Vec<String>>,
+    fields: Vec<FieldPlan>,
+    n_leaves: usize,
+}
+
+impl CompiledRules {
+    pub fn new(rules: &[EventRule]) -> Self {
+        let mut leaves: Vec<FieldMatch> = Vec::new();
+        fn build(c: &Condition, leaves: &mut Vec<FieldMatch>) -> CTree {
+            match c {
+                Condition::All { all } => CTree::All(all.iter().map(|x| build(x, leaves)).collect()),
+                Condition::Any { any } => CTree::Any(any.iter().map(|x| build(x, leaves)).collect()),
+                Condition::Not { not } => CTree::Not(Box::new(build(not, leaves))),
+                Condition::Match { match_ } => {
+                    leaves.push(match_.clone());
+                    CTree::Leaf(leaves.len() - 1)
+                }
+            }
+        }
+        let trees: Vec<CTree> = rules.iter().map(|r| build(&r.detection, &mut leaves)).collect();
+        let artefacts = rules
+            .iter()
+            .map(|r| r.artefacts.iter().map(|a| a.to_ascii_lowercase()).collect())
+            .collect();
+
+        // Group leaves by field.
+        let mut order: Vec<String> = Vec::new();
+        let mut by_field: HashMap<String, (Vec<usize>, Vec<usize>, Vec<String>)> = HashMap::new();
+        for (i, m) in leaves.iter().enumerate() {
+            if !by_field.contains_key(&m.field) {
+                order.push(m.field.clone());
+            }
+            let e = by_field.entry(m.field.clone()).or_default();
+            if matches!(m.op, MatchOp::Exists) {
+                e.0.push(i);
+            } else {
+                e.1.push(i);
+                e.2.push(leaf_pattern(m));
+            }
+        }
+        let fields = order
+            .into_iter()
+            .map(|field| {
+                let (exists, idx, pats) = by_field.remove(&field).unwrap();
+                let set = regex::RegexSetBuilder::new(&pats)
+                    .size_limit(256 << 20)
+                    .dfa_size_limit(64 << 20)
+                    .build()
+                    .ok();
+                // Fallback (should not happen: every pattern is pre-validated):
+                // compile individually so a pathological set can't disable rules.
+                let singles = if set.is_none() {
+                    pats.iter()
+                        .map(|p| regex::Regex::new(p).unwrap_or_else(|_| regex::Regex::new(NEVER).unwrap()))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                FieldPlan { field, exists, leaves: idx, set, singles }
+            })
+            .collect();
+        CompiledRules { trees, artefacts, fields, n_leaves: leaves.len() }
+    }
+
+    /// Indices (into the rule slice passed to `new`) of every rule that
+    /// matches `ev`, in rule order. `hit` is a scratch buffer reused across
+    /// calls to avoid a per-event allocation.
+    pub fn matching(&self, ev: &Event, hit: &mut Vec<bool>, out: &mut Vec<usize>) {
+        out.clear();
+        hit.clear();
+        hit.resize(self.n_leaves, false);
+        for fp in &self.fields {
+            let Some(v) = field_value(ev, &fp.field) else { continue };
+            if !v.is_empty() {
+                for &i in &fp.exists {
+                    hit[i] = true;
+                }
+            }
+            if fp.leaves.is_empty() {
+                continue;
+            }
+            match &fp.set {
+                Some(set) => {
+                    for k in set.matches(&v).iter() {
+                        hit[fp.leaves[k]] = true;
+                    }
+                }
+                None => {
+                    for (k, re) in fp.singles.iter().enumerate() {
+                        if re.is_match(&v) {
+                            hit[fp.leaves[k]] = true;
+                        }
+                    }
+                }
+            }
+        }
+        let art = format!("{:?}", ev.artefact).to_ascii_lowercase();
+        for (r, tree) in self.trees.iter().enumerate() {
+            let a = &self.artefacts[r];
+            if !a.is_empty() && !a.iter().any(|x| *x == art) {
+                continue;
+            }
+            if tree.eval(hit) {
+                out.push(r);
+            }
+        }
     }
 }
 

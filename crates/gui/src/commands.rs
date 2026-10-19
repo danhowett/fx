@@ -778,7 +778,79 @@ pub async fn ioc_sweep(
     }
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
-    fx_hunt::ioc::sweep(store, &parsed).map_err(|e| e.to_string())
+    let report = fx_hunt::ioc::sweep(store, &parsed).map_err(|e| e.to_string())?;
+    // Save the list and its results with the case, so the IOC hunt view shows
+    // them again next time the case is opened. Best-effort: a failed save must
+    // not lose the results the analyst is about to see.
+    let _ = store.kv_set("ioc_hunt.list", &text);
+    if let Ok(j) = serde_json::to_string(&report) {
+        let _ = store.kv_set("ioc_hunt.results", &j);
+    }
+    Ok(report)
+}
+
+/// The IOC hunt list and last results saved with the open case (if any).
+#[derive(serde::Serialize)]
+pub struct IocSaved {
+    pub text: String,
+    pub results: Option<serde_json::Value>,
+}
+
+#[tauri::command]
+pub async fn ioc_saved(state: tauri::State<'_, AppState>) -> Result<IocSaved, String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    let text = store.kv_get("ioc_hunt.list").map_err(|e| e.to_string())?.unwrap_or_default();
+    let results = store
+        .kv_get("ioc_hunt.results")
+        .map_err(|e| e.to_string())?
+        .and_then(|j| serde_json::from_str(&j).ok());
+    Ok(IocSaved { text, results })
+}
+
+/// Save the IOC hunt list without running it (so edits aren't lost).
+#[tauri::command]
+pub async fn ioc_save_list(state: tauri::State<'_, AppState>, text: String) -> Result<(), String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    store.kv_set("ioc_hunt.list", &text).map_err(|e| e.to_string())
+}
+
+/// One analyst label on one event.
+#[derive(serde::Serialize)]
+pub struct LabelDto {
+    pub event_id: String,
+    pub tag: String,
+}
+
+#[tauri::command]
+pub async fn list_labels(state: tauri::State<'_, AppState>) -> Result<Vec<LabelDto>, String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    Ok(store
+        .labels()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(event_id, tag)| LabelDto { event_id, tag })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn add_label(state: tauri::State<'_, AppState>, event_id: String, tag: String) -> Result<(), String> {
+    let tag = tag.trim().to_string();
+    if tag.is_empty() || tag.len() > 60 {
+        return Err("Tags must be 1–60 characters.".into());
+    }
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    store.add_label(&event_id, &tag).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn remove_label(state: tauri::State<'_, AppState>, event_id: String, tag: String) -> Result<(), String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    store.remove_label(&event_id, &tag).map_err(|e| e.to_string())
 }
 
 /// Read an IOC list file (txt / csv / any text; UTF-8 or UTF-16) for the

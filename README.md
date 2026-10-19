@@ -113,9 +113,12 @@ around any event, and triage inline.
   **millions of events**; correlation runs in seconds, not minutes.
 - **Triage & pivot** — tag events, filter by category / artefact / flagged,
   full-text search, pivot the timeline around any event or day.
-- **IOC sweep** — paste or load an indicator list (hashes, IPs, domains, URLs,
-  paths, defanged or not) and hunt the whole case for it, post-processing, in
-  one pass. Every match becomes a triageable, exportable finding.
+- **IOC hunt** — paste, load or drop an indicator list (hashes, IPs, domains,
+  URLs, paths, defanged or not) and hunt the whole case for it, post-processing,
+  in one pass. The list and results are saved with the case; every match becomes
+  a triageable, exportable finding.
+- **Tags** — right-click any event to tag it from a preset list or a new tag of
+  your own; filter the timeline by tag from the rail.
 - **Per-day activity graph** — surface untagged volume spikes no rule flagged.
 - **Export** — CSV / STIX, plus a self-contained interactive **HTML / PDF case
   report** with a chain-of-custody evidence table.

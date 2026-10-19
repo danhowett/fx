@@ -29,6 +29,11 @@ fn main() {
             commands::ioc_sweep,
             commands::read_ioc_file,
             commands::events_by_ids,
+            commands::ioc_saved,
+            commands::ioc_save_list,
+            commands::list_labels,
+            commands::add_label,
+            commands::remove_label,
             commands::ingest_log,
             commands::daily_activity,
         ])

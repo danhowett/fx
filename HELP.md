@@ -149,6 +149,11 @@ bulk SRUM exfil).
 3. **Triage** — mark any event **Validated / Unconfirmed / False positive /
    Dismissed**, with a free-text note. Findings auto-start as Unconfirmed. Filter
    the timeline by triage state from the rail.
+   **Tag** any event by right-clicking it in the timeline: type a tag of your own
+   (or pick one you've used before — fx remembers your tags on this machine;
+   × removes one from that list). Tags show on the row and in the detail panel, are saved in
+   the case, and appear under **Tags** in the rail — click one to list every
+   event carrying it. The right-click menu also sets triage directly.
 4. **Pivot** — on any event, use **Pivot ±1m / 5m / 30m / 1h** to see everything
    around it; or set an explicit time range in the toolbar.
 5. **Export** — everything lives under the **Export ▾** menu in the top bar:
@@ -162,22 +167,27 @@ bulk SRUM exfil).
    **evidence chain-of-custody table** (every ingested file with its SHA-256).
    Open it in any browser; print to PDF to archive. (CLI equivalent:
    `fx report case.fxcase report.html`.)
-6. **IOC sweep** — click **IOC sweep** in the top bar, then paste an indicator
-   list or load one from a file (`.txt`, `.csv`, a threat-intel export…). fx
-   recognises SHA-256 / SHA-1 / MD5 hashes, IPv4 / IPv6, domains, URLs, email
+6. **IOC hunt** — click **IOC hunt** in the top bar to open the IOC view. Paste
+   indicators on the left, load a `.txt` / `.csv`, or drop a file onto the view.
+   fx recognises SHA-256 / SHA-1 / MD5 hashes, IPv4 / IPv6, domains, URLs, email
    addresses, file names, full paths and free text — one or more per line, `#`
    comments ignored, and **defanged values are refanged** (`hxxp://`,
-   `evil[.]com`, `1.2.3[.]4`). A live preview counts what was recognised before
-   you run it. The sweep searches **every event in the open case, including the
-   raw record**, in a single pass — no re-ingest, so it works on a case processed
+   `evil[.]com`, `1.2.3[.]4`). A live preview counts what was recognised.
+   **Run hunt** searches **every event in the open case, including the raw
+   record**, in a single pass — no re-ingest, so it works on a case processed
    weeks ago. Matching is token-aware: `1.2.3.4` won't hit `1.2.3.45`, and
    `evil.com` hits `cdn.evil.com` but not `notevil.com`; paths match whether the
    artefact stored `C:\x\y`, `C:/x/y` or `/x/y`. The results table shows each
-   indicator's hit count, first sighting and which artefacts it appeared in.
-   **Each matched indicator becomes a finding** (*IOC match*, High; free text is
-   Medium) that you triage, export and report like any other — the report groups
-   them under **IOC matches**. Running a new sweep replaces the previous sweep's
-   findings; re-running the rule hunt keeps them.
+   indicator's hit count, first and last sighting and which artefacts it
+   appeared in; **click an indicator to see every event that matched it**.
+   The list and its last results are **saved in the `.fxcase`**, so they're
+   there next time you open the case. **Each matched indicator becomes a
+   finding** (*IOC match*, High; free text is Medium) that you triage, export
+   and report like any other — **Show as findings** lists just those, and the
+   report groups them under **IOC matches**. Running the hunt again replaces
+   the previous results and their findings; re-running the rule hunt keeps them.
+   You can also right-click any event and choose **Add file name / path to IOC
+   hunt**.
 7. **Ingest log** — from the rail, see every file ingested and whether it parsed,
    was unsupported, or failed (with the failure reason).
 8. **Activity graph** — from the rail, a per-day event-count histogram across the
@@ -191,6 +201,13 @@ bulk SRUM exfil).
    **Click a day to pivot** the timeline to that day.
 
 ## Navigating the timeline
+
+**The detail panel.** Click an event to open it on the right. Drag the panel's
+left edge to resize it (double-click the edge to reset), or use **⇤** to widen
+it in one click; the width is remembered. The raw record fills the remaining
+height, pretty-printed and colour-coded, with **A− / A+** for text size,
+**Wrap** for long lines and **Copy**.
+**+ Note** adds an analyst note, saved with the triage state.
 
 - **Scroll** or use the mouse wheel; a floating readout shows your position
   (row *N* of total, and the UTC timestamp there) so you never lose your place.
