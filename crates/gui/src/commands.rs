@@ -190,8 +190,46 @@ pub async fn open_case(state: tauri::State<'_, AppState>, path: String) -> Resul
 /// Long-running. `async` so Tauri runs it on a worker thread, not the window's
 /// main thread — a synchronous command here froze the window ("Not Responding")
 /// for the whole ingest even though work was progressing.
+
+/// Run `f` while a ticker thread forwards progress snapshots to the frontend
+/// as `fx-progress` events (about 4 per second), plus one final snapshot.
+fn with_progress<T>(app: &tauri::AppHandle, f: impl FnOnce() -> T) -> T {
+    use tauri::Emitter;
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ticker = {
+        let done = done.clone();
+        let app = app.clone();
+        std::thread::spawn(move || {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = app.emit("fx-progress", fx_core::progress::snapshot());
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        })
+    };
+    let out = f();
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = ticker.join();
+    let _ = app.emit("fx-progress", fx_core::progress::snapshot());
+    out
+}
+
+/// Ask the running ingest / detection job to stop at its next safe point.
+/// Work already done is kept.
+#[tauri::command]
+pub async fn cancel_job() -> Result<(), String> {
+    fx_core::progress::request_cancel();
+    Ok(())
+}
+
+/// Latest progress counters (the frontend reads `cancelled` after a job).
+#[tauri::command]
+pub async fn progress_snapshot() -> Result<fx_core::progress::Snapshot, String> {
+    Ok(fx_core::progress::snapshot())
+}
+
 #[tauri::command]
 pub async fn ingest_collection(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     collection_dir: String,
     case_path: String,
@@ -205,7 +243,9 @@ pub async fn ingest_collection(
     let mut store = CaseStore::create(&case_path, &case_name, examiner.as_deref(), "UTC")
         .map_err(|e| e.to_string())?;
     let registry = ParserRegistry::with_defaults();
-    let _report = ingest_into_store(&PathBuf::from(collection_dir), &registry, &mut store);
+    fx_core::progress::reset();
+    let _report = with_progress(&app, || ingest_into_store(&PathBuf::from(collection_dir), &registry, &mut store));
+    fx_core::progress::set_phase("Opening case");
     let overview = build_overview(&store).map_err(|e| e.to_string())?;
     *state.store.lock().unwrap() = Some(store);
     Ok(overview)
@@ -279,6 +319,7 @@ pub async fn event_raw(state: tauri::State<'_, AppState>, event_id: String) -> R
 /// pack next to the binary).
 #[tauri::command]
 pub async fn run_hunt(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     rules_dir: Option<String>,
 ) -> Result<Vec<DetectionDto>, String> {
@@ -291,7 +332,9 @@ pub async fn run_hunt(
         Some(dir) if !dir.is_empty() => fx_hunt::RuleSet::load_dir(std::path::Path::new(&dir)),
         _ => fx_hunt::RuleSet::from_embedded(),
     };
-    let _ = fx_hunt::run(store, &rules);
+    fx_core::progress::reset();
+    fx_core::progress::set_phase("Running detections");
+    let _ = with_progress(&app, || fx_hunt::run(store, &rules));
     // Auto-triage: every event a finding points at starts as "unconfirmed",
     // unless the analyst has already set a state for it. This gives a worklist
     // to promote/dismiss through.
@@ -912,7 +955,7 @@ pub async fn sigma_preview(config: SigmaConfig) -> Result<fx_hunt::sigma::SigmaL
 /// findings; the built-in rules' and IOC hunt's findings are untouched. The
 /// config and results are saved with the case.
 #[tauri::command]
-pub async fn sigma_hunt(state: tauri::State<'_, AppState>, config: SigmaConfig) -> Result<fx_hunt::SigmaRunReport, String> {
+pub async fn sigma_hunt(app: tauri::AppHandle, state: tauri::State<'_, AppState>, config: SigmaConfig) -> Result<fx_hunt::SigmaRunReport, String> {
     let load = fx_hunt::sigma::load_dir(std::path::Path::new(&config.folder), &config.filter);
     if let Some(e) = &load.folder_error {
         return Err(e.clone());
@@ -927,7 +970,9 @@ pub async fn sigma_hunt(state: tauri::State<'_, AppState>, config: SigmaConfig) 
     }
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
-    let report = fx_hunt::run_sigma(store, &config.folder, &load);
+    fx_core::progress::reset();
+    fx_core::progress::set_phase(&format!("Running {} Sigma rules", load.loaded));
+    let report = with_progress(&app, || fx_hunt::run_sigma(store, &config.folder, &load));
     // Sigma findings start as "unconfirmed", like rule findings.
     if let Ok(dets) = store.detections() {
         for d in dets.iter().filter(|d| d.engine == "sigma") {
@@ -958,4 +1003,160 @@ pub async fn sigma_saved(state: tauri::State<'_, AppState>) -> Result<SigmaSaved
     let store = guard.as_ref().ok_or("no case open")?;
     let get = |k: &str| store.kv_get(k).ok().flatten().and_then(|j| serde_json::from_str(&j).ok());
     Ok(SigmaSaved { config: get("sigma.config"), results: get("sigma.results") })
+}
+
+// ── Host information ─────────────────────────────────────────────────────────
+
+/// One fact with the event it came from (so the UI can open the source).
+#[derive(serde::Serialize, Default, Clone)]
+pub struct HostSourced<T: serde::Serialize> {
+    pub value: T,
+    pub event_id: String,
+    pub source: String,
+}
+
+#[derive(serde::Serialize, Default)]
+pub struct HostAccount {
+    pub user: String,
+    pub rid: Option<u64>,
+    pub full_name: Option<String>,
+    pub sid: Option<String>,
+    pub profile_path: Option<String>,
+    pub created: Option<String>,
+    pub last_logon: Option<String>,
+    pub password_last_set: Option<String>,
+    pub logon_count: Option<u64>,
+    pub disabled: Option<bool>,
+    pub local: bool,
+    pub event_id: String,
+}
+
+#[derive(serde::Serialize, Default)]
+pub struct HostInfoDto {
+    pub computer_name: Option<HostSourced<String>>,
+    pub domain: Option<HostSourced<String>>,
+    pub os: Option<HostSourced<serde_json::Value>>,
+    pub timezone: Option<HostSourced<serde_json::Value>>,
+    pub last_shutdown: Option<HostSourced<String>>,
+    pub interfaces: Vec<HostSourced<serde_json::Value>>,
+    pub accounts: Vec<HostAccount>,
+    pub collection_tool: Option<String>,
+    pub asserted_host: Option<String>,
+    pub evidence_files: u64,
+    pub evidence_bytes: u64,
+    /// Other computer names seen (multi-host collections).
+    pub other_names: Vec<String>,
+}
+
+/// Aggregate the case's host facts for the Host panel.
+#[tauri::command]
+pub async fn host_info(state: tauri::State<'_, AppState>) -> Result<HostInfoDto, String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    let facts = store.host_facts().map_err(|e| e.to_string())?;
+    let mut out = HostInfoDto::default();
+    if let Ok((tool, host, _tz, n, bytes)) = store.collection_summary() {
+        out.collection_tool = tool;
+        out.asserted_host = host;
+        out.evidence_files = n;
+        out.evidence_bytes = bytes;
+    }
+    let parsed: Vec<(String, String, serde_json::Value, String)> = facts
+        .into_iter()
+        .map(|(id, action, raw, src)| (id, action, serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null), src))
+        .collect();
+    let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    // Which control set is current (SYSTEM\Select); facts from the others are
+    // older copies and are only used if the current one lacks them.
+    let current_cs = parsed.iter().find(|(_, a, _, _)| a == "host.controlset").and_then(|(_, _, r, _)| s(r, "current"));
+    let rank = |r: &serde_json::Value| -> u8 {
+        match (s(r, "control_set"), &current_cs) {
+            (Some(c), Some(cur)) if &c == cur => 0,
+            (None, _) => 0,
+            _ => 1,
+        }
+    };
+    let pick = |action: &str| -> Option<&(String, String, serde_json::Value, String)> {
+        parsed.iter().filter(|(_, a, _, _)| a == action).min_by_key(|(_, _, r, _)| rank(r))
+    };
+    let sourced = |e: &(String, String, serde_json::Value, String), v: String| HostSourced { value: v, event_id: e.0.clone(), source: e.3.clone() };
+
+    let mut names: Vec<String> = parsed.iter().filter(|(_, a, _, _)| a == "host.computer_name").filter_map(|(_, _, r, _)| s(r, "value")).collect();
+    names.sort();
+    names.dedup();
+    if let Some(e) = pick("host.computer_name") {
+        if let Some(v) = s(&e.2, "value") {
+            out.other_names = names.into_iter().filter(|n| !n.eq_ignore_ascii_case(&v)).collect();
+            out.computer_name = Some(sourced(e, v));
+        }
+    }
+    if let Some(e) = pick("host.tcpip") {
+        if let Some(d) = s(&e.2, "domain") {
+            out.domain = Some(sourced(e, d));
+        }
+    }
+    if let Some(e) = pick("host.os") {
+        out.os = Some(HostSourced { value: e.2.clone(), event_id: e.0.clone(), source: e.3.clone() });
+    }
+    if let Some(e) = pick("host.timezone") {
+        out.timezone = Some(HostSourced { value: e.2.clone(), event_id: e.0.clone(), source: e.3.clone() });
+    }
+    if let Some(e) = pick("host.shutdown") {
+        if let Some(t) = s(&e.2, "time") {
+            out.last_shutdown = Some(sourced(e, t));
+        }
+    }
+    // Interfaces: one per GUID, from the current control set where possible.
+    let mut seen = std::collections::HashSet::new();
+    let mut ifs: Vec<&(String, String, serde_json::Value, String)> = parsed.iter().filter(|(_, a, _, _)| a == "host.interface").collect();
+    ifs.sort_by_key(|(_, _, r, _)| rank(r));
+    for e in ifs {
+        let key = s(&e.2, "guid").unwrap_or_default();
+        if seen.insert(key) {
+            out.interfaces.push(HostSourced { value: e.2.clone(), event_id: e.0.clone(), source: e.3.clone() });
+        }
+    }
+    // Accounts: local SAM accounts (names + F/V activity, joined by RID) and
+    // profile-only users (domain / Microsoft accounts) from ProfileList.
+    let mut accts: std::collections::BTreeMap<String, HostAccount> = std::collections::BTreeMap::new();
+    for (id, a, r, _) in &parsed {
+        let rid = r.get("rid").and_then(|x| x.as_u64());
+        match a.as_str() {
+            "host.account" | "host.account_activity" => {
+                let Some(user) = s(r, "user") else { continue };
+                let acc = accts.entry(user.to_ascii_lowercase()).or_insert_with(|| HostAccount { user: user.clone(), local: true, event_id: id.clone(), ..Default::default() });
+                acc.rid = acc.rid.or(rid);
+                if a == "host.account" {
+                    acc.created = s(r, "created");
+                } else {
+                    acc.full_name = s(r, "full_name").or(acc.full_name.take());
+                    acc.last_logon = s(r, "last_logon");
+                    acc.password_last_set = s(r, "password_last_set");
+                    acc.logon_count = r.get("logon_count").and_then(|x| x.as_u64());
+                    acc.disabled = r.get("disabled").and_then(|x| x.as_bool());
+                    acc.event_id = id.clone();
+                }
+            }
+            _ => {}
+        }
+    }
+    for (id, a, r, _) in &parsed {
+        if a != "host.profile" {
+            continue;
+        }
+        let Some(user) = s(r, "user") else { continue };
+        let sid = s(r, "sid");
+        let local_rid = sid.as_deref().and_then(|x| x.rsplit('-').next()).and_then(|x| x.parse::<u64>().ok());
+        // Match a SAM account by RID first (renamed profiles), else by name.
+        let key = accts
+            .iter()
+            .find(|(_, v)| v.rid.is_some() && v.rid == local_rid)
+            .map(|(k, _)| k.clone())
+            .unwrap_or_else(|| user.to_ascii_lowercase());
+        let acc = accts.entry(key).or_insert_with(|| HostAccount { user: user.clone(), local: false, event_id: id.clone(), ..Default::default() });
+        acc.sid = sid;
+        acc.profile_path = s(r, "path");
+    }
+    out.accounts = accts.into_values().collect();
+    Ok(out)
 }

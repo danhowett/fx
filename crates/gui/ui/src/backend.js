@@ -71,6 +71,7 @@ export const backend = {
   sigmaPreview: (config) => call("sigma_preview", { config }),
   sigmaHunt: (config) => call("sigma_hunt", { config }),
   sigmaSaved: () => call("sigma_saved", {}),
+  hostInfo: () => call("host_info", {}),
   ingestLog: () => call("ingest_log", {}),
   dailyActivity: () => call("daily_activity", {}),
   pickExportFile: async (format) => {
@@ -84,15 +85,28 @@ export const backend = {
     });
   },
   isLive: () => hasTauri,
+  // Long-job progress: the Rust side emits "fx-progress" ~4x a second while
+  // ingest / detections run. Demo mode feeds the same handler from sample().
+  onProgress: async (handler) => {
+    if (!hasTauri) { demoProgressHandlers.push(handler); return true; }
+    try {
+      const ev = window.__TAURI__.event;
+      if (!ev || !ev.listen) return false;
+      await ev.listen("fx-progress", (e) => handler(e.payload || {}));
+      return true;
+    } catch (e) { return false; }
+  },
+  cancelJob: () => call("cancel_job", {}),
+  progressSnapshot: () => call("progress_snapshot", {}),
 
   // Native pickers (Tauri dialog plugin). Return null if the user cancels or
   // if we're running outside Tauri (plain browser demo mode).
   pickFolder: async (title) => {
-    if (!hasTauri) return null;
+    if (!hasTauri) return window.__fxDemoPick ? "C:\\cases\\demo-collection" : null;
     return window.__TAURI__.dialog.open({ directory: true, multiple: false, title });
   },
   pickSaveFile: async (title, defaultName) => {
-    if (!hasTauri) return null;
+    if (!hasTauri) return window.__fxDemoPick ? "C:\\cases\\demo.fxcase" : null;
     return window.__TAURI__.dialog.save({
       title,
       defaultPath: defaultName || "case.fxcase",
@@ -166,7 +180,49 @@ function kindFor(a) {
   return "recorded";
 }
 
+// ── Demo progress (standalone preview only) ─────────────────────────────────
+const demoProgressHandlers = [];
+let demoCancel = false;
+let demoSnap = {};
+function demoEmit(s) { demoSnap = s; demoProgressHandlers.forEach((h) => { try { h(s); } catch (e) {} }); }
+function demoJob(kind, ms) {
+  demoCancel = false;
+  const files = [["Mft", "C/$MFT", 412e6], ["Evtx", "C/Windows/System32/winevt/Logs/Security.evtx", 68e6],
+    ["Evtx", "C/Windows/System32/winevt/Logs/Microsoft-Windows-Sysmon%4Operational.evtx", 128e6],
+    ["Registry", "C/Windows/System32/config/SOFTWARE", 84e6], ["Prefetch", "C/Windows/Prefetch/POWERSHELL.EXE-022A1004.pf", 4e4],
+    ["BrowserHistory", "C/Users/j.smith/AppData/Local/Google/Chrome/User Data/Default/History", 12e6]];
+  const totalBytes = files.reduce((a, f) => a + f[2], 0);
+  const t0 = Date.now();
+  return new Promise((resolve) => {
+    const tick = () => {
+      const f = Math.min(1, (Date.now() - t0) / ms);
+      let s;
+      if (kind === "ingest") {
+        let acc = 0, done = 0, cur = files[files.length - 1];
+        for (const x of files) { if ((acc + x[2]) / totalBytes <= f) { acc += x[2]; done++; } else { cur = x; break; } }
+        s = { phase: f < 1 ? "Hashing and parsing artefacts" : "Building indexes", current: f < 1 ? cur.join("|") : "",
+          files_done: done, files_total: files.length, bytes_done: acc, bytes_total: totalBytes,
+          events: Math.round(f * 2480000), warnings: done > 2 ? 3 : 0, failed: 0, scanned: 0, scan_total: 0, cancelled: demoCancel };
+      } else {
+        s = { phase: kind, current: "", files_done: 0, files_total: 0, bytes_done: 0, bytes_total: 0, events: 0,
+          scanned: Math.round(f * 2480000), scan_total: 2480000, warnings: 0, failed: 0, cancelled: demoCancel };
+      }
+      demoEmit(s);
+      if (f >= 1 || demoCancel) resolve(); else setTimeout(tick, 250);
+    };
+    tick();
+  });
+}
+
 function sample(cmd, args) {
+  if (cmd === "cancel_job") { demoCancel = true; return Promise.resolve(null); }
+  if (cmd === "progress_snapshot") { return Promise.resolve(demoSnap); }
+  if (cmd === "ingest_collection" && window.__fxDemoPick) {
+    return demoJob("ingest", 6000).then(() => overview());
+  }
+  if (cmd === "run_hunt" && window.__fxDemoPick) {
+    return demoJob("Running detections", 3000).then(() => sampleDetections());
+  }
   if (cmd === "open_case" || cmd === "ingest_collection") {
     return Promise.resolve(overview());
   }
@@ -205,6 +261,26 @@ function sample(cmd, args) {
     SAMPLE_SIGMA_DETS.push({ rule_id: "sigma:demo-1", title: "Whoami Utility Execution", severity: "medium", attack: ["T1033"], summary: "whoami", event_ids: ids.slice(0, 3), ts: "2026-02-11T00:02:30", host: "WKSTN-07", engine: "sigma" },
       { rule_id: "sigma:demo-2", title: "Suspicious Encoded PowerShell Command Line", severity: "high", attack: ["T1059.001"], summary: "powershell -enc", event_ids: ids.slice(3), ts: "2026-02-11T00:05:00", host: "WKSTN-07", engine: "sigma" });
     return Promise.resolve(SAMPLE_KV.sigma);
+  }
+  if (cmd === "host_info") {
+    const ev = (i) => (SEED[i] || {}).id || "";
+    return Promise.resolve({
+      computer_name: { value: "WKSTN-07", event_id: ev(1), source: "C/Windows/System32/config/SYSTEM" },
+      domain: { value: "corp.example", event_id: ev(1), source: "C/Windows/System32/config/SYSTEM" },
+      os: { value: { product: "Windows 11 Pro", version: "23H2", build: "22631", ubr: 4317, edition: "Professional", install_date: "2024-03-02T09:14:00Z", registered_owner: "IT" }, event_id: ev(2), source: "C/Windows/System32/config/SOFTWARE" },
+      timezone: { value: { name: "GMT Standard Time", utc_offset: "UTC+00:00", active_utc_offset: "UTC+00:00" }, event_id: ev(3), source: "C/Windows/System32/config/SYSTEM" },
+      last_shutdown: { value: "2026-02-10T18:02:11Z", event_id: ev(4), source: "C/Windows/System32/config/SYSTEM" },
+      interfaces: [
+        { value: { ip: "10.20.4.37", dhcp: true, subnet_mask: "255.255.255.0", gateway: "10.20.4.1", dns: "10.20.0.10", dhcp_server: "10.20.0.5", lease_obtained: "2026-02-10T08:01:00Z" }, event_id: ev(5), source: "C/Windows/System32/config/SYSTEM" },
+        { value: { ip: "192.168.56.10", dhcp: false, subnet_mask: "255.255.255.0", gateway: null, dns: null }, event_id: ev(6), source: "C/Windows/System32/config/SYSTEM" },
+      ],
+      accounts: [
+        { user: "Administrator", rid: 500, created: "2024-03-02T09:10:00Z", last_logon: null, logon_count: 0, password_last_set: null, disabled: true, local: true, event_id: ev(7) },
+        { user: "helpdesk", rid: 1001, full_name: "Help Desk", created: "2026-02-10T23:58:00Z", last_logon: "2026-02-11T00:04:00Z", logon_count: 3, password_last_set: "2026-02-10T23:58:00Z", disabled: false, local: true, sid: "S-1-5-21-1-2-3-1001", profile_path: "C:\\Users\\helpdesk", event_id: ev(8) },
+        { user: "j.smith", local: false, sid: "S-1-5-21-9-8-7-1104", profile_path: "C:\\Users\\j.smith", event_id: ev(9) },
+      ],
+      collection_tool: "KAPE", asserted_host: "WKSTN-07", evidence_files: 214, evidence_bytes: 1830000000, other_names: [],
+    });
   }
   if (cmd === "sigma_saved") { return Promise.resolve({ config: null, results: SAMPLE_KV.sigma || null }); }
   if (cmd === "events_by_ids") { const want = new Set(args.ids || []); return Promise.resolve(SEED.filter((e) => want.has(e.id))); }

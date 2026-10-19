@@ -342,6 +342,7 @@ fn parse_artefact(s: &str) -> ArtefactKind {
         "PsHistory" => ArtefactKind::PsHistory,
         "WindowsTimeline" => ArtefactKind::WindowsTimeline,
         "RemoteAccess" => ArtefactKind::RemoteAccess,
+        "DefenderLog" => ArtefactKind::DefenderLog,
         "RegistryGeneric" => ArtefactKind::RegistryGeneric,
         _ => ArtefactKind::Unclassified,
     }

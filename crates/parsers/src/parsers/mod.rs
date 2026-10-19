@@ -2,6 +2,7 @@
 //! `fx-core` + its backing parse crate.
 
 pub mod browser_history;
+pub mod defender_log;
 pub mod evtx;
 pub mod lnk;
 pub mod text_decode;

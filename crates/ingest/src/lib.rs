@@ -58,11 +58,15 @@ pub struct IngestReport {
     pub unclassified: usize,
     pub scan_errors: Vec<String>,
     pub total_events: u64,
+    /// True when the user cancelled part-way; artefacts already parsed are kept.
+    pub cancelled: bool,
 }
 
 /// Run the full pipeline over an extracted collection directory, persisting
 /// everything into `store`.
 pub fn ingest_into_store(root: &Path, registry: &ParserRegistry, store: &CaseStore) -> IngestReport {
+    use fx_core::progress;
+    progress::set_phase("Scanning collection");
     let scan: CollectionScan = scan_collection(root);
 
     let mut report = IngestReport {
@@ -71,6 +75,7 @@ pub fn ingest_into_store(root: &Path, registry: &ParserRegistry, store: &CaseSto
         unclassified: scan.unclassified.len(),
         scan_errors: scan.errors.clone(),
         total_events: 0,
+        cancelled: false,
     };
 
     // Register (and hash) unclassified files first — they're evidence too, and
@@ -81,13 +86,28 @@ pub fn ingest_into_store(root: &Path, registry: &ParserRegistry, store: &CaseSto
         }
     }
 
-    // Parse each identified artefact.
-    for artefact in &scan.artefacts {
+    // Parse each identified artefact. Sizes up front so the GUI can show a
+    // byte-weighted progress bar (a 2 GB $MFT dwarfs a 4 KB prefetch file).
+    let sizes: Vec<u64> = scan
+        .artefacts
+        .iter()
+        .map(|a| std::fs::metadata(&a.path).map(|m| m.len()).unwrap_or(0))
+        .collect();
+    progress::set_totals(scan.artefacts.len() as u64, sizes.iter().sum());
+    progress::set_phase("Hashing and parsing artefacts");
+    for (artefact, size) in scan.artefacts.iter().zip(&sizes) {
+        if progress::cancelled() {
+            report.cancelled = true;
+            break;
+        }
+        progress::set_current(&format!("{:?}|{}|{}", artefact.artefact, artefact.source_path, size));
         let r = ingest_one(artefact, registry, store, &mut report.total_events);
+        progress::file_done(*size, r.warnings.len() as u64, matches!(r.status, ArtefactStatus::Failed(_)));
         report.artefacts.push(r);
     }
 
     // Indexes are cheaper to build once, after the bulk load.
+    progress::set_phase("Building indexes");
     if let Err(e) = store.build_indexes() {
         report.scan_errors.push(format!("build indexes: {e}"));
     }
@@ -217,6 +237,7 @@ struct CountingSink<'a> {
 impl EventSink for CountingSink<'_> {
     fn emit(&mut self, event: fx_core::Event) {
         self.count += 1;
+        fx_core::progress::add_events(1);
         self.inner.emit(event);
     }
 }

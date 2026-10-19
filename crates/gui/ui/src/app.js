@@ -50,7 +50,13 @@ async function init() {
   // Escape hatch: clicking the overlay backdrop dismisses it, so a stuck
   // operation can never trap the UI.
   const ov = el("overlay");
-  if (ov) ov.addEventListener("click", (e) => { if (e.target === ov) hideOverlay(); });
+  if (ov) ov.addEventListener("click", (e) => { if (e.target === ov && !prog.on) hideOverlay(); });
+  backend.onProgress((snap) => renderProgress(snap));
+  const cb = el("ovpCancel");
+  if (cb) cb.addEventListener("click", async () => {
+    cb.disabled = true; cb.textContent = "Cancelling…";
+    try { await backend.cancelJob(); } catch (e) {}
+  });
   wireCaseButtons();          // New / Open case buttons always work
   if (backend.isLive()) {
     // Real app: start empty and wait for the analyst to create or open a case.
@@ -67,6 +73,7 @@ async function init() {
 /// Show the "no case open" empty state in the main area.
 function showEmptyState() {
   el("caseName").textContent = "no case open";
+  state.host = null; if (el("hostChip")) el("hostChip").hidden = true;
   el("rail").innerHTML = `<section style="padding:24px 16px;color:var(--ink-dim);font-size:13px;line-height:1.6">
     <div style="font-size:15px;color:var(--ink);margin-bottom:10px">Welcome to fx</div>
     <b>+ New case</b> — pick a folder of extracted Windows artefacts (KAPE / RESPONSE / Velociraptor output) and fx will ingest, hunt, and display it.<br><br>
@@ -93,6 +100,8 @@ async function renderCase(overview, label) {
   state.detections = await backend.huntResults();
   state.triage = (await backend.listTriage()) || [];
   try { state.labels = (await backend.listLabels()) || []; } catch (e) { state.labels = []; }
+  try { state.host = await backend.hostInfo(); } catch (e) { state.host = null; }
+  renderHostChip();
   state.ioc = null;
   state.sigma = undefined;
   state.days = null;
@@ -116,7 +125,109 @@ function showOverlay(title, sub) {
   const s = el("overlaySub"); if (s) s.textContent = sub || "";
   o.classList.add("show");
 }
-function hideOverlay() { const o = el("overlay"); if (o) o.classList.remove("show"); }
+function hideOverlay() { const o = el("overlay"); if (o) o.classList.remove("show"); endProgress(); }
+
+// ── Live progress (ingest / detections) ─────────────────────────────────────
+// The Rust side emits "fx-progress" snapshots while a long job runs; the
+// overlay turns into a progress panel for the duration of that job.
+const prog = { on: false, t0: 0, timer: null, last: null, rate: null, kind: "" };
+
+function startProgress(kind) {
+  prog.on = true; prog.kind = kind; prog.t0 = Date.now(); prog.last = null; prog.rate = null;
+  const box = document.querySelector("#overlay .overlay-box"); if (box) box.classList.add("with-prog");
+  const p = el("ovProg"); if (p) p.hidden = false;
+  const c = el("ovpCancel"); if (c) { c.disabled = false; c.textContent = "Cancel"; }
+  el("ovpNote").textContent = kind === "ingest"
+    ? "Cancel stops after the current file. Everything ingested so far is kept."
+    : "Cancel stops the scan. Findings so far are kept.";
+  el("ovpFile").innerHTML = ""; el("ovpStats").innerHTML = "";
+  el("ovpPhase").textContent = "Starting…";
+  el("ovpPct").textContent = ""; el("ovpTime").textContent = "";
+  el("ovpFill").style.width = "0"; el("ovpFill").parentElement.classList.add("indet");
+  clearInterval(prog.timer);
+  prog.timer = setInterval(() => renderProgress(prog.last), 1000);   // keep elapsed ticking
+}
+function endProgress() {
+  prog.on = false; clearInterval(prog.timer); prog.timer = null;
+  const box = document.querySelector("#overlay .overlay-box"); if (box) box.classList.remove("with-prog");
+  const p = el("ovProg"); if (p) p.hidden = true;
+}
+function fmtBytes(n) {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (n >= 100 || i === 0 ? n.toFixed(0) : n.toFixed(1)) + " " + u[i];
+}
+function fmtDur(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s2 = sec % 60;
+  if (h) return `${h}h ${String(m).padStart(2, "0")}m`;
+  if (m) return `${m}m ${String(s2).padStart(2, "0")}s`;
+  return `${s2}s`;
+}
+function renderProgress(s) {
+  if (!prog.on) return;
+  const elapsed = (Date.now() - prog.t0) / 1000;
+  if (!s) { el("ovpTime").textContent = fmtDur(elapsed) + " elapsed"; return; }
+  prog.last = s;
+  const n = (x) => Number(x || 0).toLocaleString("en-GB");
+  // Fraction done: bytes-weighted while parsing (with a little weight on file
+  // count so a run of tiny files still moves the bar), events while scanning.
+  let frac = null;
+  if (s.scan_total > 0) frac = Math.min(1, s.scanned / s.scan_total);
+  else if (s.files_total > 0) {
+    const fb = s.bytes_total > 0 ? s.bytes_done / s.bytes_total : 0;
+    frac = Math.min(1, 0.9 * fb + 0.1 * (s.files_done / s.files_total));
+  }
+  const title = (el("overlayTitle") || {}).textContent || "";
+  const phase = s.phase && s.phase !== title ? s.phase : "";
+  el("ovpPhase").textContent = phase + (s.cancelled ? (phase ? " (cancelling…)" : "Cancelling…") : "");
+  const bar = el("ovpFill").parentElement;
+  if (frac === null || /indexes|Opening|Scanning/.test(s.phase || "")) {
+    bar.classList.add("indet"); el("ovpPct").textContent = /indexes/.test(s.phase || "") ? "Almost done" : "";
+  } else {
+    bar.classList.remove("indet");
+    el("ovpFill").style.width = (frac * 100).toFixed(1) + "%";
+    el("ovpPct").textContent = (frac * 100).toFixed(frac < 0.1 ? 1 : 0) + "%";
+  }
+  // ETA from a smoothed rate; only once there's enough signal to be honest.
+  let eta = "";
+  if (frac !== null && frac > 0.02 && frac < 1 && elapsed > 5) {
+    const r = frac / elapsed;
+    prog.rate = prog.rate ? prog.rate * 0.8 + r * 0.2 : r;
+    eta = " · about " + fmtDur((1 - frac) / prog.rate) + " left";
+  }
+  el("ovpTime").textContent = fmtDur(elapsed) + " elapsed" + eta;
+
+  // Current file: "Kind|path|bytes" from the ingest loop, or a plain label.
+  const f = el("ovpFile");
+  if (s.current && s.current.includes("|")) {
+    const [k, path, size] = s.current.split("|");
+    f.innerHTML = `<span class="k"></span><span class="p"></span><span class="s"></span>`;
+    f.children[0].textContent = k; f.children[1].textContent = path; f.children[1].title = path;
+    f.children[2].textContent = fmtBytes(Number(size));
+  } else f.textContent = s.current || "";
+
+  const stats = [];
+  if (s.files_total > 0) {
+    stats.push(["Files", `${n(s.files_done)} / ${n(s.files_total)}`]);
+    stats.push(["Data", `${fmtBytes(s.bytes_done)} / ${fmtBytes(s.bytes_total)}`]);
+    stats.push(["Events written", n(s.events)]);
+    // Warnings / failures are reported in the ingest log once the case opens.
+  } else if (s.scan_total > 0) {
+    stats.push(["Events scanned", `${n(s.scanned)} / ${n(s.scan_total)}`]);
+    const rate = elapsed > 1 ? s.scanned / elapsed : 0;
+    if (rate) stats.push(["Rate", n(Math.round(rate)) + " / s"]);
+  }
+  el("ovpStats").innerHTML = stats.map(() => `<div><dt></dt><dd></dd></div>`).join("");
+  [...el("ovpStats").children].forEach((d, i) => {
+    d.children[0].textContent = stats[i][0]; d.children[1].textContent = stats[i][1];
+    if (stats[i][2]) d.children[1].classList.add("warn");
+  });
+}
+async function jobCancelled() {
+  try { const s = await backend.progressSnapshot(); return !!(s && s.cancelled); } catch (e) { return false; }
+}
 
 // ── New / Open case button flows ─────────────────────────────────────────────
 function wireCaseButtons() {
@@ -156,12 +267,14 @@ async function renderIngestLog() {
   const n = rows.length;
   const by = (s) => rows.filter((r) => r.status === s).length;
   const totalEvents = rows.reduce((a, r) => a + (r.events_emitted || 0), 0);
+  const totalWarn = rows.reduce((a, r) => a + (r.warning_count || 0), 0);
   el("resultCount").textContent = `${fmt(n)} files ingested`;
   const summary = `<div class="ilog-summary">
     <span><b style="color:#2e9e5b">${fmt(by("parsed"))}</b> parsed</span>
     <span><b style="color:#c99a2e">${fmt(by("unsupported"))}</b> unsupported</span>
     <span><b style="color:var(--alert)">${fmt(by("failed"))}</b> failed</span>
     <span><b>${fmt(totalEvents)}</b> events produced</span>
+    <span title="Records inside otherwise-parsed files that were malformed or truncated and skipped"><b style="color:#c99a2e">${fmt(totalWarn)}</b> record warnings</span>
   </div>`;
 
   // Group by (artefact, status) so a case with hundreds of LNKs / tasks / Edge
@@ -485,7 +598,7 @@ function wireTheme() {
 }
 
 async function onNewCase() {
-  if (!backend.isLive()) {
+  if (!backend.isLive() && !window.__fxDemoPick) {
     alert("New case ingestion is only available in the desktop app (not the browser preview).");
     return;
   }
@@ -497,21 +610,30 @@ async function onNewCase() {
     if (!casePath) return;                      // cancelled
 
     started = true;
-    showOverlay("Ingesting collection…", "Parsing and hashing artefacts. This can take a few minutes for a full triage set.");
+    showOverlay("Ingesting collection", folder);
+    startProgress("ingest");
     const overview = await backend.ingest(folder, casePath, baseName(casePath), "analyst");
+    const ingestCancelled = await jobCancelled();
 
-    showOverlay("Running detections…", "Hunting for financially-motivated-actor TTPs.");
+    showOverlay("Running detections", ingestCancelled
+      ? "Ingest was cancelled. Running fx's built-in rules over what was ingested so far."
+      : "fx's built-in rules over every event in the case.");
+    startProgress("hunt");
     await backend.runHunt(null);
+    let notice = ingestCancelled ? "Ingest cancelled: the case holds the files parsed before you stopped it." : "";
+    if (!ingestCancelled && await jobCancelled()) notice = "Detections cancelled: built-in findings are partial (re-run with fx hunt from the command line).";
     // Optional: community Sigma rules on every new case (off by default). A
     // missing / empty folder is ignored silently — built-in results stand.
     const sc = sigmaConfig();
-    if (sc.auto && sc.folder) {
-      showOverlay("Running Sigma rules…", "Community rules from " + sc.folder);
+    if (sc.auto && sc.folder && !notice) {
+      showOverlay("Running Sigma rules", "Community rules from " + sc.folder);
+      startProgress("hunt");
       try { await backend.sigmaHunt({ folder: sc.folder, filter: sc.filter }); } catch (e) { /* built-in results stand */ }
     }
 
     hideOverlay();
     await renderCase(overview, `case · ${baseName(casePath)}`);
+    if (notice) toast(notice, 6000);
   } catch (e) {
     alert("Ingest failed:\n" + (e && e.message ? e.message : e));
   } finally {
@@ -561,6 +683,7 @@ function renderRail() {
       <div class="facet" style="cursor:pointer"><span class="name" style="color:var(--focus)">${state.view === "activity" ? "▾ activity graph" : "▸ activity graph"}</span></div>
       <div class="actlink-sub">events per day · spot untagged spikes</div>
     </section>
+    ${renderHostSection()}
     ${renderTriageSummary()}
     ${renderLabelSummary()}
     <section>
@@ -691,7 +814,7 @@ function renderToolbar() {
   // them in the finding / ingest-log / activity views.
   const inHunt = state.view !== "timeline";
   el("toolbar").innerHTML = `
-    <span class="chip ${tr.flagged_only ? "on" : ""}" id="flagChip" ${inHunt ? "style=display:none" : ""}>⚑ Flagged only</span>
+    <span class="chip ${tr.flagged_only ? "on" : ""}" id="flagChip" ${inHunt ? "style=display:none" : ""} title="Only events behind a finding (built-in rules, Sigma, IOC hunt) or triaged as validated / unconfirmed — the red in the mini timeline">⚑ Findings only</span>
     <span class="time-range" ${inHunt ? "style=display:none" : ""}>
       <span class="tr-label">from</span>
       <input type="datetime-local" id="trFrom" value="${toLocalInput(tr.after)}" step="1">
@@ -879,6 +1002,94 @@ function renderIocResults(r) {
       else toast("No events stored for this indicator — run the hunt again");
     };
   });
+}
+
+// ── Host information ─────────────────────────────────────────────────────────
+// Facts about the machine from its registry hives (SYSTEM / SOFTWARE / SAM)
+// plus the collection itself. A compact card tops the rail; clicking it opens
+// the full Host view, where every fact links back to the event it came from.
+function osLine(os) {
+  if (!os) return "";
+  const v = os.value || {};
+  return [v.product, v.version].filter(Boolean).join(" ") + (v.build ? ` · build ${v.build}${v.ubr != null ? "." + v.ubr : ""}` : "");
+}
+// Analysed host, in the rail below the activity graph: two lines when
+// collapsed (hostname, then OS · time zone), expandable to the key facts, with
+// a link to the full Host view. Labelled so it's clear this is the machine the
+// evidence came from.
+function renderHostChip() { const c = el("hostChip"); if (c) c.hidden = true; }
+function renderHostSection() {
+  const h = state.host;
+  if (!h) return "";
+  const name = h.computer_name ? h.computer_name.value : h.asserted_host;
+  const hasFacts = h.computer_name || h.os || h.timezone || (h.interfaces || []).length || (h.accounts || []).length;
+  if (!name && !hasFacts) return "";
+  const open = !!loadPref("fx.hostOpen", false);
+  const os = h.os ? h.os.value : null;
+  const osShort = os ? [os.product, os.version].filter(Boolean).join(" ") : "";
+  const tzOff = h.timezone && h.timezone.value.utc_offset ? h.timezone.value.utc_offset : "";
+  const ips = (h.interfaces || []).map((i) => i.value.ip).filter(Boolean);
+  const kv = (k, v) => (v ? `<div class="hs-row"><span class="hs-k">${k}</span><span class="hs-v">${v}</span></div>` : "");
+  return `<section class="hostsec ${state.view === "host" ? "active" : ""}">
+    <div class="facet hs-head" id="hostToggle" role="button" aria-expanded="${open}" title="The machine this evidence was collected from">
+      <span class="name" style="color:var(--focus)">${open ? "▾" : "▸"} analysed host</span>
+    </div>
+    <div class="hs-sum"><span class="hs-name">${escapeHtml(name || "Unknown")}</span>${osShort || tzOff ? `<span class="hs-sub">${escapeHtml([osShort, tzOff].filter(Boolean).join(" · "))}</span>` : ""}</div>
+    ${open ? `<div class="hs-body">
+      ${kv("Domain", h.domain && escapeHtml(h.domain.value))}
+      ${kv("Build", os && os.build && escapeHtml(os.build + (os.ubr != null ? "." + os.ubr : "")))}
+      ${kv("Time zone", h.timezone && escapeHtml(h.timezone.value.name || ""))}
+      ${kv("IP", ips.length && `<span class="mono">${escapeHtml(ips.join(", "))}</span>`)}
+      ${kv("Accounts", (h.accounts || []).length && fmt(h.accounts.length))}
+      ${kv("Collected by", h.collection_tool && escapeHtml(h.collection_tool))}
+      ${!hasFacts ? `<div class="hs-hint">Re-ingest to read host details from the registry.</div>` : ""}
+      <div class="hs-link" id="hostDetailsLink">${state.view === "host" ? "← Back to timeline" : "Full host details →"}</div>
+    </div>` : ""}
+  </section>`;
+}
+
+function renderHostView() {
+  const h = state.host || {};
+  el("resultCount").textContent = "Host details";
+  el("spTop").style.height = "0px"; el("spBot").style.height = "0px";
+  const dt = (t) => (t ? escapeHtml(ukDateTime(t)) : "—");
+  const src = (id) => (id ? `<button class="hv-src" data-ev="${escapeHtml(id)}" title="Open the registry event this came from">source ›</button>` : "");
+  const row = (k, v, id) => (v ? `<tr><th>${k}</th><td>${v}</td><td class="hv-s">${src(id)}</td></tr>` : "");
+  const os = h.os ? h.os.value : null, tz = h.timezone ? h.timezone.value : null;
+  const sys = [
+    row("Computer name", h.computer_name && escapeHtml(h.computer_name.value), h.computer_name && h.computer_name.event_id),
+    row("DNS domain", h.domain && escapeHtml(h.domain.value), h.domain && h.domain.event_id),
+    row("Operating system", os && escapeHtml([os.product, os.version].filter(Boolean).join(" ")), h.os && h.os.event_id),
+    row("Build", os && os.build && escapeHtml(os.build + (os.ubr != null ? "." + os.ubr : "")), h.os && h.os.event_id),
+    row("Edition", os && os.edition && escapeHtml(os.edition), h.os && h.os.event_id),
+    row("Installed", os && os.install_date && dt(os.install_date), h.os && h.os.event_id),
+    row("Registered owner", os && os.registered_owner && escapeHtml([os.registered_owner, os.registered_org].filter(Boolean).join(" · ")), h.os && h.os.event_id),
+    row("Time zone", tz && escapeHtml((tz.name || "") + (tz.utc_offset ? ` · standard ${tz.utc_offset}` : "") + (tz.active_utc_offset && tz.active_utc_offset !== tz.utc_offset ? ` · active ${tz.active_utc_offset}` : "")), h.timezone && h.timezone.event_id),
+    row("Last clean shutdown", h.last_shutdown && dt(h.last_shutdown.value), h.last_shutdown && h.last_shutdown.event_id),
+  ].join("");
+  const ifs = (h.interfaces || []).map((i) => { const v = i.value;
+    return `<tr><td class="mono">${escapeHtml(v.ip || "")}${v.subnet_mask ? `<span class="faint"> / ${escapeHtml(v.subnet_mask)}</span>` : ""}</td><td>${v.dhcp ? "DHCP" : "Static"}</td><td class="mono">${escapeHtml(v.gateway || "—")}</td><td class="mono">${escapeHtml(v.dns || "—")}</td><td class="mono">${escapeHtml(v.dhcp_server || "—")}</td><td>${dt(v.lease_obtained)}</td><td class="hv-s">${src(i.event_id)}</td></tr>`; }).join("");
+  const acc = (h.accounts || []).map((a) => `<tr><td><b>${escapeHtml(a.user)}</b>${a.full_name ? `<span class="faint"> · ${escapeHtml(a.full_name)}</span>` : ""}</td>
+    <td>${a.local ? "Local" : "Domain / Microsoft"}${a.disabled ? ' <span class="hv-tag">disabled</span>' : ""}</td>
+    <td class="mono">${escapeHtml(a.sid || (a.rid != null ? "RID " + a.rid : "—"))}</td><td>${dt(a.created)}</td><td>${dt(a.last_logon)}</td>
+    <td class="n">${a.logon_count != null ? fmt(a.logon_count) : "—"}</td><td>${dt(a.password_last_set)}</td><td class="hv-s">${src(a.event_id)}</td></tr>`).join("");
+  const none = !sys && !ifs && !acc;
+  el("rows").innerHTML = `<div class="hostview">
+    <h2 class="hv-h">${escapeHtml((h.computer_name && h.computer_name.value) || h.asserted_host || "Host")}</h2>
+    ${none ? `<div class="iocv-empty"><h3>No host details in this case yet</h3><p>Host details are read from the SYSTEM, SOFTWARE and SAM hives at ingest. Cases ingested before this version need re-ingesting to show them.</p></div>` : ""}
+    ${sys ? `<h3>System</h3><table class="hv-kv">${sys}</table>` : ""}
+    ${ifs ? `<h3>Network interfaces</h3><div class="ioc-table-wrap"><table class="ioc-table"><thead><tr><th>Address</th><th>Type</th><th>Gateway</th><th>DNS</th><th>DHCP server</th><th>Lease obtained</th><th></th></tr></thead><tbody>${ifs}</tbody></table></div>` : ""}
+    ${acc ? `<h3>Accounts</h3><div class="ioc-table-wrap"><table class="ioc-table"><thead><tr><th>User</th><th>Type</th><th>SID / RID</th><th>Created</th><th>Last logon</th><th style="text-align:right">Logons</th><th>Password set</th><th></th></tr></thead><tbody>${acc}</tbody></table></div><p class="iocv-note">Local accounts come from the SAM hive (created ≈ the account key's last write). Domain and Microsoft accounts appear from user profiles on the machine.</p>` : ""}
+    <h3>Collection</h3>
+    <table class="hv-kv">
+      ${row("Collection tool", h.collection_tool && escapeHtml(h.collection_tool))}
+      ${row("Host named by the collection", h.asserted_host && escapeHtml(h.asserted_host))}
+      ${row("Evidence files", fmt(h.evidence_files || 0) + (h.evidence_bytes ? ` · ${humanBytes(h.evidence_bytes)}` : ""))}
+      ${(h.other_names || []).length ? row("Other computer names seen", escapeHtml(h.other_names.join(", "))) : ""}
+    </table>
+  </div>`;
+  el("rows").querySelectorAll(".hv-src[data-ev]").forEach((b) => { b.onclick = () => openFindingEvent(b.dataset.ev, ""); });
+  renderStatus();
 }
 
 // ── All events / mini timeline ───────────────────────────────────────────────
@@ -1082,9 +1293,11 @@ async function sigmaPreview() {
 async function runSigmaHunt() {
   const c = sigmaConfig();
   if (!c.folder || el("sgGo").disabled) return;
-  showOverlay("Running Sigma rules…", "Loading the rules and checking every event in the case. Large cases take a few minutes.");
+  showOverlay("Running Sigma rules", "Community rules from " + c.folder);
+  startProgress("hunt");
   try {
     const r = await backend.sigmaHunt({ folder: c.folder, filter: c.filter });
+    if (await jobCancelled()) toast("Sigma run cancelled: results are partial.", 6000);
     state.sigma = r;
     try { state.detections = (await backend.huntResults()) || []; } catch (e) {}
     try { state.triage = (await backend.listTriage()) || state.triage; } catch (e) {}
@@ -1293,6 +1506,7 @@ function clearChip(kind, value) {
 // ── Timeline (virtualized) ───────────────────────────────────────────────────
 async function refresh() {
   el("app").dataset.view = state.view;
+  renderHostChip();
   const ib = el("iocBtn"); if (ib) ib.classList.toggle("active", state.view === "ioc");
   if (el("idfBar") && (state.view !== "timeline" || !state.idFilter)) el("idfBar").hidden = true;
   if (el("miniTl")) el("miniTl").hidden = state.view !== "timeline";
@@ -1300,6 +1514,10 @@ async function refresh() {
   if (state.view === "ioc") { renderIocView(); return; }
   if (state.view === "hunt") {
     renderHuntView();
+    return;
+  }
+  if (state.view === "host") {
+    renderHostView();
     return;
   }
   if (state.view === "ingestlog") {
@@ -1813,11 +2031,11 @@ async function addToIocList(value) {
   toast(`Added to the IOC hunt list`);
 }
 
-function toast(msg) {
+function toast(msg, ms) {
   let t = el("toast");
   if (!t) { t = document.createElement("div"); t.id = "toast"; t.className = "toast"; document.body.appendChild(t); }
   t.textContent = msg; t.classList.add("show");
-  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 1800);
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), ms || 1800);
 }
 
 // ── Detail panel width ───────────────────────────────────────────────────────
@@ -1978,6 +2196,17 @@ function wireEvents() {
       return;
     }
     if (e.target.closest("#allEventsLink")) { clearAllFilters(); return; }
+    if (e.target.closest("#hostDetailsLink")) {
+      state.view = state.view === "host" ? "timeline" : "host";
+      closeDetail(); renderRail(); renderToolbar(); refresh();
+      return;
+    }
+    if (e.target.closest("#hostToggle") || e.target.closest(".hs-sum")) {
+      savePref("fx.hostOpen", !loadPref("fx.hostOpen", false));
+      renderRail();
+      return;
+    }
+
     if (e.target.closest("#activityLink")) {
       state.view = state.view === "activity" ? "timeline" : "activity";
       closeDetail();

@@ -521,14 +521,61 @@ fn classify_powershell(
 /// Windows Defender operational channel — detections and, critically for eCrime,
 /// tampering (real-time protection disabled, exclusions added).
 fn classify_defender(event_id: u64, ed: &dyn Fn(&str) -> Option<String>) -> Classified {
+    // Detection events carry the threat, its severity / category, the
+    // resource (often "file:_C:\…" or "process:_pid:…,ProcessStart:…"), the
+    // user it ran as and the process that touched it.
+    let threat = || ed("Threat Name").or(ed("ThreatName")).unwrap_or_default();
+    let detail = |verb: &str| {
+        let sev = ed("Severity Name").map(|s| format!(" [{s}]")).unwrap_or_default();
+        let action = ed("Action Name").filter(|a| !a.eq_ignore_ascii_case("not applicable")).map(|a| format!(" — {a}")).unwrap_or_default();
+        format!("Defender {verb}: {}{sev}{action}", threat())
+    };
+    let resource_path = || {
+        ed("Path").map(|p| {
+            // "file:_C:\x\y.exe;file:_C:\x\z" → first resource, prefix stripped
+            let first = p.split(';').next().unwrap_or(&p).to_string();
+            first.splitn(2, ":_").nth(1).map(str::to_string).unwrap_or(first)
+        })
+    };
+    let with_ctx = |c: Classified| {
+        let user = ed("Detection User").or(ed("User")).filter(|u| !u.is_empty() && u != "-");
+        let proc_name = ed("Process Name").filter(|p| !p.is_empty() && p != "Unknown");
+        let c = c.target(Target { path: resource_path(), ..Default::default() });
+        let c = match user {
+            Some(u) => {
+                let (domain, name) = u.split_once('\\').map(|(d, n)| (Some(d.to_string()), n.to_string())).unwrap_or((None, u));
+                c.user(Principal { name: Some(name), domain, ..Default::default() })
+            }
+            None => c,
+        };
+        match proc_name {
+            Some(p) => c.process(ProcessInfo { name: p.rsplit('\\').next().map(str::to_string), path: Some(p), ..Default::default() }),
+            None => c,
+        }
+    };
     match event_id {
-        1116 | 1015 => Classified::new(
-            "malware.detected",
-            format!("Defender detection: {}", ed("Threat Name").or(ed("ThreatName")).unwrap_or_default()),
-        )
-        .target(Target { path: ed("Path").or(ed("Process Name")), ..Default::default() }),
-        1117 => Classified::new("malware.action_taken", format!("Defender action on: {}", ed("Threat Name").unwrap_or_default())),
+        1116 => with_ctx(Classified::new("malware.detected", detail("detection"))),
+        1015 => with_ctx(Classified::new("malware.detected", detail("suspicious behaviour detected"))),
+        1006 | 1007 => with_ctx(Classified::new("malware.detected", detail("malware detected (scan)"))),
+        1117 => with_ctx(Classified::new("malware.action_taken", detail("action taken"))),
+        1118 | 1119 => with_ctx(Classified::new("malware.action_failed", detail("remediation FAILED"))),
+        1121 | 1122 => {
+            let mode = if event_id == 1121 { "blocked" } else { "audited" };
+            Classified::new(
+                &format!("defender.asr_{mode}"),
+                format!("Defender attack surface reduction rule {mode}: {} (rule {})",
+                    ed("Path").unwrap_or_default(), ed("ID").unwrap_or_default()),
+            )
+            .process(ProcessInfo { path: ed("Process Name"), name: ed("Process Name").and_then(|p| p.rsplit('\\').next().map(str::to_string)), ..Default::default() })
+            .target(Target { path: ed("Path"), ..Default::default() })
+        }
+        1125 | 1126 => Classified::new(
+            "defender.network_protection",
+            format!("Defender network protection {}: {}", if event_id == 1125 { "audited" } else { "blocked" }, ed("Domain").or(ed("Destination")).unwrap_or_default()),
+        ),
         5001 => Classified::new("defense_evasion.defender_rtp_disabled", "Defender real-time protection DISABLED".into()),
+        5010 | 5012 => Classified::new("defense_evasion.defender_protection_disabled", format!("Defender {} scanning DISABLED", if event_id == 5010 { "malware/spyware" } else { "virus" })),
+        5013 => Classified::new("defender.tamper_protection_blocked", format!("Tamper protection blocked a change to Defender: {}", ed("Value").or(ed("Changed Value")).unwrap_or_default())),
         // 5007 fires on every Defender setting change, including routine
         // platform/signature updates. Only exclusions and protection being
         // switched off are tampering; everything else is ordinary config noise.
@@ -548,7 +595,6 @@ fn classify_defender(event_id: u64, ed: &dyn Fn(&str) -> Option<String>) -> Clas
                 Classified::new("defender.config_changed", format!("Defender configuration changed: {new_val}"))
             }
         }
-        1006 | 1007 => Classified::new("malware.detected", "Defender malware behaviour detected".into()),
         _ => Classified::new(&format!("defender.eid.{event_id}"), format!("Defender EventID {event_id}")),
     }
 }

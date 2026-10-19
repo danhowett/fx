@@ -113,6 +113,26 @@ surviving after the tool is uninstalled.
 | TeamViewer `Connections_incoming.txt` / `Connections.txt` | incoming and outgoing sessions: remote ID and name, start/end (duration), local user, connection type. Times are as logged (host local time) |
 | ScreenConnect (Application event log) | client session connects/disconnects, **file transfers** and **commands run** through the tool |
 
+### Microsoft Defender
+
+| Artefact | What it surfaces |
+|----------|------------------|
+| Defender Operational event log | detections (1006/1007/1015/1116) with threat, severity, resource, user and process; actions taken and **failed remediation** (1117–1119); **attack surface reduction** blocks / audits (1121/1122); network protection; protection disabled, exclusions added, tamper-protection blocks (5001/5007/5010/5012/5013) |
+| `MPLog-*.log` (Defender support log) | detections with threat name and resource; **processes Defender scanned on behalf of** (execution evidence, folded to one event per process / file with first, last and count); **cloud lookups with SHA-1 / SHA-256** of files. Often survives when the event logs have been cleared |
+
+### Host information
+
+Read from the SYSTEM, SOFTWARE and SAM hives at ingest and summarised under **analysed
+host** in the left rail, below the activity graph: the hostname, OS and time
+zone, expandable to domain, build, IP addresses, accounts and collection tool,
+with **Full host details** for the complete view (each fact linked to its
+source): computer name and DNS domain; OS edition, version, build and install
+date; configured time zone; last clean shutdown; network interfaces (static /
+DHCP address, gateway, DNS, DHCP server, lease time); local accounts from SAM
+(created, last logon, logon count, password last set, disabled) and every user
+profile on the machine (domain / Microsoft accounts included); and the
+collection tool and evidence volume.
+
 Every source file is **SHA-256 hashed at ingest** for chain of custody, and the
 per-file **ingest log** records whether each parsed, was unsupported, or failed
 (with the failure reason).
@@ -143,6 +163,15 @@ bulk SRUM exfil).
 1. **New case** — pick an artefact folder (KAPE, Magnet RESPONSE, Velociraptor,
    CyLR, or a raw copy) and where to save the `.fxcase`. fx ingests, hunts, and
    displays it automatically.
+   While it works, a progress panel shows the phase, a bar weighted by data
+   size, the file being parsed (type, path, size), files and data done, events
+   written, elapsed time and an estimate of time left. Detections
+   (and Sigma runs) show events scanned out of the total. **Cancel** stops
+   ingest after the current file and keeps everything parsed so far (fx then
+   runs its built-in rules over that partial case); cancelling detections
+   keeps the findings found so far.
+   Failed files and record warnings are reported afterwards in the
+   **ingest log** (left rail), not during the run.
 2. **Review findings** — *view all findings* shows rule detections **and** your
    own analyst-validated events together. Click any finding to jump to the
    event, read its raw record, and triage it.
@@ -224,6 +253,11 @@ bulk SRUM exfil).
    **Click a day to pivot** the timeline to that day.
 
 ## Navigating the timeline
+
+**Findings only** (toolbar) narrows the timeline to the events behind any
+finding — built-in rules, Sigma, IOC hunt — plus anything you've triaged as
+Validated or Unconfirmed: the attack in time order, with full context. It is
+the same set shown in red on the mini timeline and the activity graph.
 
 **The detail panel.** Click an event to open it on the right. Drag the panel's
 left edge to resize it (double-click the edge to reset), or use **⇤** to widen

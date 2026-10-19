@@ -37,7 +37,6 @@ detection:
         op: regex
         values:
           - "^defense_evasion\\.(security_log_cleared|audit_policy_changed|defender_rtp_disabled|defender_exclusion_added|defender_protection_disabled|create_remote_thread)$"
-          - "^malware\\.detected$"
     # EventID 104 is "log cleared" ONLY from the Eventlog provider, whose event
     # names the cleared channel. Many unrelated providers reuse id 104; those
     # produced "Event log cleared: " with an empty channel — hundreds of false

@@ -40,8 +40,8 @@ pub struct TimelineFilter {
     /// filesystem/other). Applied as a SQL predicate so it filters the whole
     /// case, not just a page.
     pub category: Option<String>,
-    /// Only events that tripped a rule heuristic (suspicious/anti-forensic/
-    /// masquerade/staging). SQL predicate, whole-case.
+    /// Only events behind a finding (rule / Sigma / IOC) or triaged as
+    /// validated / unconfirmed. SQL predicate, whole-case.
     pub flagged_only: bool,
     pub limit: usize,
     pub offset: usize,
@@ -66,7 +66,14 @@ fn category_sql(cat: &str) -> &'static str {
 
 /// The SQL WHERE-fragment for the flagged-only filter, mirroring the GUI's
 /// `flagged` derivation.
-const FLAGGED_SQL: &str = " AND (action LIKE '%suspicious%' OR action LIKE '%anti_forensic%' OR message LIKE '%[ANTI-FORENSIC]%' OR message LIKE '%MASQUERADE%' OR message LIKE '%STAGING%')";
+/// "Findings only": events behind any finding (built-in rules, Sigma, IOC
+/// hunt — every engine writes to `detections`) plus events the analyst has
+/// triaged as validated / unconfirmed. The same definition as the red
+/// "flagged" share in the activity graph and the mini timeline.
+const FLAGGED_SQL: &str = " AND CAST(id AS VARCHAR) IN (
+        SELECT DISTINCT UNNEST(string_split(replace(event_ids, ' ', ''), ',')) FROM detections WHERE event_ids <> ''
+        UNION
+        SELECT CAST(event_id AS VARCHAR) FROM tags WHERE tag IN ('triage:validated', 'triage:unconfirmed'))";
 
 impl CaseStore {
     /// Total event count (for the status bar / paging).

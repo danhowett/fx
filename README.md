@@ -2,7 +2,7 @@
 
 <p align="center"><b>Windows artefact analysis &amp; threat hunting — local, offline, hunting-first.</b></p>
 
-<p align="center"><i>Early developer preview · v0.1</i></p>
+<p align="center"><i>Early developer preview · v0.1.6</i></p>
 
 ---
 
@@ -17,10 +17,19 @@ RESPONSE, Velociraptor, CyLR, or a raw copy — and fx:
 
 1. **Identifies** every file by content (magic bytes), not by extension.
 2. **Normalises** everything onto one timeline (`fx_core::Event`).
-3. **Hunts** with behaviour-based rules (generic ATT&CK techniques + the top
-   ransomware crews' TTPs), embedded in the binary.
-4. Lets you **triage, pivot, visualise per-day activity, and export** findings —
+3. **Hunts** with 34 behaviour-based built-in rules (generic ATT&CK techniques
+   + the top ransomware crews' TTPs), embedded in the binary — and, optionally,
+   the ~2,000 community **SigmaHQ** Windows rules and your own **IOC lists**.
+4. Lets you **triage, tag, pivot, visualise activity, and export** findings —
    with the SHA-256-hashed evidence behind every result.
+
+### Where fx fits
+
+fx is an **automated triage tool**, not a fully featured commercial forensic
+suite. It complements the open-source tools DFIR teams already rely on — Eric
+Zimmerman's tools, Chainsaw, Hayabusa, Autopsy and others — by putting the
+whole collection on one timeline, running the hunt automatically, and handing
+you a short, evidence-backed worklist to start from.
 
 > ⚠️ fx is a **triage aid**. Findings are investigative **leads to corroborate**,
 > not verdicts; **absence of findings is not proof a host is clean.**
@@ -99,32 +108,63 @@ around any event, and triage inline.
 
 ## Highlights
 
-- **Broad artefact coverage** — EVTX, `$MFT`, registry hives, Prefetch, SRUM,
+### Artefacts
+- **Broad coverage** — EVTX, `$MFT`, registry hives, Prefetch, AmCache, SRUM,
   `$UsnJrnl`, scheduled tasks, browser history (Chromium / Edge / Firefox),
-  LNK / jump-lists, PowerShell console history, Windows Timeline, ShellBags,
-  Recycle Bin, USB / device, network-profile & autostart registry keys,
-  Run-dialog (RunMRU) and outbound-RDP history, and **remote-access tool logs**
-  (AnyDesk, TeamViewer, ScreenConnect).
-- **Behaviour-based hunt engine** — single-event (Sigma-subset) **and**
-  correlation rules, all ATT&CK-mapped and embedded in the binary. Includes
-  per-group rules for the top ransomware crews (Qilin, Akira, Play/DragonForce,
-  LockBit, INC, Interlock, Clop…).
-- **Built for real case sizes** — a virtualised timeline stays responsive across
-  **millions of events**; correlation runs in seconds, not minutes.
-- **Triage & pivot** — tag events, filter by category / artefact / flagged,
-  full-text search, pivot the timeline around any event or day.
+  LNK / jump-lists, PowerShell console history, Windows Timeline, Recycle Bin,
+  USB / device, network-profile & autostart registry keys, Run-dialog (RunMRU),
+  outbound-RDP history, and **remote-access tool logs** (AnyDesk, TeamViewer,
+  ScreenConnect).
+- **ShellBags with full folder paths** — shell items decoded properly (known
+  folders, volumes, long file names, network shares), so you see
+  `This PC\C:\Users\…\Finance` rather than raw bytes.
+- **Microsoft Defender** — detections, remediation success/failure, ASR blocks,
+  network protection and tampering (RTP / tamper protection disabled) from the
+  event log, plus **MPLog** detections, process activity and file hashes that
+  survive event-log clearing. Two built-in rules raise these as findings.
+- **Host details** — computer name, domain, OS edition and build, time zone,
+  last shutdown, network interfaces (IP, DHCP, DNS, gateway), local accounts
+  with logon counts and last logon / password-set times, and user profiles —
+  all from the registry. Shown as **analysed host** in the left rail, with a
+  full host view that links every value back to its source event.
+
+### Hunting
+- **Built-in rule pack** — single-event and correlation rules, ATT&CK-mapped and
+  embedded in the binary, including per-group rules for the top ransomware crews
+  (Qilin, Akira, Play/DragonForce, LockBit, INC, Interlock, Clop…). Runs
+  automatically on every new case with no setup. Each rule carries its own
+  match / no-match self-tests.
+- **Sigma rules** — point fx at a SigmaHQ release (`sigma_core+`, folder
+  `rules\windows`) and run ~2,000 community Windows rules on demand, on top of
+  the built-in pack, from the GUI or the CLI. Rules that can't apply to triage
+  data are skipped and counted, never guessed at. Config and results are saved
+  with the case.
 - **IOC hunt** — paste, load or drop an indicator list (hashes, IPs, domains,
-  URLs, paths, defanged or not) and hunt the whole case for it, post-processing,
-  in one pass. The list and results are saved with the case; every match becomes
-  a triageable, exportable finding.
-- **Sigma rules** — point fx at a SigmaHQ release and run ~2,000 community
-  Windows rules against a case on demand, on top of the built-in pack. Rules
-  that can't apply to triage data are skipped and counted, not guessed at.
-- **Tags** — right-click any event to tag it from a preset list or a new tag of
-  your own; filter the timeline by tag from the rail.
-- **Per-day activity graph** — surface untagged volume spikes no rule flagged.
-- **Export** — CSV / STIX, plus a self-contained interactive **HTML / PDF case
-  report** with a chain-of-custody evidence table.
+  URLs, paths, defanged or not) and hunt the whole case in one pass. The list
+  and results are saved with the case; every match is clickable, triageable
+  and exportable.
+
+### Analyst workspace
+- **Live progress** — while a case ingests or a hunt runs, a progress panel
+  shows the phase, a size-weighted progress bar, the file being parsed, files
+  and data done, events written, elapsed time and time left. Failed files and
+  record warnings are summarised afterwards in the ingest log.
+  **Cancel** keeps everything ingested so far.
+- **Built for real case sizes** — a virtualised timeline stays responsive across
+  **millions of events**; rules are compiled and gated so 2,000+ Sigma rules run
+  over a multi-million-event case in minutes.
+- **All events + mini timeline** — a narrow activity strip above the timeline;
+  click or drag across it to filter to a time range. A per-day activity graph
+  in the rail surfaces volume spikes no rule flagged.
+- **Findings only** — one toggle narrows the timeline to events behind a
+  detection or that you've triaged; **Clear all filters** resets everything.
+- **Triage & tags** — mark events Validated / Unconfirmed / False positive /
+  Dismissed with notes; right-click any event to tag it with your own tags and
+  filter by tag from the rail.
+- **Detail panel** — resizable, with the full message, a pretty-printed raw
+  record (font size, wrap, copy) and pivot ±1m / 5m / 30m / 1h around any event.
+- **Export** — CSV / STIX 2.1, plus a self-contained interactive **HTML / PDF
+  case report** with a chain-of-custody evidence table.
 - **Offline & provenance-first** — no network at analysis time; every event
   traces back to a hashed source file, a parser, and a record locator.
 
@@ -173,13 +213,17 @@ fx summary host01.fxcase
 fx hunt host01.fxcase
 fx hunt host01.fxcase --rules C:\my\rules
 
+# Add community Sigma rules (optional level / status filters)
+fx hunt host01.fxcase --sigma C:\sigma\rules\windows --sigma-level medium --sigma-status stable,test
+
 # Write a self-contained HTML case report (print to PDF to archive)
 fx report host01.fxcase report.html
 ```
 
-Or launch **`fx-gui`** for the three-pane analyst workspace. With no case open
-it loads representative sample data, so you can explore the UI before loading
-real evidence.
+Or launch **`fx-gui`** for the analyst workspace: **New case** → pick the
+collection folder and where to save the `.fxcase`, and fx ingests, hunts and
+opens it for you. Run in a plain browser, the UI loads representative sample
+data so you can explore it before loading real evidence.
 
 ---
 

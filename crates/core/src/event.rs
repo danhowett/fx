@@ -124,6 +124,8 @@ pub enum ArtefactKind {
     WindowsTimeline,
     /// Remote-access tool logs (AnyDesk, TeamViewer).
     RemoteAccess,
+    /// Microsoft Defender support logs (MPLog-*.log).
+    DefenderLog,
     /// Registry-derived but not one of the specialized views above.
     RegistryGeneric,
     /// Identified container we can read but have no specialized parser for yet.

@@ -217,6 +217,10 @@ fn resolve_by_path_only(lower: &str, name: &str) -> Option<(ArtefactKind, IdMeth
         // tool-specific names (plus the vendor folder where the name is
         // generic) are the signal.
         Some((ArtefactKind::RemoteAccess, IdMethod::PathOnly, 0.85))
+    } else if name.starts_with("mplog-") && name.ends_with(".log") {
+        // Microsoft Defender support log (ProgramData\Microsoft\Windows
+        // Defender\Support\MPLog-*.log). UTF-16 text; the name is the signal.
+        Some((ArtefactKind::DefenderLog, IdMethod::PathOnly, 0.9))
     } else if name.ends_with("consolehost_history.txt")
         || (name.ends_with("_history.txt") && lower.contains("psreadline"))
     {

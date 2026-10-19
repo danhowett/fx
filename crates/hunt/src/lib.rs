@@ -128,7 +128,13 @@ pub fn run(store: &CaseStore, rules: &RuleSet) -> HuntReport {
     }
 
     // ── Correlation engine ─────────────────────────────────────────────────
+    if !rules.correlation_rules.is_empty() && !fx_core::progress::cancelled() {
+        fx_core::progress::set_current("Correlation rules");
+    }
     for rule in &rules.correlation_rules {
+        if fx_core::progress::cancelled() {
+            break;
+        }
         let sql = rule.correlation.to_sql();
         match store.run_correlation(&sql) {
             Ok(rows) => {
@@ -183,7 +189,19 @@ fn scan_events(store: &CaseStore, ev_rules: &[EventRule], engine: DetectionEngin
     let mut compiled = crate::event_rule::GatedRules::new(ev_rules);
     let mut hit_buf: Vec<bool> = Vec::new();
     let mut matched: Vec<usize> = Vec::new();
+    fx_core::progress::start_scan(store.event_count().unwrap_or(0));
+    let mut tick: u64 = 0;
+    let mut stopped = false;
     let scan = store.for_each_event(needs_raw, |ev| {
+        // Progress + cancel, checked every 4096 events to keep the hot loop cheap.
+        tick += 1;
+        if tick & 4095 == 0 {
+            fx_core::progress::add_scanned(4096);
+            stopped = fx_core::progress::cancelled();
+        }
+        if stopped {
+            return;
+        }
         compiled.matching(ev, &mut hit_buf, &mut matched);
         for &ri in &matched {
             let rule = &ev_rules[ri];
@@ -215,6 +233,7 @@ fn scan_events(store: &CaseStore, ev_rules: &[EventRule], engine: DetectionEngin
             });
         }
     });
+    fx_core::progress::add_scanned(tick & 4095);
     (detections, scan.err().map(|e| format!("single-event scan: {e}")))
 }
 
@@ -351,6 +370,8 @@ static EMBEDDED_RULES: &[(&str, &str)] = &[
     ("credential_access_lsass.yml", include_str!("../rules/credential_access_lsass.yml")),
     ("credential_access_secrets.yml", include_str!("../rules/credential_access_secrets.yml")),
     ("data_staging_tools.yml", include_str!("../rules/data_staging_tools.yml")),
+    ("defender_asr_block.yml", include_str!("../rules/defender_asr_block.yml")),
+    ("defender_detections.yml", include_str!("../rules/defender_detections.yml")),
     ("defender_tampering.yml", include_str!("../rules/defender_tampering.yml")),
     ("defense_evasion_indicators.yml", include_str!("../rules/defense_evasion_indicators.yml")),
     ("discovery_recon_commands.yml", include_str!("../rules/discovery_recon_commands.yml")),

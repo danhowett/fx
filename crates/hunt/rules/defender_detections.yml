@@ -1,0 +1,26 @@
+kind: event
+id: defender_detections
+title: Microsoft Defender detection
+description: >
+  Microsoft Defender detected, acted on, or failed to remediate a threat — from
+  the Defender Operational event log (1006/1007/1015/1116/1117/1118/1119) or
+  the Defender support log (MPLog). The threat name, resource and user are in
+  the finding. A failed remediation (1118/1119) means the threat may still be
+  present. Defender's own verdict, so treat as high confidence that something
+  was flagged; check the resource and timing for context.
+severity: high
+attack: []
+detection:
+  match:
+    field: action
+    op: regex
+    values:
+      - "^malware\\.(detected|action_taken|action_failed)$"
+tests:
+  match:
+    - { artefact: evtx, action: malware.detected, message: "Defender detection: Trojan:Win32/Wacatac.H!ml [Severe]" }
+    - { artefact: defender_log, action: malware.detected, message: "Defender (MPLog) detection: HackTool:Win64/Mimikatz.A" }
+    - { artefact: evtx, action: malware.action_failed }
+  no_match:
+    - { artefact: evtx, action: defender.config_changed }
+    - { artefact: defender_log, action: execution.defender_mplog }

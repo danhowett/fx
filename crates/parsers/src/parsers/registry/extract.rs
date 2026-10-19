@@ -59,6 +59,7 @@ pub(crate) fn default_extractors() -> Vec<Box<dyn Extractor>> {
         Box::new(AutostartExtras),
         Box::new(RunMru),
         Box::new(RdpClientMru),
+        Box::new(HostInfo),
     ]
 }
 
@@ -1088,9 +1089,260 @@ fn rot13(s: &str) -> String {
         .collect()
 }
 
+// ── Host information (SYSTEM / SOFTWARE / SAM) ──────────────────────────────
+// Facts about the machine itself, for the Host panel: computer name, DNS
+// domain, OS edition / version / build and install date, configured time
+// zone, last clean shutdown, network interfaces (static / DHCP addresses),
+// user profiles and local accounts (SAM). Each is emitted as a `host.*` event
+// carrying the fact in `raw`, so it keeps full provenance (hive, key, value)
+// like everything else and can be aggregated per case.
+struct HostInfo;
+
+fn cell(key: &CellKeyNode, name: &str) -> Option<notatin::cell_value::CellValue> {
+    key.value_iter().find_map(|v| {
+        if super::value_name(&v).eq_ignore_ascii_case(name) {
+            Some(v.get_content().0)
+        } else {
+            None
+        }
+    })
+}
+
+fn cell_str(key: &CellKeyNode, name: &str) -> Option<String> {
+    use notatin::cell_value::CellValue as C;
+    match cell(key, name)? {
+        C::String(s) => Some(s.trim_matches('\0').trim().to_string()).filter(|s| !s.is_empty()),
+        C::MultiString(v) => {
+            let v: Vec<String> = v.into_iter().map(|x| x.trim_matches('\0').trim().to_string()).filter(|x| !x.is_empty()).collect();
+            (!v.is_empty()).then(|| v.join(", "))
+        }
+        C::U32(n) => Some(n.to_string()),
+        C::I32(n) => Some(n.to_string()),
+        C::U64(n) => Some(n.to_string()),
+        C::I64(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn cell_u64(key: &CellKeyNode, name: &str) -> Option<u64> {
+    use notatin::cell_value::CellValue as C;
+    match cell(key, name)? {
+        C::U32(n) => Some(n as u64),
+        C::I32(n) => Some(n as u32 as u64),
+        C::U64(n) => Some(n),
+        C::I64(n) => Some(n as u64),
+        C::String(s) => s.trim().parse().ok(),
+        C::Binary(b) if b.len() >= 8 => Some(u64::from_le_bytes(b[..8].try_into().ok()?)),
+        C::Binary(b) if b.len() >= 4 => Some(u32::from_le_bytes(b[..4].try_into().ok()?) as u64),
+        _ => None,
+    }
+}
+
+fn cell_bytes(key: &CellKeyNode, name: &str) -> Option<Vec<u8>> {
+    use notatin::cell_value::CellValue as C;
+    match cell(key, name)? {
+        C::Binary(b) => Some(b),
+        _ => None,
+    }
+}
+
+fn iso(t: OffsetDateTime) -> String {
+    t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default()
+}
+
+/// "ControlSet001" etc. from a SYSTEM key path, if present.
+fn control_set(p: &str) -> Option<String> {
+    p.split('\\').find(|s| s.len() == 13 && s.to_ascii_lowercase().starts_with("controlset0")).map(str::to_string)
+}
+
+impl Extractor for HostInfo {
+    fn matches(&self, p: &str) -> bool {
+        let l = p.to_ascii_lowercase();
+        l.ends_with(r"\control\computername\computername")
+            || l.ends_with(r"\control\timezoneinformation")
+            || l.ends_with(r"\control\windows")
+            || l.ends_with(r"\services\tcpip\parameters")
+            || l.contains(r"\services\tcpip\parameters\interfaces\{")
+            || l.ends_with(r"\select")
+            || (l.ends_with(r"\microsoft\windows nt\currentversion") && !l.contains(r"\software\microsoft\windows nt"))
+            || l.contains(r"\windows nt\currentversion\profilelist\s-1-")
+            || l.contains(r"\sam\domains\account\users\names\")
+            || (l.contains(r"\sam\domains\account\users\0000") && !l.contains(r"\names"))
+    }
+
+    fn extract(
+        &self,
+        key: &CellKeyNode,
+        key_path: &str,
+        lastwrite: OffsetDateTime,
+        ctx: &Ctx,
+        sink: &mut dyn EventSink,
+        outcome: &mut ParseOutcome,
+    ) {
+        let l = key_path.to_ascii_lowercase();
+        let mut emit = |action: &str, ts: OffsetDateTime, kind: TimestampKind, value: Option<&str>, user: Principal, message: String, raw: serde_json::Value| {
+            sink.emit(make_event(ctx, ArtefactKind::RegistryGeneric, ts, kind, action, key_path, value, None, user, message, raw));
+            outcome.events_emitted += 1;
+        };
+        let cs = control_set(key_path);
+
+        if l.ends_with(r"\select") {
+            if let Some(cur) = cell_u64(key, "Current") {
+                emit("host.controlset", lastwrite, TimestampKind::Modified, Some("Current"), Principal::default(),
+                    format!("Current control set: ControlSet{cur:03}"), json!({"fact": "controlset", "current": format!("ControlSet{cur:03}")}));
+            }
+        } else if l.ends_with(r"\control\computername\computername") {
+            if let Some(name) = cell_str(key, "ComputerName") {
+                emit("host.computer_name", lastwrite, TimestampKind::Modified, Some("ComputerName"), Principal::default(),
+                    format!("Computer name: {name}"), json!({"fact": "computer_name", "value": name, "control_set": cs}));
+            }
+        } else if l.ends_with(r"\control\timezoneinformation") {
+            let name = cell_str(key, "TimeZoneKeyName").or_else(|| cell_str(key, "StandardName"));
+            let bias = cell_u64(key, "Bias").map(|b| b as u32 as i32);
+            let active = cell_u64(key, "ActiveTimeBias").map(|b| b as u32 as i32);
+            if name.is_some() || bias.is_some() {
+                let off = |m: i32| { let o = -m; format!("UTC{}{:02}:{:02}", if o >= 0 { "+" } else { "-" }, o.abs() / 60, o.abs() % 60) };
+                emit("host.timezone", lastwrite, TimestampKind::Modified, Some("TimeZoneKeyName"), Principal::default(),
+                    format!("Time zone: {}{}", name.clone().unwrap_or_default(), bias.map(|b| format!(" ({})", off(b))).unwrap_or_default()),
+                    json!({"fact": "timezone", "name": name, "bias_minutes": bias, "active_bias_minutes": active,
+                           "utc_offset": bias.map(off), "active_utc_offset": active.map(off), "control_set": cs}));
+            }
+        } else if l.ends_with(r"\control\windows") {
+            if let Some(b) = cell_bytes(key, "ShutdownTime") {
+                if let Some(t) = filetime_at(&b, 0) {
+                    emit("host.shutdown", t, TimestampKind::Recorded, Some("ShutdownTime"), Principal::default(),
+                        format!("Last clean shutdown: {}", iso(t)), json!({"fact": "shutdown", "time": iso(t), "control_set": cs}));
+                }
+            }
+        } else if l.ends_with(r"\services\tcpip\parameters") {
+            let host = cell_str(key, "Hostname").or_else(|| cell_str(key, "NV Hostname"));
+            let domain = cell_str(key, "Domain").or_else(|| cell_str(key, "NV Domain")).or_else(|| cell_str(key, "DhcpDomain"));
+            if host.is_some() || domain.is_some() {
+                emit("host.tcpip", lastwrite, TimestampKind::Modified, Some("Hostname"), Principal::default(),
+                    format!("TCP/IP host {} domain {}", host.clone().unwrap_or_default(), domain.clone().unwrap_or_else(|| "-".into())),
+                    json!({"fact": "tcpip", "hostname": host, "domain": domain, "control_set": cs}));
+            }
+        } else if l.contains(r"\services\tcpip\parameters\interfaces\{") {
+            let guid = key_path.rsplit('\\').next().unwrap_or("").to_string();
+            let dhcp = cell_u64(key, "EnableDHCP").map(|v| v == 1).unwrap_or(false);
+            let ip = if dhcp { cell_str(key, "DhcpIPAddress") } else { cell_str(key, "IPAddress") }
+                .or_else(|| cell_str(key, "DhcpIPAddress")).or_else(|| cell_str(key, "IPAddress"))
+                .filter(|v| v != "0.0.0.0" && !v.is_empty());
+            let Some(ip) = ip else { return };
+            let gw = cell_str(key, "DhcpDefaultGateway").or_else(|| cell_str(key, "DefaultGateway"));
+            let dns = cell_str(key, "NameServer").filter(|s| !s.is_empty()).or_else(|| cell_str(key, "DhcpNameServer"));
+            let mask = cell_str(key, "DhcpSubnetMask").or_else(|| cell_str(key, "SubnetMask"));
+            let lease = cell_u64(key, "LeaseObtainedTime").and_then(|s| OffsetDateTime::from_unix_timestamp(s as i64).ok());
+            emit("host.interface", lease.unwrap_or(lastwrite), TimestampKind::Modified, Some(if dhcp { "DhcpIPAddress" } else { "IPAddress" }), Principal::default(),
+                format!("Network interface {ip}{}{}", if dhcp { " (DHCP)" } else { " (static)" }, gw.as_ref().map(|g| format!(" gateway {g}")).unwrap_or_default()),
+                json!({"fact": "interface", "guid": guid, "ip": ip, "dhcp": dhcp, "subnet_mask": mask, "gateway": gw, "dns": dns,
+                       "dhcp_server": cell_str(key, "DhcpServer"), "domain": cell_str(key, "DhcpDomain").or_else(|| cell_str(key, "Domain")),
+                       "lease_obtained": lease.map(iso), "control_set": cs}));
+        } else if l.ends_with(r"\microsoft\windows nt\currentversion") {
+            let Some(product) = cell_str(key, "ProductName") else { return };
+            let build = cell_str(key, "CurrentBuild").or_else(|| cell_str(key, "CurrentBuildNumber"));
+            let ubr = cell_u64(key, "UBR");
+            // Windows 11 still reports "Windows 10 …" in ProductName; the build
+            // number (22000+) is what tells them apart.
+            let product = match build.as_deref().and_then(|b| b.parse::<u32>().ok()) {
+                Some(b) if b >= 22000 && product.contains("Windows 10") => product.replace("Windows 10", "Windows 11"),
+                _ => product,
+            };
+            let version = cell_str(key, "DisplayVersion").or_else(|| cell_str(key, "ReleaseId"));
+            let installed = cell_u64(key, "InstallDate").and_then(|s| OffsetDateTime::from_unix_timestamp(s as i64).ok());
+            emit("host.os", installed.unwrap_or(lastwrite), if installed.is_some() { TimestampKind::Created } else { TimestampKind::Modified },
+                Some("ProductName"), Principal::default(),
+                format!("OS: {product}{}{}", version.as_ref().map(|v| format!(" {v}")).unwrap_or_default(),
+                    build.as_ref().map(|b| format!(" (build {b}{})", ubr.map(|u| format!(".{u}")).unwrap_or_default())).unwrap_or_default()),
+                json!({"fact": "os", "product": product, "version": version, "build": build, "ubr": ubr,
+                       "edition": cell_str(key, "EditionID"), "install_date": installed.map(iso),
+                       "registered_owner": cell_str(key, "RegisteredOwner"), "registered_org": cell_str(key, "RegisteredOrganization"),
+                       "system_root": cell_str(key, "SystemRoot")}));
+        } else if l.contains(r"\currentversion\profilelist\s-1-") {
+            let sid = key_path.rsplit('\\').next().unwrap_or("").to_string();
+            if sid.ends_with(".bak") || sid.split('-').count() < 4 {
+                return;
+            }
+            let Some(path) = cell_str(key, "ProfileImagePath") else { return };
+            let user = path.rsplit('\\').next().unwrap_or(&path).to_string();
+            emit("host.profile", lastwrite, TimestampKind::Modified, Some("ProfileImagePath"),
+                Principal { name: Some(user.clone()), sid: Some(sid.clone()), ..Default::default() },
+                format!("User profile {user} ({sid})"), json!({"fact": "profile", "sid": sid, "user": user, "path": path}));
+        } else if l.contains(r"\sam\domains\account\users\names\") {
+            // Names\<user>: the default value's TYPE field holds the RID; the
+            // key's LastWrite is the usual proxy for account creation.
+            let user = key_path.rsplit('\\').next().unwrap_or("").to_string();
+            let rid = key.value_iter().find(|v| super::value_name(v).is_empty() || super::value_name(v) == "(default)")
+                .map(|v| v.detail.data_type_raw());
+            emit("host.account", lastwrite, TimestampKind::Created, None,
+                Principal { name: Some(user.clone()), ..Default::default() },
+                format!("Local account {user}{}", rid.map(|r| format!(" (RID {r})")).unwrap_or_default()),
+                json!({"fact": "account", "user": user, "rid": rid, "created": iso(lastwrite)}));
+        } else if l.contains(r"\sam\domains\account\users\0000") {
+            let Some(f) = cell_bytes(key, "F") else { return };
+            if f.len() < 0x44 {
+                return;
+            }
+            let rid_hex = key_path.rsplit('\\').next().unwrap_or("");
+            let rid = u32::from_str_radix(rid_hex, 16).ok();
+            let u16at = |o: usize| u16::from_le_bytes([f[o], f[o + 1]]);
+            let last_logon = filetime_at(&f, 8);
+            let pwd_set = filetime_at(&f, 24);
+            let last_failed = filetime_at(&f, 40);
+            let flags = u16at(0x38);
+            let failed = u16at(0x40);
+            let logons = u16at(0x42);
+            let name = cell_bytes(key, "V").and_then(|v| sam_v_string(&v, 0x0C));
+            let full = cell_bytes(key, "V").and_then(|v| sam_v_string(&v, 0x18));
+            let disabled = flags & 0x0001 != 0;
+            emit("host.account_activity", last_logon.unwrap_or(lastwrite), TimestampKind::Recorded, Some("F"),
+                Principal { name: name.clone(), ..Default::default() },
+                format!("Local account {}{}: {} logon(s){}{}", name.clone().unwrap_or_else(|| rid_hex.to_string()),
+                    if disabled { " [disabled]" } else { "" }, logons,
+                    last_logon.map(|t| format!(", last logon {}", iso(t))).unwrap_or_default(),
+                    pwd_set.map(|t| format!(", password set {}", iso(t))).unwrap_or_default()),
+                json!({"fact": "account_activity", "rid": rid, "user": name, "full_name": full, "disabled": disabled,
+                       "logon_count": logons, "failed_logons": failed, "last_logon": last_logon.map(iso),
+                       "password_last_set": pwd_set.map(iso), "last_failed_logon": last_failed.map(iso)}));
+        }
+    }
+}
+
+/// A UTF-16 string from a SAM `V` value: the offset table entry at `entry`
+/// holds (offset, length) relative to the 0xCC data area.
+fn sam_v_string(v: &[u8], entry: usize) -> Option<String> {
+    let rd = |o: usize| v.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+    let off = rd(entry)? + 0xCC;
+    let len = rd(entry + 4)?;
+    let b = v.get(off..off + len)?;
+    let units: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let s = String::from_utf16(&units).ok()?.trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_info_paths() {
+        let h = HostInfo;
+        assert!(h.matches(r"ROOT\ControlSet001\Control\ComputerName\ComputerName"));
+        assert!(h.matches(r"ROOT\ControlSet001\Services\Tcpip\Parameters\Interfaces\{1234-ABCD}"));
+        assert!(h.matches(r"ROOT\Microsoft\Windows NT\CurrentVersion"));
+        assert!(!h.matches(r"ROOT\Software\Microsoft\Windows NT\CurrentVersion")); // NTUSER copy
+        assert!(h.matches(r"ROOT\SAM\Domains\Account\Users\Names\Administrator"));
+        assert!(h.matches(r"ROOT\SAM\Domains\Account\Users\000001F4"));
+        assert!(!h.matches(r"ROOT\SAM\Domains\Account\Users\Names"));
+        assert!(h.matches(r"ROOT\Microsoft\Windows NT\CurrentVersion\ProfileList\S-1-5-21-1-2-3-1001"));
+        // SAM V string: name at offset table 0x0C
+        let mut v = vec![0u8; 0xCC + 10];
+        v[0x0C..0x10].copy_from_slice(&0u32.to_le_bytes());
+        v[0x10..0x14].copy_from_slice(&10u32.to_le_bytes());
+        for (i, u) in "admin".encode_utf16().enumerate() { v[0xCC + i * 2..0xCC + i * 2 + 2].copy_from_slice(&u.to_le_bytes()); }
+        assert_eq!(sam_v_string(&v, 0x0C).as_deref(), Some("admin"));
+        assert_eq!(control_set(r"ROOT\ControlSet002\Control\Windows").as_deref(), Some("ControlSet002"));
+    }
 
     #[test]
     fn rot13_roundtrip() {

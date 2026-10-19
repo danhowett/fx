@@ -14,6 +14,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::open_case,
             commands::ingest_collection,
+            commands::cancel_job,
+            commands::progress_snapshot,
             commands::query_timeline,
             commands::count_timeline,
             commands::event_raw,
@@ -37,6 +39,7 @@ fn main() {
             commands::sigma_preview,
             commands::sigma_hunt,
             commands::sigma_saved,
+            commands::host_info,
             commands::ingest_log,
             commands::daily_activity,
         ])

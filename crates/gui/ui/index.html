@@ -264,6 +264,48 @@
   .minitl .mt-btn { font: 500 10.5px var(--sans); color: var(--ink-dim); background: none; border: 1px solid var(--line); border-radius: 4px; padding: 1px 7px; cursor: pointer; }
   .minitl .mt-btn:hover { color: var(--ink); border-color: var(--ink-faint); }
   .minitl.collapsed svg, .minitl.collapsed .mt-tip { display: none; }
+  /* Analysed host (rail) */
+  .hostsec .hs-head { padding: 6px 0 2px; cursor: pointer; }
+  .hostsec.active .hs-head .name { font-weight: 600; }
+  .hs-sum { cursor: pointer; padding: 0 0 2px 2px; line-height: 1.35; }
+  .hs-name { display: block; font-size: 12.5px; font-weight: 600; color: var(--ink); word-break: break-all; }
+  .hs-sub { display: block; font-size: 10.5px; color: var(--ink-faint); }
+  .hs-body { padding: 6px 0 2px 2px; }
+  .hs-row { display: flex; gap: 8px; font-size: 11px; line-height: 1.6; }
+  .hs-k { flex: none; width: 74px; color: var(--ink-faint); }
+  .hs-v { color: var(--ink-dim); min-width: 0; word-break: break-all; }
+  .hs-v .mono { font-family: var(--mono); font-size: 10.5px; word-break: normal; overflow-wrap: normal; }
+  .hs-hint { font-size: 10.5px; color: var(--ink-faint); margin-top: 4px; }
+  .hs-link { font-size: 11.5px; color: var(--focus); margin-top: 6px; cursor: pointer; }
+  .hs-link:hover { text-decoration: underline; }
+  /* Host chip (top bar, unused) and host view */
+  .hostchip { display: inline-flex; align-items: center; gap: 6px; max-width: 360px; font: 500 12px var(--sans); color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); border-radius: 14px; padding: 3px 11px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hostchip[hidden] { display: none; }
+  .hostchip:hover, .hostchip.active { border-color: var(--focus); }
+  .hostchip .hcx { color: var(--ink-faint); font-weight: 400; overflow: hidden; text-overflow: ellipsis; }
+  .hostchip svg { flex: none; width: 13px; height: 13px; color: var(--ink-faint); }
+  .hostcard { margin: 2px 0 4px; padding: 11px 13px 10px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line); cursor: pointer; }
+  .hostcard:hover, .hostsec.active .hostcard { border-color: var(--focus); box-shadow: 0 0 0 1px var(--focus) inset; }
+  .hc-name { font-size: 15px; font-weight: 600; color: var(--ink); word-break: break-all; }
+  .hc-dom { font-weight: 400; color: var(--ink-faint); }
+  .hc-line { font-size: 11.5px; color: var(--ink-dim); margin-top: 3px; line-height: 1.4; }
+  .hc-line.mono { font-family: var(--mono); font-size: 11px; }
+  .hc-meta { font-size: 11px; color: var(--ink-faint); margin-top: 5px; }
+  .hc-hint { font-size: 11px; color: var(--ink-faint); margin-top: 6px; line-height: 1.4; }
+  .hc-cta { font-size: 11.5px; color: var(--focus); margin-top: 7px; }
+  .app[data-view="host"] .grid-head { display: none; }
+  .hostview { padding: 18px 22px 30px; max-width: 1200px; }
+  .hv-h { font-size: 18px; font-weight: 600; color: var(--ink); margin: 0 0 6px; }
+  .hostview h3 { font-size: 12px; font-weight: 600; color: var(--ink-faint); margin: 20px 0 8px; }
+  .hv-kv { border-collapse: collapse; font-size: 12.5px; min-width: 520px; }
+  .hv-kv th { text-align: left; font-weight: 500; color: var(--ink-faint); padding: 5px 18px 5px 0; vertical-align: top; white-space: nowrap; }
+  .hv-kv td { color: var(--ink); padding: 5px 12px 5px 0; }
+  .hv-s { text-align: right; width: 70px; }
+  .hv-src { font: 500 11px var(--sans); color: var(--focus); background: none; border: 0; cursor: pointer; padding: 0; white-space: nowrap; }
+  .hv-src:hover { text-decoration: underline; }
+  .hostview .mono { font-family: var(--mono); font-size: 11.5px; }
+  .hostview .faint { color: var(--ink-faint); }
+  .hv-tag { font-size: 10px; font-weight: 600; color: var(--ink-faint); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; margin-left: 4px; }
   .clear-all { font: 500 11.5px var(--sans); color: var(--ink); background: none; border: 1px solid color-mix(in srgb, var(--alert) 55%, var(--line)); border-radius: 12px; padding: 3px 10px; cursor: pointer; white-space: nowrap; }
   .clear-all:hover { background: color-mix(in srgb, var(--alert) 12%, transparent); }
   .clear-all::before { content: "✕"; font-size: 10px; margin-right: 5px; color: var(--alert); }
@@ -448,7 +490,33 @@
     padding: 28px 40px; text-align: center; min-width: 280px;
   }
   .overlay-title { font-size: 15px; color: var(--ink); margin-top: 14px; }
-  .overlay-sub { font-size: 12px; color: var(--ink-dim); margin-top: 6px; max-width: 360px; word-break: break-all; }
+  .overlay-sub { font-size: 12px; color: var(--ink-dim); margin-top: 6px; max-width: 360px; overflow-wrap: anywhere; }
+  /* live progress inside the overlay */
+  .overlay-box.with-prog { width: min(560px, calc(100vw - 32px)); text-align: left; padding: 24px 28px; }
+  .overlay-box.with-prog .spinner { display: none; }
+  .overlay-box.with-prog .overlay-title { margin-top: 0; font-size: 16px; }
+  .overlay-box.with-prog .overlay-sub { max-width: none; }
+  .ovp { margin-top: 16px; }
+  .ovp-phase { font-size: 12px; color: var(--ink-dim); margin-bottom: 8px; }
+  .ovp-bar { height: 8px; border-radius: 4px; background: var(--surface-2); border: 1px solid var(--line); overflow: hidden; }
+  .ovp-fill { height: 100%; width: 0; background: var(--focus); transition: width .25s linear; }
+  .ovp-bar.indet .ovp-fill { width: 30% !important; animation: ovpSlide 1.2s ease-in-out infinite; }
+  @keyframes ovpSlide { from { margin-left: -30%; } to { margin-left: 100%; } }
+  .ovp-pct { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink); margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .ovp-pct #ovpTime { color: var(--ink-dim); }
+  .ovp-file:empty { display: none; }
+  .ovp-file { margin-top: 14px; font-size: 12px; color: var(--ink); display: flex; gap: 8px; align-items: baseline; }
+  .ovp-file .k { flex: none; font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--surface-2); color: var(--ink-dim); border: 1px solid var(--line); }
+  .ovp-file .p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; flex: 1; min-width: 0; }
+  .ovp-file .s { flex: none; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+  .ovp-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 14px 0 0; }
+  .ovp-stats div { background: var(--surface-2); border-radius: 6px; padding: 7px 10px; }
+  .ovp-stats dt { font-size: 11px; color: var(--ink-faint); }
+  .ovp-stats dd { margin: 2px 0 0; font-size: 14px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .ovp-stats dd.warn { color: var(--sev-medium, #d9a441); }
+  .ovp-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
+  .ovp-note { font-size: 11px; color: var(--ink-faint); }
+  .ovp-cancel[disabled] { opacity: .6; cursor: default; }
   .spinner {
     width: 34px; height: 34px; margin: 0 auto; border-radius: 50%;
     border: 3px solid var(--line); border-top-color: var(--focus);
@@ -883,13 +951,14 @@
       </div>
     </div>
     <span class="case-name" id="caseName">no case open</span>
+    <button class="hostchip" id="hostChip" hidden></button>
     <div class="searchgroup">
       <div class="search">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
         <input id="search" type="text" placeholder="Filter path, user, message…  (⌘K)" spellcheck="false" />
       </div>
       <button class="topbtn has-tip" id="iocBtn" aria-describedby="iocTip">IOC hunt
-        <span class="tip" id="iocTip" role="tooltip"><b>Search for many values at once.</b> Paste or drop a list of IOCs (hashes, IPs, domains, URLs, file names, paths) and hunt the whole case in one pass. Defanged values work.</span>
+        <span class="tip" id="iocTip" role="tooltip"><b>Search for many values at once.</b> Paste or drop a list of IOCs (hashes, IPs, domains, URLs, file names, paths) and hunt the whole case in one pass. Defanged values work.<br><br><b>Sigma rules tab:</b> run community SigmaHQ rules against the case, on top of fx's built-in rules.</span>
       </button>
     </div>
     <div class="topbar-end">
@@ -925,6 +994,17 @@
       <div class="spinner"></div>
       <div class="overlay-title" id="overlayTitle">Working…</div>
       <div class="overlay-sub" id="overlaySub"></div>
+      <div class="ovp" id="ovProg" hidden>
+        <div class="ovp-phase" id="ovpPhase"></div>
+        <div class="ovp-bar"><div class="ovp-fill" id="ovpFill"></div></div>
+        <div class="ovp-pct"><span id="ovpPct">0%</span><span id="ovpTime"></span></div>
+        <div class="ovp-file" id="ovpFile"></div>
+        <dl class="ovp-stats" id="ovpStats"></dl>
+        <div class="ovp-foot">
+          <span class="ovp-note" id="ovpNote"></span>
+          <button class="topbtn ovp-cancel" id="ovpCancel" type="button">Cancel</button>
+        </div>
+      </div>
     </div>
   </div>
 

@@ -143,6 +143,36 @@ impl CaseStore {
         Ok(rows)
     }
 
+    /// Host facts (`host.*` events from the registry) with their source hive,
+    /// for the Host panel: (event id, action, raw JSON, source path).
+    pub fn host_facts(&self) -> Result<Vec<(String, String, String, String)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT CAST(e.id AS VARCHAR), e.action, CAST(e.raw AS VARCHAR), COALESCE(v.source_path, '')
+             FROM events e LEFT JOIN evidence v ON v.evidence_id = e.evidence_id
+             WHERE e.action LIKE 'host.%'
+             ORDER BY e.ts",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Collection summary: (tool, asserted host, asserted time zone, files,
+    /// total bytes, first / last registration time).
+    pub fn collection_summary(&self) -> Result<(Option<String>, Option<String>, Option<String>, u64, u64), StoreError> {
+        let row = self.conn.query_row(
+            "SELECT (SELECT collection_tool FROM evidence WHERE collection_tool IS NOT NULL GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1),
+                    (SELECT asserted_host FROM evidence WHERE asserted_host IS NOT NULL GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1),
+                    (SELECT asserted_timezone FROM evidence WHERE asserted_timezone IS NOT NULL GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1),
+                    COUNT(*), COALESCE(SUM(size_bytes), 0)
+             FROM evidence",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? as u64, r.get::<_, i64>(4)? as u64)),
+        )?;
+        Ok(row)
+    }
+
     /// Count of unclassified files (the "nothing dropped" accounting).
     pub fn unclassified_count(&self) -> Result<u64, StoreError> {
         let n: i64 = self
@@ -628,6 +658,22 @@ mod label_kv_tests {
         assert_eq!(store.labels().unwrap().len(), 1);
         assert_eq!(store.kv_get("ioc_hunt.list").unwrap().as_deref(), Some("evil.example\n1.2.3.4"));
         assert_eq!(store.kv_get("missing").unwrap(), None);
+    }
+
+    /// The "Findings only" predicate and the host-fact queries must bind and
+    /// run (DuckDB validates the SQL even on an empty case).
+    #[test]
+    fn findings_only_and_host_queries_run() {
+        let dir = std::env::temp_dir().join(format!("fx-fo-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = CaseStore::create(&dir.join("c.fxcase"), "t", None, "UTC").unwrap();
+        let mut f = crate::TimelineFilter::default();
+        f.flagged_only = true;
+        assert_eq!(store.count_timeline(&f).unwrap(), 0);
+        assert!(store.timeline(&f).unwrap().is_empty());
+        assert!(store.host_facts().unwrap().is_empty());
+        let (_, _, _, n, _) = store.collection_summary().unwrap();
+        assert_eq!(n, 0);
     }
 }
 

@@ -1,0 +1,23 @@
+kind: event
+id: defender_asr_block
+title: Defender attack surface reduction rule blocked activity
+description: >
+  An attack surface reduction (ASR) rule blocked (1121) or would have blocked
+  (1122, audit mode) a behaviour such as Office spawning child processes,
+  credential theft from LSASS, or executable content from email / web. ASR
+  blocks often mark the moment an intrusion attempt hit a control; the process
+  and target path are in the finding.
+severity: medium
+attack: []
+detection:
+  match:
+    field: action
+    op: regex
+    values:
+      - "^defender\\.asr_(blocked|audited)$"
+tests:
+  match:
+    - { artefact: evtx, action: defender.asr_blocked, process.path: "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE" }
+    - { artefact: evtx, action: defender.asr_audited }
+  no_match:
+    - { artefact: evtx, action: defender.network_protection }
