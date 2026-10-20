@@ -86,23 +86,44 @@ Full step-by-step, including a troubleshooting table, is in
 
 ## Screenshots
 
-### Findings view
-Rule detections and analyst-validated events together, worst-first, each
-ATT&CK-mapped and one click from the underlying evidence.
+*Captured from fx's built-in demo case (synthetic data, Slate theme).*
+
+### Artefact timeline
+Every artefact on one timeline. The narrow activity strip at the top filters by
+time range with a click or drag; flagged events are marked inline; the detail
+panel shows the full message, the raw record and one-click triage and pivots.
+
+![Artefact timeline](docs/screenshot-timeline.png)
+
+### Findings
+Built-in rule detections, worst first, each ATT&CK-mapped and one click from the
+underlying evidence.
 
 ![Findings view](docs/screenshot-findings.png)
 
+### Sigma rules
+Point fx at a SigmaHQ release and run ~2,000 community Windows rules on top of
+the built-in pack. Results are grouped by rule, with the author credited.
+
+![Sigma rules](docs/screenshot-sigma.png)
+
+### Analysed host
+Computer name, OS, time zone, network interfaces and accounts read from the
+registry — every value links back to the event it came from.
+
+![Host details](docs/screenshot-host.png)
+
 ### Activity graph
-Per-day event-count histogram across the whole case — spot high-volume days that
-no rule tagged, then click a day to pivot the timeline to it.
+Events per day across the whole case: spot volume spikes no rule flagged, then
+click a day to pivot the timeline to it.
 
 ![Activity graph](docs/screenshot-graph.png)
 
-### Artefact timeline
-Every artefact normalised onto one timeline: filter, full-text search, pivot
-around any event, and triage inline.
+### Live progress
+Ingest, detections and Sigma runs show what's happening and how long is left —
+and can be cancelled without losing the work already done.
 
-![Artefact timeline](docs/screenshot-timeline.png)
+<p align="center"><img src="docs/screenshot-progress.png" alt="Ingest progress panel" width="560"></p>
 
 ---
 
