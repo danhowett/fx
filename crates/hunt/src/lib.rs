@@ -129,7 +129,7 @@ pub fn run(store: &CaseStore, rules: &RuleSet) -> HuntReport {
 
     // ── Correlation engine ─────────────────────────────────────────────────
     if !rules.correlation_rules.is_empty() && !fx_core::progress::cancelled() {
-        fx_core::progress::set_current("Correlation rules");
+        fx_core::progress::set_phase("Running correlation rules");
     }
     for rule in &rules.correlation_rules {
         if fx_core::progress::cancelled() {
@@ -160,6 +160,7 @@ pub fn run(store: &CaseStore, rules: &RuleSet) -> HuntReport {
     });
 
     let count = detections.len();
+    fx_core::progress::set_phase("Saving findings");
     if let Err(e) = store.write_detections(&detections) {
         errors.push(format!("persist detections: {e}"));
     }
@@ -191,13 +192,30 @@ fn scan_events(store: &CaseStore, ev_rules: &[EventRule], engine: DetectionEngin
     let mut matched: Vec<usize> = Vec::new();
     let mut remnant_hits: Vec<u32> = Vec::new();
     fx_core::progress::start_scan(store.event_count().unwrap_or(0));
+    // Cost weights per artefact: 1 + rules that can apply to it, plus the raw
+    // record parse where rules need it. Most Sigma rules target event logs, so
+    // a few hundred thousand EVTX rows can outweigh millions of MFT rows.
+    let per_art = compiled.rules_per_artefact();
+    let weight = |art: &str| -> u64 {
+        let l = art.to_ascii_lowercase();
+        let raw = if needs_raw && (l == "evtx" || l == "browserhistory") { 25 } else { 0 };
+        1 + *per_art.get(&l).unwrap_or(&0) as u64 + raw
+    };
+    if let Ok(counts) = store.counts_by_artefact() {
+        fx_core::progress::set_work_total(counts.iter().map(|(a, n)| n * weight(a)).sum());
+    }
+    let mut wcache: std::collections::HashMap<fx_core::ArtefactKind, u64> = std::collections::HashMap::new();
+    let mut work: u64 = 0;
     let mut tick: u64 = 0;
     let mut stopped = false;
     let scan = store.for_each_event(needs_raw, |ev| {
         // Progress + cancel, checked every 4096 events to keep the hot loop cheap.
         tick += 1;
+        work += *wcache.entry(ev.artefact).or_insert_with(|| weight(&format!("{:?}", ev.artefact)));
         if tick & 4095 == 0 {
             fx_core::progress::add_scanned(4096);
+            fx_core::progress::add_work(work);
+            work = 0;
             stopped = fx_core::progress::cancelled();
         }
         if stopped {
@@ -265,6 +283,7 @@ fn scan_events(store: &CaseStore, ev_rules: &[EventRule], engine: DetectionEngin
         }
     });
     fx_core::progress::add_scanned(tick & 4095);
+    fx_core::progress::add_work(work);
     for (i, n) in remnant_hits.iter().enumerate() {
         if *n > 0 {
             if let Some(d) = detections.get_mut(i) {
@@ -325,6 +344,7 @@ pub fn run_sigma(store: &CaseStore, folder: &str, load: &sigma::SigmaLoad) -> Si
         }
     }
     dets.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.timestamp.cmp(&b.timestamp)));
+    fx_core::progress::set_phase(&format!("Saving {} Sigma findings", dets.len()));
     if let Err(e) = store.replace_sigma_detections(&dets) {
         errors.push(format!("persist Sigma findings: {e}"));
     }

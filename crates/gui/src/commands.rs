@@ -334,18 +334,14 @@ pub async fn run_hunt(
     };
     fx_core::progress::reset();
     fx_core::progress::set_phase("Running detections");
-    let _ = with_progress(&app, || fx_hunt::run(store, &rules));
-    // Auto-triage: every event a finding points at starts as "unconfirmed",
-    // unless the analyst has already set a state for it. This gives a worklist
-    // to promote/dismiss through.
-    if let Ok(dets) = store.detections() {
-        for d in &dets {
-            for eid in d.event_ids.split(',').filter(|s| !s.trim().is_empty()) {
-                let _ = store.set_triage_if_absent(eid.trim(), "unconfirmed", None);
-            }
-        }
-    }
-    reapply_allowlist(store);
+    let _ = with_progress(&app, || {
+        let r = fx_hunt::run(store, &rules);
+        // Auto-triage (every event a finding points at starts as
+        // "unconfirmed") and the allow-list, in bulk SQL.
+        fx_core::progress::set_phase("Marking findings for review");
+        reapply_allowlist(store);
+        r
+    });
     read_detections(store)
 }
 
@@ -958,32 +954,30 @@ pub async fn sigma_preview(config: SigmaConfig) -> Result<fx_hunt::sigma::SigmaL
 /// config and results are saved with the case.
 #[tauri::command]
 pub async fn sigma_hunt(app: tauri::AppHandle, state: tauri::State<'_, AppState>, config: SigmaConfig) -> Result<fx_hunt::SigmaRunReport, String> {
-    let load = fx_hunt::sigma::load_dir(std::path::Path::new(&config.folder), &config.filter);
-    if let Some(e) = &load.folder_error {
-        return Err(e.clone());
-    }
-    if load.loaded == 0 {
-        return Err(format!(
-            "No Sigma rules could be loaded from that folder ({} files, {} filtered out by level/status, {} skipped). Check it's a Sigma rules folder, e.g. rules\\windows from a SigmaHQ release.",
-            load.files_seen,
-            load.filtered,
-            load.skipped_by_reason.values().sum::<usize>()
-        ));
-    }
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
     fx_core::progress::reset();
-    fx_core::progress::set_phase(&format!("Running {} Sigma rules", load.loaded));
-    let report = with_progress(&app, || fx_hunt::run_sigma(store, &config.folder, &load));
-    // Sigma findings start as "unconfirmed", like rule findings.
-    if let Ok(dets) = store.detections() {
-        for d in dets.iter().filter(|d| d.engine == "sigma") {
-            for eid in d.event_ids.split(',').filter(|s| !s.trim().is_empty()) {
-                let _ = store.set_triage_if_absent(eid.trim(), "unconfirmed", None);
-            }
+    fx_core::progress::set_phase("Loading Sigma rules");
+    let report = with_progress(&app, || -> Result<fx_hunt::SigmaRunReport, String> {
+        let load = fx_hunt::sigma::load_dir(std::path::Path::new(&config.folder), &config.filter);
+        if let Some(e) = &load.folder_error {
+            return Err(e.clone());
         }
-    }
-    reapply_allowlist(store);
+        if load.loaded == 0 {
+            return Err(format!(
+                "No Sigma rules could be loaded from that folder ({} files, {} filtered out by level/status, {} skipped). Check it's a Sigma rules folder, e.g. rules\\windows from a SigmaHQ release.",
+                load.files_seen,
+                load.filtered,
+                load.skipped_by_reason.values().sum::<usize>()
+            ));
+        }
+        fx_core::progress::set_phase(&format!("Running {} Sigma rules", load.loaded));
+        let report = fx_hunt::run_sigma(store, &config.folder, &load);
+        // Sigma findings start as "unconfirmed", like rule findings (bulk, with the allow-list).
+        fx_core::progress::set_phase("Marking findings for review");
+        reapply_allowlist(store);
+        Ok(report)
+    })?;
     if let Ok(j) = serde_json::to_string(&config) {
         let _ = store.kv_set("sigma.config", &j);
     }

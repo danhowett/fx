@@ -287,7 +287,10 @@ function sample(cmd, args) {
       computer_name: { value: "WKSTN-07", event_id: ev(1), source: "C/Windows/System32/config/SYSTEM" },
       domain: { value: "corp.example", event_id: ev(1), source: "C/Windows/System32/config/SYSTEM" },
       os: { value: { product: "Windows 11 Pro", version: "23H2", build: "22631", ubr: 4317, edition: "Professional", install_date: "2024-03-02T09:14:00Z", registered_owner: "IT" }, event_id: ev(2), source: "C/Windows/System32/config/SOFTWARE" },
-      timezone: { value: { name: "GMT Standard Time", utc_offset: "UTC+00:00", active_utc_offset: "UTC+00:00" }, event_id: ev(3), source: "C/Windows/System32/config/SYSTEM" },
+      timezone: { value: { name: "GMT Standard Time", utc_offset: "UTC+00:00", active_utc_offset: "UTC+00:00",
+        rule: { name: "GMT Standard Time", bias: 0, standard_bias: 0, daylight_bias: -60,
+          standard_start: { year: 0, month: 10, day_of_week: 0, day: 5, hour: 2, minute: 0 },
+          daylight_start: { year: 0, month: 3, day_of_week: 0, day: 5, hour: 1, minute: 0 } } }, event_id: ev(3), source: "C/Windows/System32/config/SYSTEM" },
       last_shutdown: { value: "2026-02-10T18:02:11Z", event_id: ev(4), source: "C/Windows/System32/config/SYSTEM" },
       interfaces: [
         { value: { ip: "10.20.4.37", dhcp: true, subnet_mask: "255.255.255.0", gateway: "10.20.4.1", dns: "10.20.0.10", dhcp_server: "10.20.0.5", lease_obtained: "2026-02-10T08:01:00Z" }, event_id: ev(5), source: "C/Windows/System32/config/SYSTEM" },

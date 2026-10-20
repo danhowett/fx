@@ -727,6 +727,19 @@ impl<'a> GatedRules<'a> {
         GatedRules { rules, gates, cache: Default::default(), scratch: Vec::new() }
     }
 
+    /// How many rules could apply to each artefact (lower-case name), from the
+    /// same static gates `matching` uses. Drives cost-weighted progress.
+    pub fn rules_per_artefact(&self) -> std::collections::HashMap<String, usize> {
+        ALL_ARTEFACTS
+            .iter()
+            .map(|a| {
+                let l = a.to_ascii_lowercase();
+                let n = self.gates.iter().filter(|g| g.arts.as_ref().map_or(true, |s| s.contains(&l))).count();
+                (l, n)
+            })
+            .collect()
+    }
+
     /// Indices of rules matching `ev` (same results as `CompiledRules` over
     /// the whole set).
     pub fn matching(&mut self, ev: &Event, hit: &mut Vec<bool>, out: &mut Vec<usize>) {

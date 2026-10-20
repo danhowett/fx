@@ -29,7 +29,7 @@ default-members = [
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.77"
-license = "proprietary"
+license = "LicenseRef-fx-Source-Available-1.0"
 
 # Shared dependency versions. Pin these in one place so every crate agrees.
 [workspace.dependencies]

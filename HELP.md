@@ -137,7 +137,7 @@ rule per file** (with a count). Corroborate with on-disk evidence.
 
 | Artefact | What it surfaces |
 |----------|------------------|
-| `setupapi.dev.log` | the **first time** each USB storage device, portable device or other USB device was connected, with vendor, product and serial. Times are the host's local time, recorded as written |
+| `setupapi.dev.log` | the **first time** each USB storage device, portable device or other USB device was connected, with vendor, product and serial. The log is in the host's local time; fx converts it to UTC at ingest (see *Time zones*) |
 
 ### Remote-access tools
 
@@ -149,7 +149,7 @@ surviving after the tool is uninstalled.
 |----------|------------------|
 | AnyDesk `connection_trace.txt` | every incoming / outgoing / **rejected** session: time, auth type, remote AnyDesk ID |
 | AnyDesk `ad.trace` / `ad_svc.trace` | session requests, logins **with source IP**, accept/reject, file transfers, remote OS / client ID |
-| TeamViewer `Connections_incoming.txt` / `Connections.txt` | incoming and outgoing sessions: remote ID and name, start/end (duration), local user, connection type. Times are as logged (host local time) |
+| TeamViewer `Connections_incoming.txt` / `Connections.txt` | incoming and outgoing sessions: remote ID and name, start/end (duration), local user, connection type. Logged in host local time; fx converts the start time to UTC at ingest (see *Time zones*) |
 | ScreenConnect (Application event log) | client session connects/disconnects, **file transfers** and **commands run** through the tool |
 
 ### Microsoft Defender
@@ -174,7 +174,27 @@ collection tool and evidence volume.
 
 Every source file is **SHA-256 hashed at ingest** for chain of custody, and the
 per-file **ingest log** records whether each parsed, was unsupported, or failed
-(with the failure reason).
+(with the failure reason). A file that is **byte-identical** (same SHA-256) to
+one already parsed — a second copy of an event log or hive somewhere else in the
+collection — is hashed and recorded as a **duplicate copy** but not parsed
+again, so its events aren't doubled on the timeline or in the findings.
+
+### Time zones
+
+Everything is stored, filtered and exported in **UTC**. Most artefacts record
+UTC; the few that log the host's **local time** (setupapi.dev.log, TeamViewer
+connection logs) are converted to UTC at ingest using the host's own Windows
+time-zone rule from the SYSTEM hive (`TimeZoneInformation`: bias plus the
+daylight-saving start and end rules), so they line up with everything else.
+The raw record keeps the original value (`local_time_as_logged`), the offset
+applied and the time-zone name. If the collection has no SYSTEM hive, these
+times are left as logged and their raw record says so. (The repeated hour
+when clocks go back is ambiguous in these logs; fx treats it as daylight time.)
+
+The **Times** control in the status bar switches the *display* between UTC and
+the **analysed host's local time** (daylight saving applied per date). The
+time column header shows which is in use, and the From / To filters follow the
+display. Stored data, exports and the report stay in UTC.
 
 ## What it hunts for
 
@@ -223,6 +243,10 @@ In **IOC hunt → Sigma rules**, hover over a rule in the results and click
 Disabled rules are listed under the rule options on the left, where **Enable**
 puts a rule back for the next Sigma hunt. The disabled list is kept on this
 machine and applies to every case.
+
+If the chosen folder contains the same Sigma rule more than once (overlapping
+folders, or a copy of a release inside another), each rule id is loaded once
+and the preview reports how many duplicates were ignored.
 
 ## The workflow
 
@@ -343,8 +367,11 @@ height, pretty-printed and colour-coded, with **A− / A+** for text size,
 
 ## Themes
 
-Three themes via the toolbar: **Daybreak** (light), **Midnight** (dark), and
-**Slate** (a mid-tone grey-blue between the two).
+Four themes via the theme button in the toolbar (click to cycle): **Daybreak**
+(light), **Slate** (a mid-tone grey-blue), **Midnight** (dark) and **High
+contrast** (black background, white text, bright separated colours, visible
+borders and a yellow focus ring; text contrast meets WCAG AAA). fx remembers the
+choice on this machine.
 
 ---
 

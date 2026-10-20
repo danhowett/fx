@@ -120,6 +120,42 @@
     --focus:     #4cc2e8;   /* sky — distinct from every category hue */
   }
 
+  /* ── High contrast: pure black ground, white text, bright fully separated
+     accents and visible borders. Body and secondary text exceed WCAG AAA
+     (7:1); yellow focus ring as in Windows high-contrast themes. */
+  html[data-theme="contrast"] {
+    --bg:        #000000;
+    --surface:   #000000;
+    --surface-2: #1c1c1c;
+    --line:      #9a9a9a;
+    --line-soft: #5c5c5c;
+    --ink:       #ffffff;
+    --ink-dim:   #ececec;
+    --ink-faint: #c8c8c8;
+
+    --cat-execution:   #6fb8ff;
+    --cat-persistence: #ff8ad4;
+    --cat-filesystem:  #3dffbe;
+    --cat-network:     #ffad42;
+    --cat-logon:       #c6ff4f;
+    --cat-other:       #c8c8c8;
+
+    --alert:     #ff5f5f;
+    --alert-dim: #5c0000;
+    --flag:      #ffd400;
+
+    --focus:     #ffff00;
+  }
+  html[data-theme="contrast"] :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  html[data-theme="contrast"] .evrow.sel,
+  html[data-theme="contrast"] .hitrow.sel { box-shadow: inset 0 0 0 2px var(--focus); }
+  html[data-theme="contrast"] .facet.active { outline: 1px solid var(--focus); }
+  html[data-theme="contrast"] .topbtn,
+  html[data-theme="contrast"] .btn-primary { border-width: 1px; border-style: solid; border-color: var(--ink-faint); }
+  html[data-theme="contrast"] .btn-primary { color: #000; background: var(--focus); }
+  html[data-theme="contrast"] .linkbtn,
+  html[data-theme="contrast"] .fc-sup { text-decoration: underline; }
+
   @media (prefers-reduced-motion: no-preference) {
     .app { animation: settle .28s ease-out; }
     @keyframes settle { from { opacity: 0; } to { opacity: 1; } }
@@ -527,6 +563,8 @@
   .sg-disabled summary { cursor: pointer; color: var(--focus); }
   .sg-dis-row { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--line); color: var(--ink); }
   .sg-dis-note { font-size: 11px; color: var(--ink-faint); margin-top: 6px; }
+  .tzbtn { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+  .tzbtn:hover { color: var(--ink); }
   /* hover tip for rail entries (artefact descriptions) */
   .rail-tip {
     position: fixed; z-index: 900; max-width: 340px; padding: 8px 11px; border-radius: 6px;
@@ -1061,7 +1099,7 @@
     <div class="idf-bar" id="idfBar" hidden></div>
     <div class="minitl" id="miniTl" hidden></div>
     <div class="grid-head">
-      <span>Time (UTC)</span><span>Kind</span><span>Artefact</span><span>User</span><span>Event</span>
+      <span id="colTime">Time (UTC)</span><span>Kind</span><span>Artefact</span><span>User</span><span>Event</span>
     </div>
     <div class="viewport" id="viewport">
       <div class="spacer-top" id="spTop"></div>

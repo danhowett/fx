@@ -226,6 +226,16 @@ impl CaseStore {
         Ok(a.evidence_id)
     }
 
+    /// SHA-256 recorded for a registered evidence file.
+    pub fn evidence_sha256(&self, evidence_id: &Uuid) -> Result<Option<String>, StoreError> {
+        let mut stmt = self.conn.prepare("SELECT sha256 FROM evidence WHERE evidence_id = CAST(? AS UUID)")?;
+        let mut rows = stmt.query(params![evidence_id.to_string()])?;
+        Ok(match rows.next()? {
+            Some(r) => Some(r.get(0)?),
+            None => None,
+        })
+    }
+
     /// Record an unclassified file (also hashed — it's still evidence).
     pub fn register_unclassified(&self, u: &UnclassifiedFile) -> Result<(), StoreError> {
         let rec = hash_unclassified(u)?;

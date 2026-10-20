@@ -19,6 +19,8 @@ struct State {
     events: AtomicU64,
     scanned: AtomicU64,
     scan_total: AtomicU64,
+    work_done: AtomicU64,
+    work_total: AtomicU64,
     warnings: AtomicU64,
     failed: AtomicU64,
     cancel: AtomicBool,
@@ -41,6 +43,10 @@ pub struct Snapshot {
     pub events: u64,
     pub scanned: u64,
     pub scan_total: u64,
+    /// Cost-weighted scan progress (rows × rules that can apply to them), so
+    /// the bar tracks real work rather than raw row count.
+    pub work_done: u64,
+    pub work_total: u64,
     pub warnings: u64,
     pub failed: u64,
     pub cancelled: bool,
@@ -51,7 +57,7 @@ pub fn reset() {
     let s = st();
     *s.phase.lock().unwrap() = String::new();
     *s.current.lock().unwrap() = String::new();
-    for a in [&s.files_done, &s.files_total, &s.bytes_done, &s.bytes_total, &s.events, &s.scanned, &s.scan_total, &s.warnings, &s.failed] {
+    for a in [&s.files_done, &s.files_total, &s.bytes_done, &s.bytes_total, &s.events, &s.scanned, &s.scan_total, &s.work_done, &s.work_total, &s.warnings, &s.failed] {
         a.store(0, Relaxed);
     }
     s.cancel.store(false, Relaxed);
@@ -85,6 +91,16 @@ pub fn add_events(n: u64) {
 pub fn start_scan(total: u64) {
     st().scanned.store(0, Relaxed);
     st().scan_total.store(total, Relaxed);
+    st().work_done.store(0, Relaxed);
+    st().work_total.store(0, Relaxed);
+}
+/// Set the cost-weighted total for the current scan (see `Snapshot::work_total`).
+pub fn set_work_total(total: u64) {
+    st().work_total.store(total, Relaxed);
+}
+#[inline]
+pub fn add_work(n: u64) {
+    st().work_done.fetch_add(n, Relaxed);
 }
 #[inline]
 pub fn add_scanned(n: u64) {
@@ -110,6 +126,8 @@ pub fn snapshot() -> Snapshot {
         events: s.events.load(Relaxed),
         scanned: s.scanned.load(Relaxed),
         scan_total: s.scan_total.load(Relaxed),
+        work_done: s.work_done.load(Relaxed),
+        work_total: s.work_total.load(Relaxed),
         warnings: s.warnings.load(Relaxed),
         failed: s.failed.load(Relaxed),
         cancelled: s.cancel.load(Relaxed),

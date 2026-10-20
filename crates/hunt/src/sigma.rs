@@ -71,6 +71,11 @@ pub struct SigmaLoad {
     pub filtered: usize,
     /// Rules that would load but the analyst disabled.
     pub disabled: usize,
+    /// The same Sigma rule (by id) seen again, e.g. overlapping folders or a
+    /// copy of the release inside the release. Loaded once.
+    pub duplicates: usize,
+    #[serde(skip)]
+    seen_ids: std::collections::HashSet<String>,
     /// Count of skipped rules per reason (for the summary line).
     pub skipped_by_reason: BTreeMap<String, usize>,
     /// First few skipped rules per reason, so the analyst can see examples.
@@ -204,6 +209,11 @@ pub fn load_text(text: &str, file: &str, filter: &SigmaFilter, out: &mut SigmaLo
             Ok((rule, meta, source)) => {
                 if filter.disabled.iter().any(|d| d == &rule.id || (!meta.sigma_id.is_empty() && d == &meta.sigma_id)) {
                     out.disabled += 1;
+                    continue;
+                }
+                let key = if meta.sigma_id.is_empty() { rule.id.clone() } else { meta.sigma_id.to_ascii_lowercase() };
+                if !out.seen_ids.insert(key) {
+                    out.duplicates += 1;
                     continue;
                 }
                 *out.loaded_by_source.entry(source).or_insert(0) += 1;

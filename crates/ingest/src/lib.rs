@@ -34,6 +34,10 @@ pub enum ArtefactStatus {
     Parsed,
     Unsupported,
     Failed(String),
+    /// Byte-identical (same SHA-256) to a file already parsed in this ingest;
+    /// hashed and recorded as evidence, but not parsed again, so its events
+    /// aren't duplicated on the timeline. Holds the original's path.
+    Duplicate(String),
 }
 
 impl ArtefactStatus {
@@ -42,11 +46,13 @@ impl ArtefactStatus {
             ArtefactStatus::Parsed => "parsed",
             ArtefactStatus::Unsupported => "unsupported",
             ArtefactStatus::Failed(_) => "failed",
+            ArtefactStatus::Duplicate(_) => "duplicate",
         }
     }
     fn detail(&self) -> Option<String> {
         match self {
             ArtefactStatus::Failed(m) => Some(m.clone()),
+            ArtefactStatus::Duplicate(orig) => Some(format!("identical (SHA-256) to {orig}; not parsed again")),
             _ => None,
         }
     }
@@ -95,15 +101,29 @@ pub fn ingest_into_store(root: &Path, registry: &ParserRegistry, store: &CaseSto
         .collect();
     progress::set_totals(scan.artefacts.len() as u64, sizes.iter().sum());
     progress::set_phase("Hashing and parsing artefacts");
+    let mut seen: std::collections::HashMap<(String, String), String> = std::collections::HashMap::new();
     for (artefact, size) in scan.artefacts.iter().zip(&sizes) {
         if progress::cancelled() {
             report.cancelled = true;
             break;
         }
         progress::set_current(&format!("{:?}|{}|{}", artefact.artefact, artefact.source_path, size));
-        let r = ingest_one(artefact, registry, store, &mut report.total_events);
+        let r = ingest_one(artefact, registry, store, &mut report.total_events, &mut seen);
         progress::file_done(*size, r.warnings.len() as u64, matches!(r.status, ArtefactStatus::Failed(_)));
         report.artefacts.push(r);
+    }
+
+    // Artefacts that log host-local time go onto the UTC timeline using the
+    // host's own time-zone rule (read from the SYSTEM hive during this ingest).
+    progress::set_phase("Converting local times to UTC");
+    match store.host_tz_rule() {
+        Ok(Some(rule)) => match store.convert_local_times(&rule) {
+            Ok(n) if n > 0 => tracing::info!("converted {n} local-time events to UTC ({:?})", rule.name),
+            Ok(_) => {}
+            Err(e) => report.scan_errors.push(format!("local time conversion: {e}")),
+        },
+        Ok(None) => tracing::info!("host time zone unknown: local-time artefacts left as logged"),
+        Err(e) => report.scan_errors.push(format!("read host time zone: {e}")),
     }
 
     // Indexes are cheaper to build once, after the bulk load.
@@ -120,6 +140,7 @@ fn ingest_one(
     registry: &ParserRegistry,
     store: &CaseStore,
     total: &mut u64,
+    seen: &mut std::collections::HashMap<(String, String), String>,
 ) -> ArtefactReport {
     // Register + hash BEFORE parsing, so even if the parser fails the evidence
     // (with its hash) is on record.
@@ -132,6 +153,26 @@ fn ingest_one(
             events_emitted: 0,
             warnings: Vec::new(),
         };
+    }
+
+    // Same bytes, same artefact type as a file already parsed -> don't parse
+    // again (collections often hold a second copy of an event log or hive).
+    if let Ok(Some(sha)) = store.evidence_sha256(&artefact.evidence_id) {
+        let key = (sha, format!("{:?}", artefact.artefact));
+        if let Some(orig) = seen.get(&key) {
+            let r = ArtefactReport {
+                source_path: artefact.source_path.clone(),
+                artefact: artefact.artefact,
+                status: ArtefactStatus::Duplicate(orig.clone()),
+                records_read: 0,
+                events_emitted: 0,
+                warnings: Vec::new(),
+            };
+            let _ = store.record_ingest(&r.source_path, &format!("{:?}", r.artefact), r.status.label(), r.status.detail().as_deref(), 0, 0, 0);
+            tracing::info!("duplicate [{:?}] {} (same as {orig})", artefact.artefact, artefact.source_path);
+            return r;
+        }
+        seen.insert(key, artefact.source_path.clone());
     }
 
     let mut writer = store.event_writer();

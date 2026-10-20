@@ -1206,7 +1206,16 @@ impl Extractor for HostInfo {
                 emit("host.timezone", lastwrite, TimestampKind::Modified, Some("TimeZoneKeyName"), Principal::default(),
                     format!("Time zone: {}{}", name.clone().unwrap_or_default(), bias.map(|b| format!(" ({})", off(b))).unwrap_or_default()),
                     json!({"fact": "timezone", "name": name, "bias_minutes": bias, "active_bias_minutes": active,
-                           "utc_offset": bias.map(off), "active_utc_offset": active.map(off), "control_set": cs}));
+                           "utc_offset": bias.map(off), "active_utc_offset": active.map(off), "control_set": cs,
+                           // Full Windows DST rule, used to convert local-time logs to UTC.
+                           "rule": fx_core::tz::TzRule {
+                               name: name.clone(),
+                               bias: bias.unwrap_or(0),
+                               standard_bias: cell_u64(key, "StandardBias").map(|b| b as u32 as i32).unwrap_or(0),
+                               daylight_bias: cell_u64(key, "DaylightBias").map(|b| b as u32 as i32).unwrap_or(0),
+                               standard_start: cell_bytes(key, "StandardStart").and_then(|b| fx_core::tz::Transition::from_systemtime(&b)),
+                               daylight_start: cell_bytes(key, "DaylightStart").and_then(|b| fx_core::tz::Transition::from_systemtime(&b)),
+                           }}));
             }
         } else if l.ends_with(r"\control\windows") {
             if let Some(b) = cell_bytes(key, "ShutdownTime") {

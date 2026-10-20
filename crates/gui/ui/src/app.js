@@ -104,6 +104,8 @@ async function renderCase(overview, label) {
   state.triage = (await backend.listTriage()) || [];
   try { state.labels = (await backend.listLabels()) || []; } catch (e) { state.labels = []; }
   try { state.host = await backend.hostInfo(); } catch (e) { state.host = null; }
+  state.tzMode = loadPref("fx.tz", "utc");
+  applyTzLabels();
   renderHostChip();
   state.ioc = null;
   state.sigma = undefined;
@@ -133,10 +135,10 @@ function hideOverlay() { const o = el("overlay"); if (o) o.classList.remove("sho
 // ── Live progress (ingest / detections) ─────────────────────────────────────
 // The Rust side emits "fx-progress" snapshots while a long job runs; the
 // overlay turns into a progress panel for the duration of that job.
-const prog = { on: false, t0: 0, timer: null, last: null, rate: null, kind: "" };
+const prog = { on: false, t0: 0, timer: null, last: null, rate: null, kind: "", phase: "", phaseT0: 0 };
 
 function startProgress(kind) {
-  prog.on = true; prog.kind = kind; prog.t0 = Date.now(); prog.last = null; prog.rate = null;
+  prog.on = true; prog.kind = kind; prog.t0 = Date.now(); prog.last = null; prog.rate = null; prog.phase = ""; prog.phaseT0 = prog.t0;
   const box = document.querySelector("#overlay .overlay-box"); if (box) box.classList.add("with-prog");
   const p = el("ovProg"); if (p) p.hidden = false;
   const c = el("ovpCancel"); if (c) { c.disabled = false; c.textContent = "Cancel"; }
@@ -177,7 +179,7 @@ function renderProgress(s) {
   // Fraction done: bytes-weighted while parsing (with a little weight on file
   // count so a run of tiny files still moves the bar), events while scanning.
   let frac = null;
-  if (s.scan_total > 0) frac = Math.min(1, s.scanned / s.scan_total);
+  if (s.scan_total > 0) frac = s.work_total > 0 ? Math.min(1, s.work_done / s.work_total) : Math.min(1, s.scanned / s.scan_total);
   else if (s.files_total > 0) {
     const fb = s.bytes_total > 0 ? s.bytes_done / s.bytes_total : 0;
     frac = Math.min(1, 0.9 * fb + 0.1 * (s.files_done / s.files_total));
@@ -186,8 +188,14 @@ function renderProgress(s) {
   const phase = s.phase && s.phase !== title ? s.phase : "";
   el("ovpPhase").textContent = phase + (s.cancelled ? (phase ? " (cancelling…)" : "Cancelling…") : "");
   const bar = el("ovpFill").parentElement;
-  if (frac === null || /indexes|Opening|Scanning/.test(s.phase || "")) {
-    bar.classList.add("indet"); el("ovpPct").textContent = /indexes/.test(s.phase || "") ? "Almost done" : "";
+  // Steps with no measurable progress (loading rules, saving findings, bulk
+  // triage, correlation SQL, index build) show a moving bar and no ETA.
+  const indet = frac === null || /indexes|Opening|Scanning|Loading|Saving|Marking|correlation/i.test(s.phase || "");
+  if (s.phase !== prog.phase) { prog.phase = s.phase; prog.rate = null; prog.phaseT0 = Date.now(); }
+  if (indet) {
+    frac = null;
+    bar.classList.add("indet");
+    el("ovpPct").textContent = /indexes|Saving|Marking/i.test(s.phase || "") ? "Finishing up…" : "";
   } else {
     bar.classList.remove("indet");
     el("ovpFill").style.width = (frac * 100).toFixed(1) + "%";
@@ -195,8 +203,9 @@ function renderProgress(s) {
   }
   // ETA from a smoothed rate; only once there's enough signal to be honest.
   let eta = "";
-  if (frac !== null && frac > 0.02 && frac < 1 && elapsed > 5) {
-    const r = frac / elapsed;
+  const phaseElapsed = (Date.now() - (prog.phaseT0 || prog.t0)) / 1000;
+  if (frac !== null && frac > 0.02 && frac < 0.995 && phaseElapsed > 5) {
+    const r = frac / phaseElapsed;
     prog.rate = prog.rate ? prog.rate * 0.8 + r * 0.2 : r;
     eta = " · about " + fmtDur((1 - frac) / prog.rate) + " left";
   }
@@ -297,6 +306,7 @@ async function renderIngestLog() {
     <span><b style="color:#2e9e5b">${fmt(by("parsed"))}</b> parsed</span>
     <span><b style="color:#c99a2e">${fmt(by("unsupported"))}</b> unsupported</span>
     <span><b style="color:var(--alert)">${fmt(by("failed"))}</b> failed</span>
+    ${by("duplicate") ? `<span title="Byte-identical (same SHA-256) to a file already parsed: hashed and kept as evidence, not parsed again so events aren't doubled"><b>${fmt(by("duplicate"))}</b> duplicate copies</span>` : ""}
     <span><b>${fmt(totalEvents)}</b> events produced</span>
     <span title="Records inside otherwise-parsed files that were malformed or truncated and skipped"><b style="color:#c99a2e">${fmt(totalWarn)}</b> record warnings</span>
   </div>`;
@@ -315,7 +325,7 @@ async function renderIngestLog() {
     g.records += r.records_read || 0;
     g.warn += r.warning_count || 0;
   }
-  const statusRank = { failed: 0, unsupported: 1, parsed: 2 };
+  const statusRank = { failed: 0, unsupported: 1, duplicate: 2, parsed: 3 };
   const groupList = [...groups.values()].sort((a, b) =>
     (statusRank[a.status] ?? 3) - (statusRank[b.status] ?? 3) ||
     b.items.length - a.items.length ||
@@ -603,6 +613,7 @@ function wireTheme() {
     ["daybreak", "☀ Daybreak"],
     ["slate", "◑ Slate"],
     ["midnight", "◐ Midnight"],
+    ["contrast", "◼ High contrast"],
   ];
   const btn = el("themeBtn");
   if (!btn) return;
@@ -1359,7 +1370,7 @@ async function sigmaPreview() {
     if (p.folder_error) { box.innerHTML = `<span class="warn">${escapeHtml(p.folder_error)}</span>`; go.disabled = true; return; }
     const skipped = Object.values(p.skipped_by_reason || {}).reduce((a, b) => a + b, 0);
     box.innerHTML = p.loaded
-      ? `<b>${fmt(p.loaded)} rule${p.loaded === 1 ? "" : "s"} ready</b> from ${fmt(p.files_seen)} files · ${fmt(p.filtered)} filtered by level/status${p.disabled ? ` · ${fmt(p.disabled)} disabled` : ""}${skipped ? ` · <span class="warn" title="${escapeHtml(Object.entries(p.skipped_by_reason).map(([r, n]) => n + " × " + r).join("\n"))}">${fmt(skipped)} can't run on triage data</span>` : ""}`
+      ? `<b>${fmt(p.loaded)} rule${p.loaded === 1 ? "" : "s"} ready</b> from ${fmt(p.files_seen)} files · ${fmt(p.filtered)} filtered by level/status${p.disabled ? ` · ${fmt(p.disabled)} disabled` : ""}${p.duplicates ? ` · ${fmt(p.duplicates)} duplicate rule${p.duplicates === 1 ? "" : "s"} ignored` : ""}${skipped ? ` · <span class="warn" title="${escapeHtml(Object.entries(p.skipped_by_reason).map(([r, n]) => n + " × " + r).join("\n"))}">${fmt(skipped)} can't run on triage data</span>` : ""}`
       : `<span class="warn">No rules to run from this folder${p.files_seen ? ` (${fmt(p.files_seen)} files, ${fmt(p.filtered)} filtered, ${fmt(skipped)} unsupported)` : " — is it a Sigma rules folder?"}.</span>`;
     go.disabled = !p.loaded;
     go.textContent = p.loaded ? `Run Sigma hunt (${fmt(p.loaded)})` : "Run Sigma hunt";
@@ -1578,13 +1589,16 @@ function chooseExportStates(format, counts) {
 // Convert stored RFC3339 (UTC) <-> the datetime-local input value.
 function toLocalInput(rfc) {
   if (!rfc) return "";
-  // rfc like "2020-06-30T14:24:08Z" or "...T14:24:08" — datetime-local wants "YYYY-MM-DDTHH:MM:SS"
-  return String(rfc).replace("Z", "").slice(0, 19);
+  // rfc like "2020-06-30T14:24:08Z" or "...T14:24:08" — datetime-local wants
+  // "YYYY-MM-DDTHH:MM:SS", in the display zone (UTC unless host-local is on).
+  return displayIso(rfc).slice(0, 19);
 }
 function fromLocalInput(v) {
   if (!v) return null;
-  // Treat the input as UTC (case timestamps are UTC) and append Z.
-  return v.length === 16 ? v + ":00Z" : v + "Z";
+  const iso = v.length === 16 ? v + ":00Z" : v + "Z";
+  if (tzMode() !== "host") return iso;
+  const ms = Date.parse(iso);
+  return isNaN(ms) ? iso : new Date(hostToUtcMs(ms)).toISOString().slice(0, 19) + "Z";
 }
 
 function activeFilterChips() {
@@ -2399,9 +2413,83 @@ function renderStatus() {
     <span class="sep">│</span>
     <span>${fmt(state.rows.length)} / ${fmt(state.overview ? state.overview.total_events : 0)} events</span>
     <span class="sep">│</span>
-    <span>UTC</span>
+    <button class="tzbtn" id="tzBtn" title="${tzRule() ? "Show times in UTC or in the analysed host's local time (with its daylight-saving rules). Stored times are always UTC." : "Host time zone unknown (no SYSTEM hive in this case): times shown in UTC"}">${tzLabel()}</button>
     <span class="sep">│</span>
     <span>timeline order: ascending</span>`;
+  const b = el("tzBtn");
+  if (b) b.onclick = () => {
+    if (!tzRule()) { toast("Host time zone unknown in this case: times stay in UTC"); return; }
+    state.tzMode = tzMode() === "host" ? "utc" : "host";
+    savePref("fx.tz", state.tzMode);
+    applyTzLabels();
+    renderToolbar(); renderStatus(); refresh();
+    if (state.selectedId) select(state.selectedId);
+  };
+}
+
+// ── Display time zone ────────────────────────────────────────────────────────
+// Everything is stored and filtered in UTC. Optionally, times are *shown* in
+// the analysed host's local time, using the host's own Windows DST rule
+// (TimeZoneInformation), mirroring fx_core::tz on the Rust side.
+function tzRule() {
+  const t = state.host && state.host.timezone && state.host.timezone.value;
+  return t && t.rule ? t.rule : null;
+}
+function tzMode() { return state.tzMode === "host" && tzRule() ? "host" : "utc"; }
+function tzTransitionMs(t, y) {
+  if (!t || !t.month) return null;
+  let d;
+  if (t.year) d = t.day;
+  else {
+    const firstDow = new Date(Date.UTC(y, t.month - 1, 1)).getUTCDay();
+    d = 1 + ((7 + (t.day_of_week % 7) - firstDow) % 7) + 7 * (Math.min(Math.max(t.day, 1), 5) - 1);
+    const dim = new Date(Date.UTC(y, t.month, 0)).getUTCDate();
+    while (d > dim) d -= 7;
+  }
+  return Date.UTC(y, t.month - 1, d, t.hour, t.minute);
+}
+function tzIsDstLocal(r, localMs) {
+  if (!r.standard_start || !r.daylight_start || !r.standard_start.month || !r.daylight_start.month) return false;
+  const y = new Date(localMs).getUTCFullYear();
+  const ds = tzTransitionMs(r.daylight_start, y), ss = tzTransitionMs(r.standard_start, y);
+  if (ds == null || ss == null) return false;
+  return ds < ss ? localMs >= ds && localMs < ss : !(localMs >= ss && localMs < ds);
+}
+// DaylightStart is a standard-time wall clock and StandardStart a daylight-
+// time one, so test each boundary in its own clock.
+function utcToHostMs(ms) {
+  const r = tzRule();
+  const stdL = ms - (r.bias + r.standard_bias) * 60000;
+  const dstL = ms - (r.bias + r.daylight_bias) * 60000;
+  if (!r.standard_start || !r.daylight_start || !r.standard_start.month || !r.daylight_start.month) return stdL;
+  const y = new Date(stdL).getUTCFullYear();
+  const ds = tzTransitionMs(r.daylight_start, y), ss = tzTransitionMs(r.standard_start, y);
+  if (ds == null || ss == null) return stdL;
+  const dst = ds < ss ? stdL >= ds && dstL < ss : !(dstL >= ss && stdL < ds);
+  return dst ? dstL : stdL;
+}
+function hostToUtcMs(localMs) {
+  const r = tzRule();
+  return localMs + (r.bias + (tzIsDstLocal(r, localMs) ? r.daylight_bias : r.standard_bias)) * 60000;
+}
+// Stored UTC ISO -> ISO wall clock in the display zone (no "Z").
+function displayIso(iso) {
+  const s = String(iso || "");
+  if (tzMode() !== "host" || !s) return s.replace("Z", "");
+  const base = s.replace(" ", "T").replace("Z", "");
+  const ms = Date.parse(base.length === 10 ? base + "T00:00:00Z" : base + "Z");
+  if (isNaN(ms)) return s;
+  const frac = (base.match(/\.\d+$/) || [""])[0];
+  return new Date(utcToHostMs(ms)).toISOString().slice(0, 19) + frac;
+}
+function tzLabel() {
+  if (tzMode() !== "host") return "Times: UTC";
+  const r = tzRule();
+  return `Times: host local (${r.name || "host time zone"})`;
+}
+function applyTzLabels() {
+  const h = el("colTime");
+  if (h) h.textContent = tzMode() === "host" ? "Time (host local)" : "Time (UTC)";
 }
 
 // ── Events ───────────────────────────────────────────────────────────────────
@@ -2571,7 +2659,7 @@ function wireEvents() {
 // stay ISO — only the display changes. All times are UTC.
 function time(iso) {
   if (!iso) return "";
-  const s = String(iso).replace("Z", "");
+  const s = displayIso(iso);
   const [datePart, timePart = ""] = s.split("T");
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(datePart);
   const uk = m ? `${m[3]}/${m[2]}/${m[1]}` : datePart;
@@ -2583,7 +2671,7 @@ function ukDate(ymd) {
   return m ? `${m[3]}/${m[2]}/${m[1]}` : String(ymd || "");
 }
 function ukDateTime(ts) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/.exec(String(ts || ""));
+  const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/.exec(displayIso(ts));
   return m ? `${m[3]}/${m[2]}/${m[1]} ${m[4]}:${m[5]}` : String(ts || "");
 }
 function short(id) { return (id || "").slice(0, 8); }

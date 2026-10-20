@@ -83,7 +83,7 @@ fn cmd_ingest(args: &[String]) -> anyhow::Result<ExitCode> {
         report.unclassified
     );
 
-    let (mut parsed, mut unsupported, mut failed) = (0, 0, 0);
+    let (mut parsed, mut unsupported, mut failed, mut duplicate) = (0, 0, 0, 0);
     for a in &report.artefacts {
         match &a.status {
             ArtefactStatus::Parsed => parsed += 1,
@@ -92,9 +92,10 @@ fn cmd_ingest(args: &[String]) -> anyhow::Result<ExitCode> {
                 failed += 1;
                 eprintln!("  FAILED {}: {msg}", a.source_path);
             }
+            ArtefactStatus::Duplicate(_) => duplicate += 1,
         }
     }
-    println!("  parsed={parsed} unsupported={unsupported} failed={failed}");
+    println!("  parsed={parsed} unsupported={unsupported} failed={failed} duplicate={duplicate}");
 
     if !report.scan_errors.is_empty() {
         eprintln!("\nScan errors ({}):", report.scan_errors.len());

@@ -355,3 +355,69 @@ fn parse_artefact(s: &str) -> ArtefactKind {
         _ => ArtefactKind::Unclassified,
     }
 }
+
+// ── Local-time correction ───────────────────────────────────────────────────
+// Some artefacts log the host's local time (setupapi.dev.log, TeamViewer).
+// Their parsers store the wall-clock value as if it were UTC and mark the raw
+// record `time_basis: "host local time (as logged)"`; after ingest these are
+// converted with the host's own time-zone rule.
+
+impl CaseStore {
+    /// The analysed host's time-zone rule (from the SYSTEM hive), if known.
+    pub fn host_tz_rule(&self) -> Result<Option<fx_core::tz::TzRule>, StoreError> {
+        let mut stmt = self.connection().prepare(
+            "SELECT CAST(raw AS VARCHAR) FROM events WHERE action = 'host.timezone' ORDER BY source_ref",
+        )?;
+        let rows: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        // Prefer ControlSet001 (the usual current set), else the first with a rule.
+        let mut best: Option<fx_core::tz::TzRule> = None;
+        for raw in rows {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+            let Some(rule) = v.get("rule").and_then(|r| serde_json::from_value::<fx_core::tz::TzRule>(r.clone()).ok()) else { continue };
+            let current = v.get("control_set").and_then(|c| c.as_str()).map_or(false, |c| c.eq_ignore_ascii_case("ControlSet001"));
+            if current || best.is_none() {
+                best = Some(rule);
+                if current {
+                    break;
+                }
+            }
+        }
+        Ok(best)
+    }
+
+    /// Convert every local-time event to UTC with `rule`. Returns how many.
+    pub fn convert_local_times(&self, rule: &fx_core::tz::TzRule) -> Result<u64, StoreError> {
+        let c = self.connection();
+        let mut stmt = c.prepare(
+            "SELECT CAST(id AS VARCHAR), strftime(ts, '%Y-%m-%dT%H:%M:%S.%f'), CAST(raw AS VARCHAR), message
+             FROM events
+             WHERE json_extract_string(raw, '$.time_basis') = 'host local time (as logged)'",
+        )?;
+        let rows: Vec<(String, String, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<Result<_, _>>()?;
+        let fmt_in = time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond]");
+        let fmt_out = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:6]");
+        let iso = time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
+        let mut n = 0u64;
+        c.execute_batch("BEGIN TRANSACTION")?;
+        {
+            let mut upd = c.prepare("UPDATE events SET ts = CAST(? AS TIMESTAMP), raw = CAST(? AS JSON) WHERE id = CAST(? AS UUID)")?;
+            for (id, ts, raw, _msg) in rows {
+                let Ok(local) = time::PrimitiveDateTime::parse(&ts, &fmt_in) else { continue };
+                let utc = rule.local_to_utc(local.assume_utc());
+                let mut v: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+                v["time_basis"] = serde_json::json!("UTC (converted from host local time)");
+                v["local_time_as_logged"] = serde_json::json!(local.format(&iso).unwrap_or_default());
+                v["local_utc_offset"] = serde_json::json!(rule.offset_label_at_local(local));
+                if let Some(tz) = &rule.name {
+                    v["host_time_zone"] = serde_json::json!(tz);
+                }
+                upd.execute(duckdb::params![utc.format(&fmt_out).unwrap_or_default(), v.to_string(), id])?;
+                n += 1;
+            }
+        }
+        c.execute_batch("COMMIT")?;
+        Ok(n)
+    }
+}

@@ -138,7 +138,7 @@ impl Parser for SetupApiParser {
                 target: Some(Target { path: Some(d.device_id.clone()), value_name: None, hash_sha1: None, size: None }),
                 network: None,
                 message: format!(
-                    "{label} first connected: {what}{} (host local time)",
+                    "{label} first connected: {what}{}",
                     d.serial.as_deref().map(|s| format!(", serial {s}")).unwrap_or_default()
                 ),
                 provenance: Provenance {
@@ -149,7 +149,8 @@ impl Parser for SetupApiParser {
                     source_ref: Some(format!("line {}", d.line)),
                 },
                 raw: json!({ "device_id": d.device_id, "device_class": d.kind, "vendor": d.vendor, "product": d.product,
-                             "serial": d.serial, "time_note": "setupapi.dev.log times are the host's local time, recorded as written (not converted to UTC)" }),
+                             "serial": d.serial, "time_basis": "host local time (as logged)",
+                             "time_note": "setupapi.dev.log logs the host's local time; fx converts it to UTC at ingest when the host time zone is known" }),
             });
             outcome.events_emitted += 1;
         }

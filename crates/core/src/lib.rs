@@ -12,6 +12,7 @@ pub mod identify;
 pub mod parser;
 pub mod progress;
 pub mod time_util;
+pub mod tz;
 
 pub use detection::{Detection, DetectionEngine, Severity};
 pub use event::{
