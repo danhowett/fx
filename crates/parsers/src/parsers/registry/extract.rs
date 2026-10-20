@@ -18,7 +18,7 @@
 //! need value-blob decoding; those decoders are stubbed with clear TODOs so
 //! the structure is real even where the binary decode is Week-2-continued.
 
-use super::{key_raw, make_event, value_pairs, value_string, Ctx};
+use super::{key_raw, make_event, value_bytes, value_name, value_pairs, value_string, Ctx};
 use fx_core::{ArtefactKind, EventSink, ParseOutcome, Principal, ProcessInfo, TimestampKind};
 use notatin::cell_key_node::CellKeyNode;
 use serde_json::json;
@@ -60,6 +60,7 @@ pub(crate) fn default_extractors() -> Vec<Box<dyn Extractor>> {
         Box::new(RunMru),
         Box::new(RdpClientMru),
         Box::new(HostInfo),
+        Box::new(UserActivity),
     ]
 }
 
@@ -1671,5 +1672,386 @@ mod decode_tests {
         assert_eq!(expand_known_folder("C:\\x\\a.exe"), "C:\\x\\a.exe");
         assert_eq!(strip_mru_suffix("powershell -nop\\1"), "powershell -nop");
         assert_eq!(basename("C:\\Tools\\rclone.exe"), "rclone.exe");
+    }
+}
+
+// ── User activity (NTUSER.DAT) ──────────────────────────────────────────────
+// What a user opened, typed and searched for: RecentDocs, Open/Save dialog
+// MRUs, typed Explorer paths, Explorer searches, mapped drives / mount points,
+// typed URLs, Office recent files and Office Trusted Documents (where the user
+// clicked "Enable Content" — the classic macro-delivery signal).
+//
+// MRU lists only carry the key's LastWrite, which dates the *most recent*
+// entry. Entries are emitted with that time and their MRU rank, and the raw
+// record says so; Office "File MRU" items carry their own per-file time.
+struct UserActivity;
+
+/// The user whose NTUSER.DAT this is, from the collected path (…/Users/<name>/NTUSER.DAT).
+fn hive_user(source_path: &str) -> Option<String> {
+    let parts: Vec<&str> = source_path.split(|c| c == '/' || c == '\\').collect();
+    let i = parts.iter().position(|p| p.eq_ignore_ascii_case("Users") || p.eq_ignore_ascii_case("Documents and Settings"))?;
+    let u = parts.get(i + 1)?;
+    (parts.len() > i + 2 && !u.is_empty()).then(|| u.to_string())
+}
+
+/// MRUListEx (u32 value numbers, most recent first, 0xFFFFFFFF terminated)
+/// as a map value-name -> rank (1 = most recent).
+fn mru_list_ex(key: &CellKeyNode) -> std::collections::HashMap<String, usize> {
+    let mut m = std::collections::HashMap::new();
+    if let Some(b) = cell_bytes(key, "MRUListEx") {
+        for (i, c) in b.chunks_exact(4).enumerate() {
+            let n = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            if n == u32::MAX {
+                break;
+            }
+            m.insert(n.to_string(), i + 1);
+        }
+    }
+    m
+}
+
+/// MRUList ("cba…", most recent first) as value-name -> rank.
+fn mru_list(key: &CellKeyNode) -> std::collections::HashMap<String, usize> {
+    value_string(key, "MRUList")
+        .unwrap_or_default()
+        .chars()
+        .enumerate()
+        .map(|(i, c)| (c.to_string(), i + 1))
+        .collect()
+}
+
+/// Decode an ITEMIDLIST (sequence of size-prefixed shell items) into a path.
+fn pidl_path(b: &[u8]) -> Option<String> {
+    let mut out = String::new();
+    let mut off = 0usize;
+    let mut guard = 0;
+    while off + 2 <= b.len() && guard < 64 {
+        guard += 1;
+        let size = u16::from_le_bytes([b[off], b[off + 1]]) as usize;
+        if size == 0 || off + size > b.len() {
+            break;
+        }
+        if let Some(it) = parse_shell_item(&b[off..off + size]) {
+            match it.kind {
+                ShellItemKind::Root => {
+                    if it.name != "This PC" && it.name != "Network" {
+                        out = it.name.clone();
+                    }
+                }
+                ShellItemKind::Volume | ShellItemKind::Network => out = it.name.clone(),
+                ShellItemKind::Folder => {
+                    if !out.is_empty() && !out.ends_with('\\') {
+                        out.push('\\');
+                    }
+                    out.push_str(&it.name);
+                }
+            }
+        }
+        off += size;
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Office "File MRU" item: "[F00000000][T01D9A1B2C3D4E5F6][O00000000]*C:\path".
+fn office_mru_item(s: &str) -> (Option<OffsetDateTime>, String) {
+    let path = s.rsplit_once('*').map(|(_, p)| p).unwrap_or(s).trim().to_string();
+    let ts = s
+        .find("[T")
+        .and_then(|i| s.get(i + 2..i + 18))
+        .and_then(|h| u64::from_str_radix(h, 16).ok())
+        .and_then(fx_core::filetime_to_datetime);
+    (ts, path)
+}
+
+impl UserActivity {
+    #[allow(clippy::too_many_arguments)]
+    fn emit(
+        ctx: &Ctx,
+        sink: &mut dyn EventSink,
+        outcome: &mut ParseOutcome,
+        ts: OffsetDateTime,
+        action: &str,
+        key_path: &str,
+        value: Option<&str>,
+        target: Option<String>,
+        message: String,
+        raw: serde_json::Value,
+    ) {
+        let user = Principal { name: hive_user(&ctx.source_path), ..Default::default() };
+        sink.emit(make_event(ctx, ArtefactKind::UserActivity, ts, TimestampKind::Modified, action, key_path, value, target, user, message, raw));
+        outcome.events_emitted += 1;
+    }
+
+    fn rank_label(rank: Option<usize>) -> String {
+        match rank {
+            Some(1) => " (most recent)".into(),
+            Some(r) => format!(" (#{r})"),
+            None => String::new(),
+        }
+    }
+}
+
+const MRU_NOTE: &str = "key LastWrite dates the most recent entry only";
+
+impl Extractor for UserActivity {
+    fn matches(&self, p: &str) -> bool {
+        let l = p.to_ascii_lowercase();
+        l.ends_with(r"\explorer\recentdocs")
+            || l.contains(r"\explorer\recentdocs\")
+            || l.contains(r"\comdlg32\opensavepidlmru\")
+            || l.ends_with(r"\comdlg32\lastvisitedpidlmru")
+            || l.ends_with(r"\explorer\typedpaths")
+            || l.ends_with(r"\explorer\wordwheelquery")
+            || l.ends_with(r"\explorer\map network drive mru")
+            || l.contains(r"\explorer\mountpoints2\")
+            || l.ends_with(r"\internet explorer\typedurls")
+            || (l.contains(r"\microsoft\office\") && (l.ends_with(r"\file mru") || l.ends_with(r"\trustrecords")))
+    }
+
+    fn extract(
+        &self,
+        key: &CellKeyNode,
+        key_path: &str,
+        lastwrite: OffsetDateTime,
+        ctx: &Ctx,
+        sink: &mut dyn EventSink,
+        outcome: &mut ParseOutcome,
+    ) {
+        let l = key_path.to_ascii_lowercase();
+        let leaf = key_path.rsplit('\\').next().unwrap_or("").to_string();
+
+        // RecentDocs: root key lists every recent item; per-extension subkeys
+        // only contribute their most recent item (whose time the subkey dates).
+        if l.ends_with(r"\explorer\recentdocs") || l.contains(r"\explorer\recentdocs\") {
+            let root = l.ends_with(r"\explorer\recentdocs");
+            let ranks = mru_list_ex(key);
+            for v in key.value_iter() {
+                let name = value_name(&v);
+                let rank = ranks.get(&name).copied();
+                if name.eq_ignore_ascii_case("MRUListEx") || (!root && rank != Some(1)) {
+                    continue;
+                }
+                let Some(file) = utf16_z(&value_bytes(&v), 0).and_then(|s| clean_name(&s)) else { continue };
+                let (action, msg) = if root {
+                    ("user.recent_doc", format!("Recent item{}: {file}", Self::rank_label(rank)))
+                } else {
+                    ("user.recent_doc_ext", format!("Last opened {leaf} item: {file}"))
+                };
+                Self::emit(ctx, sink, outcome, lastwrite, action, key_path, Some(&name), Some(file.clone()), msg,
+                    json!({ "key": key_path, "value": name, "name": file, "mru_rank": rank, "extension": (!root).then_some(&leaf), "time_note": MRU_NOTE }));
+            }
+            return;
+        }
+
+        // Open/Save dialog: full path of each file picked, per extension
+        // ("*" = all). Emit from "*" and the rank-1 item of each extension.
+        if l.contains(r"\comdlg32\opensavepidlmru\") {
+            let all = leaf == "*";
+            let ranks = mru_list_ex(key);
+            for v in key.value_iter() {
+                let name = value_name(&v);
+                let rank = ranks.get(&name).copied();
+                if name.eq_ignore_ascii_case("MRUListEx") || (!all && rank != Some(1)) {
+                    continue;
+                }
+                let Some(path) = pidl_path(&value_bytes(&v)) else { continue };
+                let msg = if all {
+                    format!("Open/Save dialog{}: {path}", Self::rank_label(rank))
+                } else {
+                    format!("Open/Save dialog, last .{leaf} file: {path}")
+                };
+                Self::emit(ctx, sink, outcome, lastwrite, "user.file_dialog", key_path, Some(&name), Some(path.clone()), msg,
+                    json!({ "key": key_path, "value": name, "path": path, "mru_rank": rank, "extension": leaf, "time_note": MRU_NOTE }));
+            }
+            return;
+        }
+
+        // LastVisited: which program used an Open/Save dialog, and the folder.
+        if l.ends_with(r"\comdlg32\lastvisitedpidlmru") {
+            let ranks = mru_list_ex(key);
+            for v in key.value_iter() {
+                let name = value_name(&v);
+                if name.eq_ignore_ascii_case("MRUListEx") {
+                    continue;
+                }
+                let b = value_bytes(&v);
+                let Some(exe) = utf16_z(&b, 0).and_then(|s| clean_name(&s)) else { continue };
+                let pidl_at = (exe.encode_utf16().count() + 1) * 2;
+                let folder = b.get(pidl_at..).and_then(pidl_path);
+                let rank = ranks.get(&name).copied();
+                let msg = match &folder {
+                    Some(f) => format!("{exe} used an Open/Save dialog in {f}{}", Self::rank_label(rank)),
+                    None => format!("{exe} used an Open/Save dialog{}", Self::rank_label(rank)),
+                };
+                Self::emit(ctx, sink, outcome, lastwrite, "user.dialog_program", key_path, Some(&name), folder.clone(), msg,
+                    json!({ "key": key_path, "value": name, "program": exe, "folder": folder, "mru_rank": rank, "time_note": MRU_NOTE }));
+            }
+            return;
+        }
+
+        // Typed Explorer paths: url1 is the most recent.
+        if l.ends_with(r"\explorer\typedpaths") {
+            for (name, path) in value_pairs(key) {
+                let rank = name.to_ascii_lowercase().strip_prefix("url").and_then(|n| n.parse::<usize>().ok());
+                if rank.is_none() || path.trim().is_empty() {
+                    continue;
+                }
+                Self::emit(ctx, sink, outcome, lastwrite, "user.typed_path", key_path, Some(&name), Some(path.clone()),
+                    format!("Typed in Explorer{}: {path}", Self::rank_label(rank)),
+                    json!({ "key": key_path, "value": name, "path": path, "mru_rank": rank, "time_note": MRU_NOTE }));
+            }
+            return;
+        }
+
+        // Explorer search terms.
+        if l.ends_with(r"\explorer\wordwheelquery") {
+            let ranks = mru_list_ex(key);
+            for v in key.value_iter() {
+                let name = value_name(&v);
+                if name.eq_ignore_ascii_case("MRUListEx") {
+                    continue;
+                }
+                let Some(term) = utf16_z(&value_bytes(&v), 0).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else { continue };
+                let rank = ranks.get(&name).copied();
+                Self::emit(ctx, sink, outcome, lastwrite, "user.search", key_path, Some(&name), None,
+                    format!("Explorer search{}: {term}", Self::rank_label(rank)),
+                    json!({ "key": key_path, "value": name, "term": term, "mru_rank": rank, "time_note": MRU_NOTE }));
+            }
+            return;
+        }
+
+        // Drives mapped with "Map network drive".
+        if l.ends_with(r"\explorer\map network drive mru") {
+            let ranks = mru_list(key);
+            for (name, share) in value_pairs(key) {
+                if name.eq_ignore_ascii_case("MRUList") || share.trim().is_empty() {
+                    continue;
+                }
+                let rank = ranks.get(&name).copied();
+                Self::emit(ctx, sink, outcome, lastwrite, "user.mapped_drive", key_path, Some(&name), Some(share.clone()),
+                    format!("Mapped network drive{}: {share}", Self::rank_label(rank)),
+                    json!({ "key": key_path, "value": name, "share": share, "mru_rank": rank, "time_note": MRU_NOTE }));
+            }
+            return;
+        }
+
+        // MountPoints2: one subkey per share ("##server#share") or volume GUID
+        // the user connected; its LastWrite approximates the last connection.
+        if l.contains(r"\explorer\mountpoints2\") {
+            let parent_is_mp2 = key_path
+                .rsplit('\\')
+                .nth(1)
+                .map(|p| p.eq_ignore_ascii_case("MountPoints2"))
+                .unwrap_or(false);
+            if !parent_is_mp2 {
+                return;
+            }
+            let (action, what) = match leaf.strip_prefix("##") {
+                Some(rest) => ("user.share_connected", format!(r"\\{}", rest.replace('#', r"\"))),
+                None => ("user.volume_mounted", leaf.clone()),
+            };
+            let msg = if action == "user.share_connected" {
+                format!("Network share connected: {what}")
+            } else {
+                format!("Volume mounted by user: {what}")
+            };
+            Self::emit(ctx, sink, outcome, lastwrite, action, key_path, None, Some(what.clone()), msg,
+                json!({ "key": key_path, "mount_point": what, "time_note": "key LastWrite ≈ last time this user connected it" }));
+            return;
+        }
+
+        // Typed URLs (IE / legacy Edge), with per-URL times when present.
+        if l.ends_with(r"\internet explorer\typedurls") {
+            for (name, url) in value_pairs(key) {
+                let rank = name.to_ascii_lowercase().strip_prefix("url").and_then(|n| n.parse::<usize>().ok());
+                if rank.is_none() || url.trim().is_empty() {
+                    continue;
+                }
+                Self::emit(ctx, sink, outcome, lastwrite, "user.typed_url", key_path, Some(&name), Some(url.clone()),
+                    format!("Typed URL{}: {url}", Self::rank_label(rank)),
+                    json!({ "key": key_path, "value": name, "url": url, "mru_rank": rank, "time_note": MRU_NOTE }));
+            }
+            return;
+        }
+
+        // Office: Software\Microsoft\Office\<ver>\<App>\...\File MRU and
+        // ...\Security\Trusted Documents\TrustRecords.
+        let app = key_path
+            .split('\\')
+            .skip_while(|p| !p.eq_ignore_ascii_case("Office"))
+            .nth(2)
+            .unwrap_or("Office")
+            .to_string();
+        if l.ends_with(r"\file mru") {
+            for (name, data) in value_pairs(key) {
+                if !name.to_ascii_lowercase().starts_with("item ") {
+                    continue;
+                }
+                let (ts, path) = office_mru_item(&data);
+                if path.is_empty() {
+                    continue;
+                }
+                Self::emit(ctx, sink, outcome, ts.unwrap_or(lastwrite), "office.recent_doc", key_path, Some(&name), Some(path.clone()),
+                    format!("{app} opened: {path}"),
+                    json!({ "key": key_path, "value": name, "application": app, "path": path,
+                            "time_note": if ts.is_some() { "time from the MRU item ([T…] FILETIME)" } else { MRU_NOTE } }));
+            }
+            return;
+        }
+        if l.ends_with(r"\trustrecords") {
+            for v in key.value_iter() {
+                let path = value_name(&v);
+                let b = value_bytes(&v);
+                if path.is_empty() || b.len() < 8 {
+                    continue;
+                }
+                let ft = u64::from_le_bytes(b[..8].try_into().unwrap_or([0; 8]));
+                let ts = fx_core::filetime_to_datetime(ft).unwrap_or(lastwrite);
+                let flag = b.len() >= 4 && b[b.len() - 4..] == [0xFF, 0xFF, 0xFF, 0x7F];
+                let msg = if flag {
+                    format!("{app}: content/macros enabled for {path}")
+                } else {
+                    format!("{app}: document trusted (editing enabled) {path}")
+                };
+                Self::emit(ctx, sink, outcome, ts, "office.trusted_document", key_path, Some(&path), Some(path.clone()), msg,
+                    json!({ "key": key_path, "application": app, "path": path, "macros_enabled": flag,
+                            "time_note": "time the user trusted the document" }));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod user_activity_tests {
+    use super::*;
+
+    #[test]
+    fn helpers() {
+        let (ts, p) = office_mru_item("[F00000000][T01DA9B3C4D5E6F70][O00000000]*C:\\Users\\bob\\Downloads\\Invoice.docm");
+        assert_eq!(p, "C:\\Users\\bob\\Downloads\\Invoice.docm");
+        assert!(ts.is_some());
+        assert_eq!(hive_user("C/Users/bob/NTUSER.DAT").as_deref(), Some("bob"));
+        assert_eq!(hive_user("C/Windows/System32/config/SOFTWARE"), None);
+        let u = UserActivity;
+        assert!(u.matches(r"ROOT\Software\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs\.docx"));
+        assert!(u.matches(r"ROOT\Software\Microsoft\Office\16.0\Word\Security\Trusted Documents\TrustRecords"));
+        assert!(u.matches(r"ROOT\Software\Microsoft\Office\16.0\Excel\User MRU\ADAL_X\File MRU"));
+        assert!(u.matches(r"ROOT\Software\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32\OpenSavePidlMRU\*"));
+        assert!(!u.matches(r"ROOT\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU"));
+    }
+
+    #[test]
+    fn pidl_decodes_volume_and_folders() {
+        // Volume "C:\" item, then a file-entry item for "Temp" (ASCII 8.3 name).
+        let mut b = Vec::new();
+        let vol: Vec<u8> = { let mut v = vec![0u8, 0, 0x2F]; v.extend_from_slice(b"C:\\\0"); v.resize(25, 0); v };
+        let mut vol = vol; let n = vol.len() as u16; vol[0..2].copy_from_slice(&n.to_le_bytes());
+        b.extend_from_slice(&vol);
+        let mut fe = vec![0u8, 0, 0x31, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0];
+        fe.extend_from_slice(b"Temp\0\0");
+        let n = fe.len() as u16; fe[0..2].copy_from_slice(&n.to_le_bytes());
+        b.extend_from_slice(&fe);
+        b.extend_from_slice(&[0, 0]);
+        assert_eq!(pidl_path(&b).as_deref(), Some("C:\\Temp"));
     }
 }

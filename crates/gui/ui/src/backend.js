@@ -97,6 +97,9 @@ export const backend = {
     } catch (e) { return false; }
   },
   cancelJob: () => call("cancel_job", {}),
+  allowlistGet: () => call("allowlist_get", {}),
+  allowlistSet: (entries) => call("allowlist_set", { entries }),
+  sigmaDisableRule: (ruleId) => call("sigma_disable_rule", { ruleId }),
   progressSnapshot: () => call("progress_snapshot", {}),
 
   // Native pickers (Tauri dialog plugin). Return null if the user cancels or
@@ -239,7 +242,23 @@ function sample(cmd, args) {
     return Promise.resolve(e ? JSON.stringify(rawFor(e), null, 2) : null);
   }
   if (cmd === "run_hunt" || cmd === "hunt_results") {
-    return Promise.resolve(sampleDetections().concat(SAMPLE_SIGMA_DETS));
+    return Promise.resolve(demoApplyAllow().live);
+  }
+  if (cmd === "allowlist_get" || cmd === "allowlist_set") {
+    if (cmd === "allowlist_set") DEMO_ALLOW.splice(0, DEMO_ALLOW.length, ...(args.entries || []));
+    const r = demoApplyAllow(), counts = {};
+    r.suppressed.forEach((x) => { counts[x.allow_id] = (counts[x.allow_id] || 0) + 1; });
+    return Promise.resolve({ entries: DEMO_ALLOW.slice(), counts, suppressed: r.suppressed });
+  }
+  if (cmd === "sigma_disable_rule") {
+    const r = SAMPLE_KV.sigma;
+    for (let i = SAMPLE_SIGMA_DETS.length - 1; i >= 0; i--) if (SAMPLE_SIGMA_DETS[i].rule_id === args.ruleId) SAMPLE_SIGMA_DETS.splice(i, 1);
+    if (r) {
+      const h = r.hits.find((x) => x.rule_id === args.ruleId);
+      r.hits = r.hits.filter((x) => x.rule_id !== args.ruleId);
+      r.rules_hit = r.hits.length; r.findings -= h ? h.findings : 0; r.disabled = (r.disabled || 0) + 1;
+    }
+    return Promise.resolve(r || null);
   }
   if (cmd === "export_findings") { return Promise.resolve(sampleDetections().length); }
   if (cmd === "export_report") { return Promise.resolve(0); }
@@ -354,6 +373,18 @@ function demoDailyActivity() {
 const SAMPLE_KV = {};
 const SAMPLE_LABELS = [];
 const SAMPLE_SIGMA_DETS = [];
+const DEMO_ALLOW = [];
+// Demo version of the store's allow-list: split findings into live / suppressed.
+function demoApplyAllow() {
+  const all = sampleDetections().concat(SAMPLE_SIGMA_DETS), live = [], suppressed = [];
+  for (const d of all) {
+    const e = DEMO_ALLOW.find((a) => (a.rule_id === "*" || a.rule_id === d.rule_id) && a.contains.trim() &&
+      String(d.summary).toLowerCase().includes(a.contains.trim().toLowerCase()));
+    if (e) suppressed.push({ allow_id: e.id, rule_id: d.rule_id, title: d.title, severity: d.severity, summary: d.summary, ts: d.ts, engine: d.engine });
+    else live.push(d);
+  }
+  return { live, suppressed };
+}
 
 function sampleDetections() {
   // Link each demo finding to a real SEED event (by message substring) so

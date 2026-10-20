@@ -18,6 +18,7 @@ use std::path::Path;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+pub mod allowlist;
 pub mod evidence;
 pub mod hunt_support;
 pub mod query;

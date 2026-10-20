@@ -1,0 +1,30 @@
+kind: event
+id: office_macros_enabled
+title: Office document trusted with macros enabled
+description: >
+  The user clicked "Enable Content" on an Office document and macros were
+  enabled (Office Trusted Documents / TrustRecords). This is the classic
+  initial-access step for macro-based loaders (QakBot, IcedID, Emotet-era
+  delivery that preceded many ransomware intrusions). Check where the document
+  came from (Downloads, Outlook attachment cache, Temp) and what ran next.
+severity: high
+attack:
+  - T1204.002  # user execution: malicious file
+  - T1566.001  # phishing: attachment
+detection:
+  all:
+    - match:
+        field: action
+        op: equals
+        values: [office.trusted_document]
+    - match:
+        field: message
+        op: regex
+        values:
+          - "macros enabled"
+tests:
+  match:
+    - { artefact: user_activity, action: office.trusted_document, message: "Word: content/macros enabled for %USERPROFILE%/Downloads/Invoice_0425.docm" }
+  no_match:
+    - { artefact: user_activity, action: office.trusted_document, message: "Excel: document trusted (editing enabled) C:/Users/bob/Documents/budget.xlsx" }
+    - { artefact: user_activity, action: office.recent_doc, message: "Word opened: macros enabled.docx" }

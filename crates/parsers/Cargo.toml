@@ -13,6 +13,7 @@ thiserror.workspace = true
 tracing.workspace = true
 time.workspace = true
 uuid.workspace = true
+regex = "1"
 
 # Real forensic parsing crates.
 evtx.workspace = true

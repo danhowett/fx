@@ -1,0 +1,33 @@
+kind: event
+id: user_admin_share_access
+title: User browsed an administrative share or IP-addressed UNC path
+description: >
+  An administrative share (C$, ADMIN$, IPC$) or a UNC path to a bare IP
+  address was typed into Explorer, mapped as a drive, connected as a mount
+  point or picked in an Open/Save dialog. Interactive access to admin shares is
+  a common hands-on-keyboard lateral-movement and staging step; legitimate
+  admins do it too, so check the account and timing.
+severity: medium
+attack:
+  - T1021.002  # SMB / Windows admin shares
+  - T1570      # lateral tool transfer
+detection:
+  all:
+    - match:
+        field: action
+        op: regex
+        values:
+          - "^user\\.(typed_path|share_connected|mapped_drive|file_dialog|dialog_program)$"
+    - match:
+        field: message
+        op: regex
+        values:
+          - "(?i)\\\\\\\\[^\\\\\\s]+\\\\(c|d|e|admin|ipc)\\$"
+          - "\\\\\\\\[0-9]{1,3}(\\.[0-9]{1,3}){3}\\b"
+tests:
+  match:
+    - { artefact: user_activity, action: user.typed_path, message: "Typed in Explorer (most recent): \\\\FILESRV01\\C$\\Users" }
+    - { artefact: user_activity, action: user.share_connected, message: "Network share connected: \\\\10.20.4.15\\share" }
+  no_match:
+    - { artefact: user_activity, action: user.share_connected, message: "Network share connected: \\\\fileserver\\finance" }
+    - { artefact: evtx, action: logon.success, message: "\\\\FILESRV01\\C$" }

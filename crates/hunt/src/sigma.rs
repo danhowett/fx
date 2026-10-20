@@ -39,11 +39,14 @@ pub struct SigmaFilter {
     /// Sigma statuses to include (stable, test, experimental). Deprecated and
     /// unsupported rules are always excluded.
     pub statuses: Vec<String>,
+    /// Rules the analyst switched off (fx rule id `sigma:…` or the Sigma UUID).
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 impl Default for SigmaFilter {
     fn default() -> Self {
-        Self { min_level: "medium".into(), statuses: vec!["stable".into(), "test".into()] }
+        Self { min_level: "medium".into(), statuses: vec!["stable".into(), "test".into()], disabled: Vec::new() }
     }
 }
 
@@ -66,6 +69,8 @@ pub struct SigmaLoad {
     pub loaded: usize,
     /// Rules filtered out by level / status (not an error).
     pub filtered: usize,
+    /// Rules that would load but the analyst disabled.
+    pub disabled: usize,
     /// Count of skipped rules per reason (for the summary line).
     pub skipped_by_reason: BTreeMap<String, usize>,
     /// First few skipped rules per reason, so the analyst can see examples.
@@ -197,6 +202,10 @@ pub fn load_text(text: &str, file: &str, filter: &SigmaFilter, out: &mut SigmaLo
         }
         match convert(&doc, file) {
             Ok((rule, meta, source)) => {
+                if filter.disabled.iter().any(|d| d == &rule.id || (!meta.sigma_id.is_empty() && d == &meta.sigma_id)) {
+                    out.disabled += 1;
+                    continue;
+                }
                 *out.loaded_by_source.entry(source).or_insert(0) += 1;
                 out.meta.insert(rule.id.clone(), meta);
                 out.rules.push(rule);
@@ -1004,7 +1013,7 @@ mod tests {
 
     fn load(y: &str) -> SigmaLoad {
         let mut out = SigmaLoad::default();
-        load_text(y, "t.yml", &SigmaFilter { min_level: "low".into(), statuses: vec![] }, &mut out);
+        load_text(y, "t.yml", &SigmaFilter { min_level: "low".into(), statuses: vec![], disabled: vec![] }, &mut out);
         out
     }
     fn ex(pairs: &[(&str, &str)]) -> M<String, String> {
@@ -1146,7 +1155,7 @@ status: test
     #[test]
     fn real_sigma_corpus_when_available() {
         let Ok(dir) = std::env::var("SIGMA_DIR") else { return };
-        for f in [SigmaFilter::default(), SigmaFilter { min_level: "informational".into(), statuses: vec!["stable".into(), "test".into(), "experimental".into()] }] {
+        for f in [SigmaFilter::default(), SigmaFilter { min_level: "informational".into(), statuses: vec!["stable".into(), "test".into(), "experimental".into()], disabled: vec![] }] {
             let t = std::time::Instant::now();
             let l = load_dir(Path::new(&dir), &f);
             let load_ms = t.elapsed().as_millis();

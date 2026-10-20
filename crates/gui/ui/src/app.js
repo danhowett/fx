@@ -52,6 +52,7 @@ async function init() {
   const ov = el("overlay");
   if (ov) ov.addEventListener("click", (e) => { if (e.target === ov && !prog.on) hideOverlay(); });
   backend.onProgress((snap) => renderProgress(snap));
+  wireRailTips();
   const cb = el("ovpCancel");
   if (cb) cb.addEventListener("click", async () => {
     cb.disabled = true; cb.textContent = "Cancelling…";
@@ -97,6 +98,8 @@ async function renderCase(overview, label) {
   state.overview = overview;
   el("caseName").textContent = label
     || (backend.isLive() ? `case ${short(overview.case_id)}` : "sample case · demo data");
+  state.allow = null;
+  await syncAllowlist();
   state.detections = await backend.huntResults();
   state.triage = (await backend.listTriage()) || [];
   try { state.labels = (await backend.listLabels()) || []; } catch (e) { state.labels = []; }
@@ -224,6 +227,27 @@ function renderProgress(s) {
     d.children[0].textContent = stats[i][0]; d.children[1].textContent = stats[i][1];
     if (stats[i][2]) d.children[1].classList.add("warn");
   });
+}
+// Hover tips for rail entries carrying data-tip. A fixed-position bubble so the
+// rail's scroll container never clips it.
+function wireRailTips() {
+  const tip = document.createElement("div"); tip.className = "rail-tip"; document.body.appendChild(tip);
+  let timer = null;
+  const hide = () => { clearTimeout(timer); tip.classList.remove("show"); };
+  document.addEventListener("mouseover", (e) => {
+    const t = e.target.closest && e.target.closest("#rail [data-tip]");
+    if (!t) { hide(); return; }
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      tip.textContent = t.dataset.tip;
+      const r = t.getBoundingClientRect();
+      tip.style.left = (r.right + 10) + "px";
+      tip.classList.add("show");
+      const top = Math.min(r.top, window.innerHeight - tip.offsetHeight - 8);
+      tip.style.top = Math.max(8, top) + "px";
+    }, 350);
+  });
+  document.addEventListener("scroll", hide, true);
 }
 async function jobCancelled() {
   try { const s = await backend.progressSnapshot(); return !!(s && s.cancelled); } catch (e) { return false; }
@@ -559,12 +583,15 @@ const HELP_HTML = `
     <li><b>Export report</b> — save the self-contained HTML case report (findings, ATT&CK matrix, timeline, evidence chain of custody with SHA-256s). Print it to PDF to archive.</li>
     <li><b>Export CSV / STIX</b> — export findings (rule + analyst) for Excel or a TIP/MISP. Choose which triage states to include (validated / unconfirmed / false positive / dismissed).</li>
     <li><b>Ingest log</b> (rail) — every file ingested and whether it parsed, was unsupported, or failed.</li>
+    <li><b>Suppress…</b> (hover a finding) — hide known-benign findings like this one, for this case or every case. Nothing is deleted: review or restore them from the <b>Allow-list</b>.</li>
+    <li><b>Sigma rules</b> (IOC hunt) — run community SigmaHQ rules; hover a matched rule and click <b>Disable</b> to stop a noisy one.</li>
+    <li><b>Artefact list</b> (rail) — hover any artefact for what that evidence source shows and why it matters.</li>
     <li><b>Activity graph</b> (rail) — events-per-day histogram across the whole case. A day far above the baseline is outlined and labelled — the way to spot high-volume activity no rule tagged. Click a day to pivot the timeline to it.</li>
   </ul>
   <h3>What it analyses</h3>
-  <p>Parsers: Windows Event Logs (EVTX, ~50 event IDs across Security/Sysmon/PowerShell/Defender/TerminalServices/WMI), MFT, UsnJrnl, registry hives (Run keys, services, ShimCache, UserAssist, BAM/DAM, RDP, Amcache, ShellBags), Prefetch, SRUM, Scheduled Tasks, Browser history, LNK & Jump Lists, Recycle Bin.</p>
+  <p>Parsers: Windows Event Logs (EVTX, ~50 event IDs across Security/Sysmon/PowerShell/Defender/TerminalServices/WMI), MFT, UsnJrnl, registry hives (Run keys, services, ShimCache, UserAssist, BAM/DAM, RDP, Amcache, ShellBags, host details, user activity: RecentDocs, Open/Save dialogs, typed paths, searches, mapped drives, Office recent files and macro-enabled documents), Prefetch, PCA, SRUM, Scheduled Tasks, Browser history, LNK & Jump Lists, Recycle Bin, PowerShell history, Windows Timeline, remote-access tool logs, Defender logs, setupapi (USB first connection) and memory remnants carved from pagefile.sys / swapfile.sys (plus hiberfil.sys state).</p>
   <h3>What it hunts for</h3>
-  <p>25 rules: generic ATT&CK techniques (credential dumping, discovery, lateral movement, defense evasion, persistence, LOLBin abuse, suspicious PowerShell) plus behavioural rules for the top 2026 ransomware groups (Qilin, TheGentlemen, Akira, Play/DragonForce, LockBit, INC Ransom, Interlock, Clop and more). Rules match behaviour and tooling, not file hashes.</p>
+  <p>37 built-in rules: generic ATT&CK techniques (credential dumping, discovery, lateral movement, defense evasion, persistence, LOLBin abuse, suspicious PowerShell) plus behavioural rules for the top 2026 ransomware groups (Qilin, TheGentlemen, Akira, Play/DragonForce, LockBit, INC Ransom, Interlock, Clop and more). Rules match behaviour and tooling, not file hashes.</p>
   <h3>Important</h3>
   <p class="muted">Findings are investigative <b>leads to corroborate</b>, not verdicts. Attribution to a specific group is probabilistic — tooling is shared across crews. Absence of findings is not proof a host is clean. All timestamps are UTC. Point fx at a <b>copy</b> of evidence; originals stay read-only (every source file is SHA-256 hashed at ingest).</p>
 `;
@@ -663,6 +690,40 @@ function baseName(p) {
   return String(p).replace(/\\/g, "/").split("/").pop();
 }
 
+
+// Why each evidence source matters — shown as a hover tip on the rail.
+const ARTEFACT_INFO = {
+  Evtx: "Windows event logs. Logons (and from where), process creation, service and task installs, PowerShell, RDP, Defender and log clearing — the backbone of most intrusion timelines.",
+  Mft: "NTFS Master File Table. Every file's created / modified / accessed times and path, including deleted entries — shows tools dropped, staging folders and what was touched.",
+  UsnJrnl: "NTFS change journal. A running log of file creates, renames and deletes — catches short-lived tools and mass renames from encryption, even after the files are gone.",
+  LogFile: "NTFS transaction log. Very recent low-level file system changes; useful to confirm activity in the last minutes or hours before collection.",
+  Prefetch: "Program execution evidence. Executable name, run count and up to the last 8 run times, plus files it loaded. Off by default on servers.",
+  Amcache: "Program inventory. Path, SHA-1 and first-seen time of executables present or run on the host — lets you hash-check a tool that has since been deleted.",
+  ShimCache: "AppCompatCache. Executables the system has seen, with file modified time. Shows presence (and on older Windows, execution) of tools, ordered newest first.",
+  RegistryRun: "Run / RunOnce and similar autostart keys. Classic persistence: what launches at boot or logon, and when the key last changed.",
+  RegistryService: "Installed services. Malicious or abused services (PsExec, remote tools, drivers used to kill EDR) show up here with their binary path and start type.",
+  UserAssist: "GUI programs a user launched from Explorer / Start, with run counts and last run time. Per-user execution evidence.",
+  ShellBags: "Folders a user browsed in Explorer — local, USB, network shares and zip files — with times. Survives the folders being deleted.",
+  BamDam: "Background Activity Moderator. Last execution time of programs per user SID, on Windows 10 / 11.",
+  Srum: "System Resource Usage Monitor. Per-app network bytes sent / received and resource use, hourly, for about 30 days — strong evidence for data exfiltration.",
+  ScheduledTask: "Scheduled tasks. Common persistence and remote execution method; shows the command, trigger, author and registration time.",
+  Lnk: "Shortcut files. Created when a user opens a file — target path, volume serial, and the file's own times. Shows files opened from USB or shares.",
+  JumpList: "Per-application recent items. Files and locations opened with a specific program (e.g. RDP targets in mstsc, documents in Word).",
+  Recycle: "Recycle Bin. What a user deleted, the original path and when.",
+  BrowserHistory: "Chrome / Edge / Firefox history and downloads. Tool downloads, file-sharing and exfil sites, leak-site visits and webmail use.",
+  PsHistory: "PowerShell console history (PSReadLine). The commands an interactive user typed — often the attacker's own keystrokes.",
+  WindowsTimeline: "Windows Timeline (ActivitiesCache). Apps and documents a user had open, with focus durations.",
+  RemoteAccess: "Remote-access tool logs (AnyDesk, TeamViewer, ScreenConnect). Session times, connecting IDs / IPs and file transfers — common in ransomware and helpdesk-scam intrusions.",
+  DefenderLog: "Microsoft Defender support logs (MPLog). Detections, scanned process paths and file hashes that often survive event-log clearing.",
+  RegistryGeneric: "Other registry evidence: USB devices, network profiles, Run-dialog history, RDP connections made, host details and user activity keys.",
+  UserActivity: "User activity registry keys: recent documents, Open/Save dialogs, typed Explorer paths and searches, mapped drives and Office documents where content or macros were enabled.",
+  Pca: "Program Compatibility Assistant (Windows 11). Executables launched, with full path and time — execution evidence even where Prefetch is disabled.",
+  Pagefile: "Parses: pagefile.sys and swapfile.sys (memory Windows paged to disk). fx carves readable text and keeps command lines that start with a shell, LOLBin or known tool, URLs, and lists of IP addresses, domains, MD5/SHA-1/SHA-256 hashes and .exe/.dll/.ps1/.bat names.\n\nLook for: encoded PowerShell, rclone / 7-Zip / net / vssadmin commands, download URLs, C2 domains or IPs and tool names with no other trace on disk. Run your IOC list against it with IOC hunt.\n\nCaution: no timestamps (dated to the file's modified time), and paged-out antivirus signatures contain attacker strings. Treat hits as leads and corroborate.",
+  Hiberfil: "Parses: hiberfil.sys header only: whether a hibernation memory image is present or was wiped after resume, its size, and when it was written (last hibernate or Fast Startup shutdown).\n\nLook for: a recent image on a host you're investigating means a memory snapshot exists. Preserve hiberfil.sys for full memory analysis. Its contents are compressed and are not searched by fx.",
+  SetupApi: "Device installation log. The first time each USB storage device or other hardware was connected to this host.",
+  Unclassified: "Files fx collected but could not identify. Hashed and recorded as evidence; review the ingest log.",
+};
+
 // ── Left rail ────────────────────────────────────────────────────────────────
 function renderRail() {
   const o = state.overview;
@@ -748,7 +809,8 @@ function facetRow(kind, label, count, color, value) {
   const active =
     (kind === "category" && state.filter.category === v) ||
     (kind === "artefact" && state.filter.artefact === v);
-  return `<div class="facet ${active ? "active" : ""}" data-kind="${kind}" data-value="${v}">
+  const tip = kind === "artefact" && ARTEFACT_INFO[label] ? ` data-tip="${ARTEFACT_INFO[label].replace(/"/g, "&quot;")}"` : "";
+  return `<div class="facet ${active ? "active" : ""}" data-kind="${kind}" data-value="${v}"${tip}>
     <span class="swatch" style="background:${color}"></span>
     <span class="name">${label}</span>
     ${count !== "" ? `<span class="count">${fmt(count)}</span>` : ""}
@@ -785,6 +847,7 @@ function renderFindings() {
       <div><span class="fc-count">${fmt(d.length)}</span><span class="fc-lbl">detection${d.length === 1 ? "" : "s"}</span></div>
       <div class="sev-pills" style="margin-top:9px">${pills}</div>
       <div class="fc-tri"><b>${fmt(toReview)}</b> to review · ${fmt(reviewed)} triaged</div>
+      ${allowSuppressedCount() ? `<div class="fc-sup" id="allowLink" title="Findings hidden by your allow-list. Click to review or restore them.">${fmt(allowSuppressedCount())} suppressed · allow-list</div>` : ""}
       <button class="findings-cta" type="button">
         <span>${inHunt ? "Back to timeline" : "Review findings"}</span><span class="arrow">${inHunt ? "←" : "→"}</span>
       </button>
@@ -1211,7 +1274,9 @@ function sigmaConfig() {
   return {
     folder: c.folder || "",
     auto: !!c.auto,
-    filter: { min_level: (c.filter && c.filter.min_level) || "medium", statuses: (c.filter && c.filter.statuses) || ["stable", "test"] },
+    filter: { min_level: (c.filter && c.filter.min_level) || "medium", statuses: (c.filter && c.filter.statuses) || ["stable", "test"],
+      disabled: (c.filter && c.filter.disabled) || [] },
+    disabledTitles: c.disabledTitles || {},
   };
 }
 function saveSigmaConfig(c) { savePref("fx.sigma", c); }
@@ -1242,6 +1307,9 @@ async function renderSigmaView() {
         ${["stable", "test", "experimental"].map((s) => `<label class="sg-chk"><input type="checkbox" data-status="${s}" ${c.filter.statuses.includes(s) ? "checked" : ""}> ${s[0].toUpperCase() + s.slice(1)}</label>`).join("")}
       </div>
       <div class="ioc-preview" id="sgPreview">${c.folder ? "Checking the folder…" : "Choose a folder to see how many rules will run."}</div>
+      ${c.filter.disabled.length ? `<details class="sg-disabled"><summary>${fmt(c.filter.disabled.length)} rule${c.filter.disabled.length === 1 ? "" : "s"} disabled</summary>
+        ${c.filter.disabled.map((id) => `<div class="sg-dis-row"><span>${escapeHtml(c.disabledTitles[id] || id)}</span><button class="linkbtn" data-enable="${escapeHtml(id)}">Enable</button></div>`).join("")}
+        <div class="sg-dis-note">Re-enabled rules run again on the next Sigma hunt.</div></details>` : ""}
       <label class="sg-chk sg-auto"><input type="checkbox" id="sgAuto" ${c.auto ? "checked" : ""}> Also run these rules on every new case</label>
       <div class="iocv-actions">
         <span class="iocv-drop"></span>
@@ -1267,6 +1335,14 @@ async function renderSigmaView() {
     };
   });
   el("sgAuto").onchange = () => update({ auto: el("sgAuto").checked });
+  document.querySelectorAll("[data-enable]").forEach((b) => {
+    b.onclick = () => {
+      const cur = sigmaConfig(), id = b.dataset.enable;
+      const titles = Object.assign({}, cur.disabledTitles); delete titles[id];
+      update({ filter: { ...cur.filter, disabled: cur.filter.disabled.filter((x) => x !== id) }, disabledTitles: titles });
+      renderSigmaView();
+    };
+  });
   el("sgGo").onclick = runSigmaHunt;
   if (c.folder) sigmaPreview();
 }
@@ -1283,7 +1359,7 @@ async function sigmaPreview() {
     if (p.folder_error) { box.innerHTML = `<span class="warn">${escapeHtml(p.folder_error)}</span>`; go.disabled = true; return; }
     const skipped = Object.values(p.skipped_by_reason || {}).reduce((a, b) => a + b, 0);
     box.innerHTML = p.loaded
-      ? `<b>${fmt(p.loaded)} rule${p.loaded === 1 ? "" : "s"} ready</b> from ${fmt(p.files_seen)} files · ${fmt(p.filtered)} filtered by level/status${skipped ? ` · <span class="warn" title="${escapeHtml(Object.entries(p.skipped_by_reason).map(([r, n]) => n + " × " + r).join("\n"))}">${fmt(skipped)} can't run on triage data</span>` : ""}`
+      ? `<b>${fmt(p.loaded)} rule${p.loaded === 1 ? "" : "s"} ready</b> from ${fmt(p.files_seen)} files · ${fmt(p.filtered)} filtered by level/status${p.disabled ? ` · ${fmt(p.disabled)} disabled` : ""}${skipped ? ` · <span class="warn" title="${escapeHtml(Object.entries(p.skipped_by_reason).map(([r, n]) => n + " × " + r).join("\n"))}">${fmt(skipped)} can't run on triage data</span>` : ""}`
       : `<span class="warn">No rules to run from this folder${p.files_seen ? ` (${fmt(p.files_seen)} files, ${fmt(p.filtered)} filtered, ${fmt(skipped)} unsupported)` : " — is it a Sigma rules folder?"}.</span>`;
     go.disabled = !p.loaded;
     go.textContent = p.loaded ? `Run Sigma hunt (${fmt(p.loaded)})` : "Run Sigma hunt";
@@ -1320,19 +1396,38 @@ function renderSigmaResults(r) {
   const nSkip = skipped.reduce((a, [, n]) => a + n, 0);
   const lvl = (l) => `<span class="sev-pill sev-${l === "informational" ? "low" : l}">${escapeHtml(l)}</span>`;
   box.innerHTML = `<div class="iocv-sumrow">
-      <div class="iocv-sum"><span class="big">${fmt(r.rules_hit)}</span> of ${fmt(r.loaded)} rules matched · ${fmt(r.findings)} finding${r.findings === 1 ? "" : "s"}</div>
+      <div class="iocv-sum"><span class="big">${fmt(r.rules_hit)}</span> of ${fmt(r.loaded)} rules matched · ${fmt(r.findings)} finding${r.findings === 1 ? "" : "s"}${r.disabled ? ` · ${fmt(r.disabled)} disabled` : ""}</div>
       ${r.findings ? `<button class="topbtn" id="sgAsFindings">Show as findings</button>` : ""}
     </div>
     <div class="ioc-table-wrap"><table class="ioc-table sg-table">
-      <thead><tr><th>Level</th><th>Rule</th><th>Log source</th><th style="text-align:right">Findings</th><th>First seen</th><th>Last seen</th><th></th></tr></thead>
+      <thead><tr><th>Level</th><th>Rule</th><th>Log source</th><th style="text-align:right">Findings</th><th>First seen</th><th>Last seen</th><th></th><th></th></tr></thead>
       <tbody>${r.hits.map((h) => `<tr class="hit" data-rule="${escapeHtml(h.rule_id)}" title="Show every matching event${h.author ? "\nRule by " + escapeHtml(h.author) : ""}">
         <td>${lvl(h.level)}</td><td class="sg-title">${escapeHtml(h.title)}${h.author ? `<span class="sg-by">by ${escapeHtml(h.author)}</span>` : ""}</td>
         <td class="where">${escapeHtml(h.logsource)}</td><td class="n">${fmt(h.findings)}</td>
-        <td class="ts">${h.first_seen ? escapeHtml(ukDateTime(h.first_seen)) : ""}</td><td class="ts">${h.last_seen && h.findings > 1 ? escapeHtml(ukDateTime(h.last_seen)) : ""}</td><td class="go">›</td></tr>`).join("")
-        || `<tr class="miss"><td colspan="7">No Sigma rule matched this case.</td></tr>`}</tbody>
+        <td class="ts">${h.first_seen ? escapeHtml(ukDateTime(h.first_seen)) : ""}</td><td class="ts">${h.last_seen && h.findings > 1 ? escapeHtml(ukDateTime(h.last_seen)) : ""}</td><td class="sg-dis"><button class="linkbtn sg-disable" data-rule="${escapeHtml(h.rule_id)}" data-title="${escapeHtml(h.title)}" title="Stop running this rule and remove its findings. Re-enable from the panel on the left.">Disable</button></td><td class="go">›</td></tr>`).join("")
+        || `<tr class="miss"><td colspan="8">No Sigma rule matched this case.</td></tr>`}</tbody>
     </table></div>
     ${nSkip ? `<details class="sg-skipped"><summary>${fmt(nSkip)} rule${nSkip === 1 ? "" : "s"} couldn't run on triage data</summary><ul>${skipped.map(([why, n]) => `<li><b>${fmt(n)}</b> ${escapeHtml(why)}</li>`).join("")}</ul></details>` : ""}
     <p class="iocv-note">Running Sigma again replaces these results and their findings. Built-in rule and IOC findings are never touched. Sigma rules are by their authors, under the Detection Rule License 1.1.</p>`;
+  box.querySelectorAll(".sg-disable").forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      const id = b.dataset.rule, title = b.dataset.title;
+      const cur = sigmaConfig();
+      if (!cur.filter.disabled.includes(id)) {
+        saveSigmaConfig(Object.assign(cur, { filter: { ...cur.filter, disabled: cur.filter.disabled.concat([id]) }, disabledTitles: { ...cur.disabledTitles, [id]: title } }));
+      }
+      try {
+        const r = await backend.sigmaDisableRule(id);
+        if (r) state.sigma = r;
+        state.detections = (await backend.huntResults()) || [];
+        try { state.triage = (await backend.listTriage()) || state.triage; } catch (err) {}
+        toast(`Disabled "${title}". Its findings were removed.`, 3500);
+        renderRail();
+        if (state.view === "ioc" && state.iocTab === "sigma") renderSigmaView();
+      } catch (err) { alert("Couldn't disable the rule:\n" + (err && err.message ? err.message : err)); }
+    };
+  });
   const af = el("sgAsFindings");
   if (af) af.onclick = () => { state.view = "hunt"; state.huntOnly = "sigma"; renderRail(); renderToolbar(); refresh(); };
   box.querySelectorAll("tr.hit[data-rule]").forEach((tr) => {
@@ -1520,6 +1615,10 @@ async function refresh() {
     renderHostView();
     return;
   }
+  if (state.view === "allow") {
+    renderAllowView();
+    return;
+  }
   if (state.view === "ingestlog") {
     await renderIngestLog();
     return;
@@ -1541,14 +1640,14 @@ async function refresh() {
     const n = state.rows.length;
     el("resultCount").textContent = `${fmt(n)} event${n === 1 ? "" : "s"}`;
     const bar = el("idfBar");
-    const isIoc = f.kind === "ioc", isSigma = f.kind === "sigma";
+    const isIoc = f.kind === "ioc", isSigma = f.kind === "sigma", isFinding = f.kind === "finding";
     bar.classList.toggle("is-tag", f.kind === "tag");
-    bar.innerHTML = `<span class="idf-tag">${isIoc ? "IOC" : isSigma ? "Sigma" : "Tag"}</span><span class="idf-val" title="${escapeHtml(f.label)}">${escapeHtml(f.label)}</span>`
-      + `<span class="idf-n">${fmt(n)} ${isIoc || isSigma ? "matching" : "tagged"} event${n === 1 ? "" : "s"}${isIoc && f.ids.length >= 500 ? " (first 500)" : ""}</span><span class="idf-sp"></span>`
-      + (isIoc || isSigma ? `<button class="idf-btn" id="idfBack">${isSigma ? "Back to Sigma results" : "Back to IOC hunt"}</button>` : "")
+    bar.innerHTML = `<span class="idf-tag">${isIoc ? "IOC" : isSigma ? "Sigma" : isFinding ? "Finding" : "Tag"}</span><span class="idf-val" title="${escapeHtml(f.label)}">${escapeHtml(f.label)}</span>`
+      + `<span class="idf-n">${fmt(n)} ${isIoc || isSigma || isFinding ? "matching" : "tagged"} event${n === 1 ? "" : "s"}${isIoc && f.ids.length >= 500 ? " (first 500)" : ""}</span><span class="idf-sp"></span>`
+      + (isIoc || isSigma || isFinding ? `<button class="idf-btn" id="idfBack">${isSigma ? "Back to Sigma results" : isFinding ? "Back to findings" : "Back to IOC hunt"}</button>` : "")
       + `<button class="idf-btn" id="idfClear">Clear filter</button>`;
     bar.hidden = false;
-    if (el("idfBack")) el("idfBack").onclick = () => { state.iocTab = isSigma ? "sigma" : "ioc"; state.idFilter = null; state.view = "ioc"; closeDetail(); renderRail(); renderToolbar(); refresh(); };
+    if (el("idfBack")) el("idfBack").onclick = () => { state.iocTab = isSigma ? "sigma" : "ioc"; state.idFilter = null; state.view = isFinding ? "hunt" : "ioc"; closeDetail(); renderRail(); renderToolbar(); refresh(); };
     el("idfClear").onclick = () => { state.idFilter = null; refresh(); };
     renderStatus();
     renderWindow();
@@ -1612,6 +1711,136 @@ function renderResultCount(triageActive) {
 // The hunt view replaces the virtualized grid with a detections list — few
 // enough that no virtualization is needed. Worst-first, each row expandable to
 // its ATT&CK techniques and a pivot back to the contributing events.
+
+// ── Allow-list (suppress known-benign findings) ─────────────────────────────
+// Case entries live in the case file; "all cases" entries are also kept on
+// this machine and merged into every case that's opened.
+function allowSuppressedCount() { return (state.allow && state.allow.suppressed && state.allow.suppressed.length) || 0; }
+function globalAllow() { return loadPref("fx.allowGlobal", []) || []; }
+function saveGlobalAllow(list) { savePref("fx.allowGlobal", list); }
+
+async function syncAllowlist() {
+  try {
+    const cur = await backend.allowlistGet();
+    const have = new Set((cur.entries || []).map((e) => e.id));
+    const missing = globalAllow().filter((g) => !have.has(g.id));
+    state.allow = missing.length ? await backend.allowlistSet((cur.entries || []).concat(missing)) : cur;
+  } catch (e) { state.allow = { entries: [], counts: {}, suppressed: [] }; }
+}
+
+async function setAllowEntries(entries) {
+  state.allow = await backend.allowlistSet(entries);
+  state.detections = (await backend.huntResults()) || [];
+  try { state.triage = (await backend.listTriage()) || state.triage; } catch (e) {}
+}
+
+// Best guess at the distinctive part of a finding's summary: a path or
+// value after the last ": ", else the whole summary.
+function suggestContains(summary) {
+  const s = String(summary || "");
+  const m = s.match(/[A-Za-z]:\\[^\s"']+|\\\\[^\s"']+|\/[^\s"']+/);
+  if (m) {
+    const parts = m[0].split(/[\\/]/);
+    return parts.length > 2 ? parts.slice(0, -1).join(m[0].includes("\\") ? "\\" : "/") + (m[0].includes("\\") ? "\\" : "/") : m[0];
+  }
+  const i = s.lastIndexOf(": ");
+  return (i >= 0 ? s.slice(i + 2) : s).slice(0, 120);
+}
+
+function openSuppressDialog(d) {
+  if (!d) return;
+  let m = el("supModal");
+  if (!m) { m = document.createElement("div"); m.id = "supModal"; m.className = "modal"; document.body.appendChild(m); }
+  const sample = (state.detections || []).filter((x) => x.rule_id === d.rule_id);
+  m.innerHTML = `<div class="modal-box sup-box" role="dialog" aria-modal="true" aria-labelledby="supTitle">
+    <div class="modal-head"><span id="supTitle">Suppress findings</span><button class="modal-close" id="supClose" aria-label="Close">✕</button></div>
+    <div class="modal-body sup-body">
+      <p>Hide findings you've confirmed are benign. Nothing is deleted: you can restore them from the allow-list at any time, and they stay hidden after re-running the hunt.</p>
+      <label class="sg-lbl">Rule</label>
+      <label class="sg-chk"><input type="radio" name="supRule" value="${escapeHtml(d.rule_id)}" checked> ${escapeHtml(d.title)}</label>
+      <label class="sg-chk"><input type="radio" name="supRule" value="*"> Any rule</label>
+      <label class="sg-lbl" for="supText">Where the finding contains</label>
+      <input class="sup-input" id="supText" value="${escapeHtml(suggestContains(d.summary))}" spellcheck="false">
+      <div class="sup-hint">Case-insensitive match on the finding text: <span class="sup-sum">${escapeHtml(d.summary)}</span></div>
+      <div class="sup-count" id="supCount"></div>
+      <label class="sg-lbl" for="supNote">Reason</label>
+      <input class="sup-input" id="supNote" placeholder="e.g. KAPE collection copies on the imaged host">
+      <label class="sg-lbl">Applies to</label>
+      <label class="sg-chk"><input type="radio" name="supScope" value="case" checked> This case only</label>
+      <label class="sg-chk"><input type="radio" name="supScope" value="global"> Every case on this machine</label>
+      <div class="iocv-actions"><span class="iocv-drop"></span><button class="topbtn" id="supCancel">Cancel</button><button class="btn-primary" id="supGo">Suppress</button></div>
+    </div></div>`;
+  m.classList.add("show");
+  const close = () => m.classList.remove("show");
+  el("supClose").onclick = close; el("supCancel").onclick = close;
+  m.onclick = (e) => { if (e.target === m) close(); };
+  const rule = () => (m.querySelector("input[name=supRule]:checked") || {}).value;
+  const count = () => {
+    const t = el("supText").value.trim().toLowerCase(), r = rule();
+    const n = t ? (state.detections || []).filter((x) => (r === "*" || x.rule_id === r) && String(x.summary).toLowerCase().includes(t)).length : 0;
+    el("supCount").textContent = t ? `Matches ${fmt(n)} current finding${n === 1 ? "" : "s"}${r !== "*" ? ` (of ${fmt(sample.length)} from this rule)` : ""}.` : "Enter some text to match.";
+    el("supGo").disabled = !n;
+  };
+  el("supText").oninput = count;
+  m.querySelectorAll("input[name=supRule]").forEach((x) => (x.onchange = count));
+  count();
+  el("supText").focus(); el("supText").select();
+  el("supGo").onclick = async () => {
+    const r = rule();
+    const entry = {
+      id: "al-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      rule_id: r, rule_title: r === "*" ? "Any rule" : d.title,
+      contains: el("supText").value.trim(), note: el("supNote").value.trim(),
+      scope: (m.querySelector("input[name=supScope]:checked") || {}).value || "case",
+      created: new Date().toISOString(),
+    };
+    if (entry.scope === "global") saveGlobalAllow(globalAllow().concat([entry]));
+    try {
+      await setAllowEntries(((state.allow && state.allow.entries) || []).concat([entry]));
+      close();
+      const n = (state.allow.counts || {})[entry.id] || 0;
+      toast(`Suppressed ${fmt(n)} finding${n === 1 ? "" : "s"}. Restore from the allow-list.`, 4000);
+      renderRail(); refresh();
+    } catch (e) { alert("Couldn't save the allow-list:\n" + (e && e.message ? e.message : e)); }
+  };
+}
+
+function renderAllowView() {
+  const a = state.allow || { entries: [], counts: {}, suppressed: [] };
+  el("resultCount").innerHTML = `Allow-list · ${fmt(a.suppressed.length)} suppressed <button class="linkbtn" id="allowBack">Back to findings</button>`;
+  el("allowBack").onclick = () => { state.view = "hunt"; renderRail(); renderToolbar(); refresh(); };
+  el("spTop").style.height = "0px"; el("spBot").style.height = "0px";
+  const sevOf = (s) => `<span class="sev-tag sev-${s}">${escapeHtml(s)}</span>`;
+  const byEntry = {};
+  a.suppressed.forEach((r) => (byEntry[r.allow_id] = byEntry[r.allow_id] || []).push(r));
+  el("rows").innerHTML = `<div class="allowv">
+    <p class="iocv-sub">Findings you've marked as known benign. They're hidden from the findings list, counts, exports and the report, but never deleted — remove an entry to bring its findings back.</p>
+    ${a.entries.length ? a.entries.map((e) => {
+      const rows = byEntry[e.id] || [];
+      return `<div class="allow-entry">
+        <div class="ae-head">
+          <div class="ae-what"><b>${escapeHtml(e.rule_title || e.rule_id)}</b> where the finding contains <code>${escapeHtml(e.contains)}</code></div>
+          <div class="ae-meta">${fmt(rows.length)} suppressed · ${e.scope === "global" ? "every case on this machine" : "this case"}${e.note ? ` · ${escapeHtml(e.note)}` : ""}${e.created ? ` · added ${escapeHtml(ukDateTime(e.created.slice(0, 19)))}` : ""}</div>
+          <button class="topbtn ae-rm" data-id="${escapeHtml(e.id)}">Remove</button>
+        </div>
+        ${rows.length ? `<details class="ae-rows"><summary>Show suppressed findings</summary>${rows.slice(0, 200).map((r) => `<div class="ae-row">${sevOf(r.severity)} <span class="ae-ts">${escapeHtml(ukDateTime(r.ts))}</span> ${escapeHtml(r.summary)}</div>`).join("")}${rows.length > 200 ? `<div class="ae-row">…and ${fmt(rows.length - 200)} more</div>` : ""}</details>` : ""}
+      </div>`;
+    }).join("") : `<div class="iocv-empty"><h3>Nothing suppressed</h3><p>In the findings list, use <b>Suppress…</b> on a finding you've confirmed is benign to hide it and others like it.</p></div>`}
+  </div>`;
+  el("rows").querySelectorAll(".ae-rm").forEach((b) => {
+    b.onclick = async () => {
+      const id = b.dataset.id, e = a.entries.find((x) => x.id === id);
+      if (e && e.scope === "global") saveGlobalAllow(globalAllow().filter((g) => g.id !== id));
+      try {
+        await setAllowEntries(a.entries.filter((x) => x.id !== id));
+        toast("Removed. Its findings are back in the list.", 3000);
+        renderRail(); refresh();
+      } catch (err) { alert("Couldn't update the allow-list:\n" + (err && err.message ? err.message : err)); }
+    };
+  });
+  renderStatus();
+}
+
 function renderHuntView() {
   const rules = state.detections || [];
   // Manual findings: triaged events not already covered by a rule detection.
@@ -1637,30 +1866,35 @@ function renderHuntView() {
     el("huntShowAll").onclick = () => { state.huntOnly = null; renderHuntView(); };
   } else {
     const manualNote = manual.length ? ` (${rules.length} rule + ${manual.length} analyst)` : "";
-    el("resultCount").textContent = `${fmt(d.length)} findings${manualNote}`;
+    const nSup = allowSuppressedCount();
+    el("resultCount").innerHTML = `${fmt(d.length)} findings${manualNote} <button class="linkbtn" id="huntAllow">Allow-list${nSup ? ` (${fmt(nSup)} suppressed)` : ""}</button>`;
+    el("huntAllow").onclick = () => { state.view = "allow"; renderRail(); renderToolbar(); refresh(); };
   }
   el("spTop").style.height = "0px";
   el("spBot").style.height = "0px";
-  el("rows").innerHTML = d.map(huntRowHtml).join("") ||
+  el("rows").innerHTML = d.map((x, i) => huntRowHtml(x, i)).join("") ||
     `<div class="empty"><div class="box"><h2>No findings</h2><p>No rule detections and nothing triaged yet. Validate events in the timeline to add analyst findings here.</p></div></div>`;
   // Clicking a finding jumps to its event in the timeline + opens the detail
   // pane (raw record + triage buttons live there).
-  el("rows").querySelectorAll(".hitrow[data-event]").forEach((row) => {
-    row.addEventListener("click", () => {
-      const det = row.dataset.rule ? d.find((x) => x.rule_id === row.dataset.rule && x.engine === "ioc") : null;
-      if (det) showIocEvents(det); else openFindingEvent(row.dataset.event, row.dataset.ts || "");
-    });
+  el("rows").querySelectorAll(".hit-sup").forEach((b) => {
+    b.addEventListener("click", (e) => { e.stopPropagation(); openSuppressDialog(d[Number(b.dataset.i)]); });
+  });
+  // Clicking a finding opens its event in the detail panel on the right and
+  // keeps the list in place; "Show in timeline" in the panel jumps across.
+  el("rows").querySelectorAll(".hitrow[data-i]").forEach((row) => {
+    row.addEventListener("click", () => openFindingDetail(d[Number(row.dataset.i)], row));
   });
   renderStatus();
 }
 
-function huntRowHtml(d) {
+function huntRowHtml(d, i) {
   const attack = (d.attack || []).map((t) => `<span class="att">${t}</span>`).join("");
   const eng = d.engine === "correlation" ? "correlated" : d.engine === "ioc" ? "IOC match" : d.engine === "sigma" ? "Sigma" : "single-event";
   const eid = (d.event_ids && d.event_ids.length) ? d.event_ids[0] : "";
   const tri = eid ? triageStateFor(eid) : "";
   const triBadge = tri ? `<span class="tri-badge ${tri}">${tri.replace("_"," ")}</span>` : "";
-  return `<div class="hitrow sev-border-${d.severity}" data-event="${eid}" data-ts="${escapeHtml(d.ts || "")}"${d.engine === "ioc" ? ` data-rule="${escapeHtml(d.rule_id)}"` : ""}>
+  const sel = state.detailFinding && state.detailFinding === d && state.selectedId ? " sel" : "";
+  return `<div class="hitrow sev-border-${d.severity}${sel}" data-i="${i}" data-event="${eid}" data-ts="${escapeHtml(d.ts || "")}"${d.engine === "ioc" ? ` data-rule="${escapeHtml(d.rule_id)}"` : ""}>
     <div class="hit-main">
       <span class="sev-tag sev-${d.severity}">${d.severity}</span>
       <span class="hit-title">${escapeHtml(d.title)}</span>
@@ -1668,9 +1902,46 @@ function huntRowHtml(d) {
     </div>
     <div class="hit-sub">
       <span class="hit-summary">${escapeHtml(d.summary)}</span>
-      <span class="hit-meta">${time(d.ts)} · ${d.host || "—"} · ${eng} · ${d.engine === "ioc" ? "click to show all matching events" : "click to open"} ▸</span>
+      <span class="hit-meta">${d.engine !== "manual" && i != null ? `<button class="hit-sup" data-i="${i}" title="Hide findings like this one (known benign). Reversible from the allow-list.">Suppress…</button>` : ""}${time(d.ts)} · ${d.host || "—"} · ${eng} · click to open ▸</span>
     </div>
   </div>`;
+}
+
+
+// Findings view: show a finding's (first) event in the right-hand panel.
+async function openFindingDetail(det, row) {
+  const eid = det && det.event_ids && det.event_ids[0];
+  if (!eid) { toast("This finding has no single event to open"); return; }
+  document.querySelectorAll(".hitrow").forEach((r) => r.classList.toggle("sel", r === row));
+  state.detailCache = state.detailCache || {};
+  if (!state.detailCache[eid] && !state.rows.find((r) => r.id === eid)) {
+    try {
+      const got = (await backend.eventsByIds([eid])) || [];
+      if (got[0]) state.detailCache[eid] = got[0];
+    } catch (e) { /* fall through */ }
+  }
+  if (!state.detailCache[eid] && !state.rows.find((r) => r.id === eid)) {
+    findingToTimeline(det); // couldn't load it here: fall back to the timeline
+    return;
+  }
+  state.detailFinding = det;
+  await select(eid);
+}
+
+// Jump from a finding to the timeline: one event -> its place in time; several
+// (IOC / Sigma / correlation) -> exactly those events.
+function findingToTimeline(det) {
+  if (!det) return;
+  const ids = det.event_ids || [];
+  if (det.engine === "ioc") { showIocEvents(det); return; }
+  if (ids.length > 1) {
+    state.view = "timeline"; state.huntOnly = null;
+    state.filter = { text: "", category: null, artefact: null, triage: null, flagged_only: false, limit: 5000, offset: 0 };
+    state.idFilter = { kind: "finding", label: det.title, ids: ids.slice(0, 5000), key: JSON.stringify(state.filter) };
+    closeDetail(); renderRail(); renderToolbar(); refresh();
+    return;
+  }
+  openFindingEvent(ids[0], det.ts || "");
 }
 
 // Jump from a finding to its underlying event: switch to the timeline, find
@@ -1825,7 +2096,7 @@ function tagLabel(e) {
 // ── Detail pane ──────────────────────────────────────────────────────────────
 async function select(id) {
   state.selectedId = id;
-  const e = state.rows.find((r) => r.id === id);
+  const e = state.rows.find((r) => r.id === id) || (state.detailCache || {})[id];
   if (!e) return;
   document.querySelectorAll(".evrow").forEach((r) => r.classList.toggle("sel", r.dataset.id === id));
   el("app").classList.add("detail-open");
@@ -1844,6 +2115,7 @@ async function select(id) {
           <div class="action">${escapeHtml(e.action)}</div>
           <div class="when">${time(e.ts)} · ${escapeHtml(e.ts_kind)}</div>
         </div>
+        ${state.view === "hunt" && state.detailFinding ? `<button class="topbtn det-tl" id="detTimeline" title="Open this finding's event${(state.detailFinding.event_ids || []).length > 1 ? "s" : ""} in the timeline">${(state.detailFinding.event_ids || []).length > 1 ? `Show all ${fmt(state.detailFinding.event_ids.length)} events` : "Show in timeline"}</button>` : ""}
         <button class="dh-icon" id="detWide" title="${state.detailWide ? "Restore width" : "Widen panel"}">${state.detailWide ? "⇥" : "⇤"}</button>
         <button class="dh-icon" id="detClose" title="Close (Esc)">✕</button>
       </div>
@@ -1883,6 +2155,7 @@ async function select(id) {
       <pre class="raw" id="rawPre" style="font-size:${state.rawFont}px" data-wrap="${state.rawWrap ? 1 : 0}">${pretty ? highlightJson(pretty) : "no raw record"}</pre>
     </div>`;
   el("detClose").onclick = closeDetail;
+  if (el("detTimeline")) el("detTimeline").onclick = () => findingToTimeline(state.detailFinding);
   el("detWide").onclick = () => { state.detailWide = !state.detailWide; applyDetailWidth(); select(id); };
   wireDetailResizer();
 
@@ -2097,6 +2370,8 @@ function renderWindowIfTimeline() {
 }
 function closeDetail() {
   state.selectedId = null;
+  state.detailFinding = null;
+  document.querySelectorAll(".hitrow.sel").forEach((r) => r.classList.remove("sel"));
   el("app").classList.remove("detail-open");
   document.querySelectorAll(".evrow").forEach((r) => r.classList.remove("sel"));
 }
@@ -2177,6 +2452,11 @@ function wireEvents() {
   });
 
   el("rail").addEventListener("click", (e) => {
+    if (e.target.closest("#allowLink")) {
+      state.view = state.view === "allow" ? "hunt" : "allow";
+      closeDetail(); renderRail(); renderToolbar(); refresh();
+      return;
+    }
     // Findings section toggles the hunt view.
     if (e.target.closest("#findingsSection")) {
       state.view = state.view === "hunt" ? "timeline" : "hunt";
@@ -2314,7 +2594,7 @@ function humanBytes(n) {
   return i === 0 ? `${n} B` : `${v.toFixed(1)} ${u[i]}`;
 }
 function catColorForArtefact(art) {
-  const map = { Prefetch:"execution", UserAssist:"execution", Amcache:"execution", BamDam:"execution",
+  const map = { Prefetch:"execution", UserAssist:"execution", Amcache:"execution", BamDam:"execution", Pca:"execution",
     RegistryRun:"persistence", RegistryService:"persistence",
     Mft:"filesystem", UsnJrnl:"filesystem", Srum:"network", RegistryGeneric:"network", Evtx:"logon" };
   return CAT_COLOR[map[art]] || "var(--cat-other)";

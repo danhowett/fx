@@ -126,6 +126,17 @@ pub enum ArtefactKind {
     RemoteAccess,
     /// Microsoft Defender support logs (MPLog-*.log).
     DefenderLog,
+    /// User activity registry keys (RecentDocs, Open/Save MRU, TypedPaths,
+    /// WordWheelQuery, mapped drives, Office MRU / TrustRecords).
+    UserActivity,
+    /// Program Compatibility Assistant launch logs (Windows 11).
+    Pca,
+    /// Device installation log (setupapi.dev.log).
+    SetupApi,
+    /// Memory paged to disk (pagefile.sys / swapfile.sys), carved for strings.
+    Pagefile,
+    /// Hibernation file (hiberfil.sys): header facts only.
+    Hiberfil,
     /// Registry-derived but not one of the specialized views above.
     RegistryGeneric,
     /// Identified container we can read but have no specialized parser for yet.

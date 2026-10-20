@@ -189,6 +189,7 @@ fn scan_events(store: &CaseStore, ev_rules: &[EventRule], engine: DetectionEngin
     let mut compiled = crate::event_rule::GatedRules::new(ev_rules);
     let mut hit_buf: Vec<bool> = Vec::new();
     let mut matched: Vec<usize> = Vec::new();
+    let mut remnant_hits: Vec<u32> = Vec::new();
     fx_core::progress::start_scan(store.event_count().unwrap_or(0));
     let mut tick: u64 = 0;
     let mut stopped = false;
@@ -205,6 +206,36 @@ fn scan_events(store: &CaseStore, ev_rules: &[EventRule], engine: DetectionEngin
         compiled.matching(ev, &mut hit_buf, &mut matched);
         for &ri in &matched {
             let rule = &ev_rules[ri];
+            // Memory remnants (pagefile / swapfile strings) have no time of
+            // their own and include paged-out AV signatures: fold every hit
+            // of a rule in one file into a single finding, capped at medium.
+            if ev.artefact == fx_core::ArtefactKind::Pagefile {
+                let key = (rule.id.clone(), ev.provenance.evidence_id, "pagefile".to_string());
+                if let Some(&idx) = mft_seen.get(&key) {
+                    let d: &mut Detection = &mut detections[idx];
+                    if d.event_ids.len() < 500 {
+                        d.event_ids.push(ev.id);
+                    }
+                    remnant_hits[idx] += 1;
+                    continue;
+                }
+                mft_seen.insert(key, detections.len());
+                remnant_hits.resize(detections.len() + 1, 0);
+                remnant_hits[detections.len()] = 1;
+                detections.push(Detection {
+                    id: Uuid::new_v4(),
+                    rule_id: rule.id.clone(),
+                    title: rule.title.clone(),
+                    severity: rule.severity.min(fx_core::Severity::Medium),
+                    attack: rule.attack.clone(),
+                    summary: single_summary(rule, ev),
+                    event_ids: vec![ev.id],
+                    timestamp: ev.timestamp,
+                    host: ev.host.clone(),
+                    engine,
+                });
+                continue;
+            }
             if ev.artefact == fx_core::ArtefactKind::Mft {
                 if let Some(sref) = &ev.provenance.source_ref {
                     let key = (rule.id.clone(), ev.provenance.evidence_id, sref.clone());
@@ -234,6 +265,17 @@ fn scan_events(store: &CaseStore, ev_rules: &[EventRule], engine: DetectionEngin
         }
     });
     fx_core::progress::add_scanned(tick & 4095);
+    for (i, n) in remnant_hits.iter().enumerate() {
+        if *n > 0 {
+            if let Some(d) = detections.get_mut(i) {
+                d.summary = format!(
+                    "Memory remnant{}: {} (no timestamp; may be paged-out AV signature text, corroborate)",
+                    if *n > 1 { format!(" ×{n}") } else { String::new() },
+                    d.summary
+                );
+            }
+        }
+    }
     (detections, scan.err().map(|e| format!("single-event scan: {e}")))
 }
 
@@ -258,6 +300,7 @@ pub struct SigmaRunReport {
     pub folder: String,
     pub loaded: usize,
     pub filtered: usize,
+    pub disabled: usize,
     pub files_seen: usize,
     pub skipped_by_reason: std::collections::BTreeMap<String, usize>,
     pub skipped_examples: Vec<sigma::SigmaSkip>,
@@ -320,6 +363,7 @@ pub fn run_sigma(store: &CaseStore, folder: &str, load: &sigma::SigmaLoad) -> Si
         folder: folder.to_string(),
         loaded: load.loaded,
         filtered: load.filtered,
+        disabled: load.disabled,
         files_seen: load.files_seen,
         skipped_by_reason: load.skipped_by_reason.clone(),
         skipped_examples: load.skipped_examples.clone(),
@@ -373,6 +417,9 @@ static EMBEDDED_RULES: &[(&str, &str)] = &[
     ("defender_asr_block.yml", include_str!("../rules/defender_asr_block.yml")),
     ("defender_detections.yml", include_str!("../rules/defender_detections.yml")),
     ("defender_tampering.yml", include_str!("../rules/defender_tampering.yml")),
+    ("office_macros_enabled.yml", include_str!("../rules/office_macros_enabled.yml")),
+    ("user_search_sensitive_terms.yml", include_str!("../rules/user_search_sensitive_terms.yml")),
+    ("user_admin_share_access.yml", include_str!("../rules/user_admin_share_access.yml")),
     ("defense_evasion_indicators.yml", include_str!("../rules/defense_evasion_indicators.yml")),
     ("discovery_recon_commands.yml", include_str!("../rules/discovery_recon_commands.yml")),
     ("execution_lolbin_abuse.yml", include_str!("../rules/execution_lolbin_abuse.yml")),

@@ -306,6 +306,17 @@ fn cmd_hunt(args: &[String]) -> anyhow::Result<ExitCode> {
             }
         }
     }
+    // Re-apply the case's allow-list (set in the GUI) so known-benign findings
+    // stay suppressed after a re-hunt.
+    let allow: Vec<fx_store::allowlist::AllowEntry> = store
+        .kv_get("allowlist")?
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default();
+    if !allow.is_empty() {
+        let counts = store.apply_allowlist(&allow)?;
+        let n: u64 = counts.iter().map(|c| c.1).sum();
+        println!("Allow-list: {} entries, {n} finding(s) suppressed", allow.len());
+    }
     println!("\n{} detections from {} rules:\n", report.detections, report.rules_run);
 
     for d in store.detections()? {

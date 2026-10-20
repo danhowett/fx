@@ -17,7 +17,7 @@ RESPONSE, Velociraptor, CyLR, or a raw copy — and fx:
 
 1. **Identifies** every file by content (magic bytes), not by extension.
 2. **Normalises** everything onto one timeline (`fx_core::Event`).
-3. **Hunts** with 34 behaviour-based built-in rules (generic ATT&CK techniques
+3. **Hunts** with 37 behaviour-based built-in rules (generic ATT&CK techniques
    + the top ransomware crews' TTPs), embedded in the binary — and, optionally,
    the ~2,000 community **SigmaHQ** Windows rules and your own **IOC lists**.
 4. Lets you **triage, tag, pivot, visualise activity, and export** findings —
@@ -136,6 +136,15 @@ and can be cancelled without losing the work already done.
   USB / device, network-profile & autostart registry keys, Run-dialog (RunMRU),
   outbound-RDP history, and **remote-access tool logs** (AnyDesk, TeamViewer,
   ScreenConnect).
+- **User activity** — recent documents, Open/Save dialog history, typed
+  Explorer paths and searches, mapped drives and shares, typed URLs, Office
+  recent files and **Office documents where macros were enabled**.
+- **Memory remnants** — command lines, URLs, IPs, domains, hashes and tool
+  names carved from `pagefile.sys` / `swapfile.sys` (the rules and IOC hunt
+  run on them), plus `hiberfil.sys` state.
+- **PCA and setupapi** — Windows 11 Program Compatibility Assistant launch
+  records (execution evidence where Prefetch is off) and the first time each
+  USB device was connected.
 - **ShellBags with full folder paths** — shell items decoded properly (known
   folders, volumes, long file names, network shares), so you see
   `This PC\C:\Users\…\Finance` rather than raw bytes.
@@ -166,6 +175,11 @@ and can be cancelled without losing the work already done.
   and exportable.
 
 ### Analyst workspace
+- **Allow-list** — suppress known-benign findings (per case or for every case)
+  without deleting them; review and restore them at any time. Noisy Sigma
+  rules can be disabled per rule.
+- **Artefact notes** — hover over any artefact in the rail for what that
+  evidence source shows and why it matters.
 - **Live progress** — while a case ingests or a hunt runs, a progress panel
   shows the phase, a size-weighted progress bar, the file being parsed, files
   and data done, events written, elapsed time and time left. Failed files and

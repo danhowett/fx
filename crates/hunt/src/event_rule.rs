@@ -657,7 +657,7 @@ struct Gate {
 const ALL_ARTEFACTS: &[&str] = &[
     "Evtx", "Mft", "UsnJrnl", "LogFile", "Prefetch", "Amcache", "ShimCache", "RegistryRun", "RegistryService",
     "UserAssist", "ShellBags", "BamDam", "Srum", "ScheduledTask", "Lnk", "JumpList", "Recycle", "BrowserHistory",
-    "PsHistory", "WindowsTimeline", "RemoteAccess", "DefenderLog", "RegistryGeneric", "Unclassified",
+    "PsHistory", "WindowsTimeline", "RemoteAccess", "DefenderLog", "UserActivity", "Pca", "SetupApi", "Pagefile", "Hiberfil", "RegistryGeneric", "Unclassified",
 ];
 
 type Set = std::collections::HashSet<String>;

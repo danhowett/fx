@@ -1,0 +1,31 @@
+kind: event
+id: user_search_sensitive_terms
+title: Explorer search for credentials or sensitive data
+description: >
+  The user searched in Explorer (WordWheelQuery) for terms associated with
+  credential hunting or data discovery — passwords, VPN configs, password
+  manager vaults, wallets, mailbox files. On a compromised account this is
+  hands-on-keyboard discovery before collection or exfiltration. Only the most
+  recent search has an exact time; the MRU rank orders the rest.
+severity: medium
+attack:
+  - T1083      # file and directory discovery
+  - T1552.001  # unsecured credentials: credentials in files
+detection:
+  all:
+    - match:
+        field: action
+        op: equals
+        values: [user.search]
+    - match:
+        field: message
+        op: regex
+        values:
+          - "(?i)(passw|pwd|creds?\\b|credential|login|secret|vpn|\\.kdbx|keepass|lastpass|1password|bitwarden|wallet|seed phrase|\\.pst\\b|\\.ost\\b|backup|confidential|payroll|invoice|bank)"
+tests:
+  match:
+    - { artefact: user_activity, action: user.search, message: "Explorer search (most recent): passwords" }
+    - { artefact: user_activity, action: user.search, message: "Explorer search (#3): *.kdbx" }
+  no_match:
+    - { artefact: user_activity, action: user.search, message: "Explorer search (#2): holiday photos" }
+    - { artefact: user_activity, action: user.typed_path, message: "Typed in Explorer: C:/passwords" }

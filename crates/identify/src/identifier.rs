@@ -217,6 +217,19 @@ fn resolve_by_path_only(lower: &str, name: &str) -> Option<(ArtefactKind, IdMeth
         // tool-specific names (plus the vendor folder where the name is
         // generic) are the signal.
         Some((ArtefactKind::RemoteAccess, IdMethod::PathOnly, 0.85))
+    } else if name == "pcaapplaunchdic.txt" || (name.starts_with("pcageneraldb") && name.ends_with(".txt")) {
+        // Program Compatibility Assistant launch logs (Windows 11,
+        // Windows\appcompat\pca). Plain text; the names are the signal.
+        Some((ArtefactKind::Pca, IdMethod::PathOnly, 0.9))
+    } else if name == "setupapi.dev.log" || (name.starts_with("setupapi.dev.") && name.ends_with(".log")) {
+        // Device installation log (Windows\INF), including archived
+        // setupapi.dev.YYYYMMDD_HHMMSS.log copies.
+        Some((ArtefactKind::SetupApi, IdMethod::PathOnly, 0.9))
+    } else if name == "pagefile.sys" || name == "swapfile.sys" {
+        // Memory paged to disk. No magic; the name is the signal.
+        Some((ArtefactKind::Pagefile, IdMethod::PathOnly, 0.95))
+    } else if name == "hiberfil.sys" {
+        Some((ArtefactKind::Hiberfil, IdMethod::PathOnly, 0.95))
     } else if name.starts_with("mplog-") && name.ends_with(".log") {
         // Microsoft Defender support log (ProgramData\Microsoft\Windows
         // Defender\Support\MPLog-*.log). UTF-16 text; the name is the signal.

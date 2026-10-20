@@ -88,6 +88,7 @@ are recovered where possible. Extractors:
 |----------|------------------|
 | Prefetch (`.pf`) | executable name, run count, up to 8 last-run times (SCCA v23/26/30/31, MAM-decompressed) |
 | SRUM (`SRUDB.dat`) | per-process network bytes sent/received (exfil signal) and application usage, resolved via the SRUM ID map |
+| PCA (`PcaAppLaunchDic.txt`, `PcaGeneralDb0/1.txt`) | Windows 11 Program Compatibility Assistant: executables launched with full path and UTC time, plus abnormal exits — execution evidence where Prefetch is disabled |
 
 ### Persistence & user activity
 
@@ -99,6 +100,44 @@ are recovered where possible. Extractors:
 | Browser history | Chromium + Firefox — visits and downloads, with domain and event type |
 | LNK & Jump Lists | shell-link targets; auto/custom jump lists; flags **removable-media** (USB serial) and **network-share** (UNC) origins; MRU metadata |
 | Recycle Bin (`$I`) | original path, original size, and deletion time of deleted files (both format versions) |
+
+### User activity (NTUSER.DAT)
+
+Shown as the **UserActivity** artefact. MRU lists only date their most recent
+entry (the key's last-write time), so each entry carries its MRU rank; Office
+recent files and Trusted Documents carry their own per-item times.
+
+| Key | What it surfaces |
+|-----|------------------|
+| RecentDocs | files and folders the user opened, in recency order, plus the last file of each extension |
+| ComDlg32 OpenSavePidlMRU | full paths of files chosen in Open / Save dialogs, per extension |
+| ComDlg32 LastVisitedPidlMRU | which program used an Open / Save dialog, and the folder it was in |
+| TypedPaths | paths typed into the Explorer address bar (including UNC paths) |
+| WordWheelQuery | Explorer search terms |
+| Map Network Drive MRU, MountPoints2 | shares mapped or connected, and volumes mounted, by this user |
+| TypedURLs | URLs typed into Internet Explorer / legacy Edge |
+| Office File MRU | Office documents opened, with per-file time |
+| Office TrustRecords | documents where the user enabled editing — and whether **macros were enabled** |
+
+### Memory remnants (pagefile, swapfile, hiberfil)
+
+| Artefact | What it surfaces |
+|----------|------------------|
+| `pagefile.sys`, `swapfile.sys` | strings carved from memory paged to disk (ASCII and UTF-16): **command lines** starting with a shell, LOLBin or known tool (the rule pack runs on these), **URLs**, and deduplicated **IP addresses, domains, MD5/SHA-1/SHA-256 hashes and executable / script names** (searched by the IOC hunt) |
+| `hiberfil.sys` | whether a hibernation image is present or the header was wiped after resume, its size and when it was written. The contents are compressed and are not carved |
+
+Remnants have no timestamps of their own, so they're dated to the file's
+modified time (roughly the last boot or shutdown). The pagefile also holds
+paged-out **antivirus signatures**, which contain exactly the strings attackers
+use, so a remnant on its own is a lead, not proof: findings from remnants say
+so, are capped at **medium** severity and are folded into **one finding per
+rule per file** (with a count). Corroborate with on-disk evidence.
+
+### USB devices
+
+| Artefact | What it surfaces |
+|----------|------------------|
+| `setupapi.dev.log` | the **first time** each USB storage device, portable device or other USB device was connected, with vendor, product and serial. Times are the host's local time, recorded as written |
 
 ### Remote-access tools
 
@@ -139,7 +178,7 @@ per-file **ingest log** records whether each parsed, was unsupported, or failed
 
 ## What it hunts for
 
-**26 detection rules**, matching behaviour and tooling — **not file hashes**
+**37 built-in detection rules**, matching behaviour and tooling — **not file hashes**
 (which rotate constantly). Two layers:
 
 **Generic ATT&CK technique rules** — credential dumping (LSASS, SAM/NTDS,
@@ -154,9 +193,36 @@ volume: Qilin, TheGentlemen, Akira, Play / DragonForce, LockBit, INC Ransom
 distinctive tradecraft — tool names, command-line patterns, BYOVD drivers,
 RMM / tunnel / exfil stacks, and ransom-note filenames.
 
+**User activity rules** — Office documents with macros enabled, Explorer
+searches for credentials or sensitive data, and interactive access to admin
+shares or IP-addressed UNC paths.
+
 Detections come from two engines: **single-event** (one event matches a rule)
 and **correlation** (a pattern across events, e.g. mass file-rename bursts or
 bulk SRUM exfil).
+
+**Hover over an artefact** in the left rail's Artefact list for a short note on
+what that evidence source shows and why it's useful.
+
+### Suppressing known-benign findings (allow-list)
+
+In the findings list, hover over a finding and choose **Suppress…**. Pick the
+rule (or *any rule*), the text the finding must contain (fx suggests the folder
+or value from the finding), a reason, and whether it applies to **this case**
+or **every case on this machine**. Matching findings are hidden from the list,
+counts, Findings only, exports and the report — but never deleted. The
+findings card shows how many are suppressed; click it (or **Allow-list** in the
+findings header) to review what's hidden and **Remove** an entry to bring its
+findings back. The allow-list is re-applied after every hunt, Sigma run and
+IOC sweep (and by `fx hunt` on the command line).
+
+### Disabling a Sigma rule
+
+In **IOC hunt → Sigma rules**, hover over a rule in the results and click
+**Disable**. Its findings are removed straight away and it won't run again.
+Disabled rules are listed under the rule options on the left, where **Enable**
+puts a rule back for the next Sigma hunt. The disabled list is kept on this
+machine and applies to every case.
 
 ## The workflow
 

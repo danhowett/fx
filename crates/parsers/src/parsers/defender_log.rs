@@ -209,7 +209,7 @@ fn fmt_ts(t: OffsetDateTime) -> String {
 
 /// A timestamp at the start of the line: `2024-05-01T10:11:12.345Z`,
 /// `2024-05-01 10:11:12`, or `05-01-2024 10:11:12`. Returns the rest of the line.
-fn leading_timestamp(line: &str) -> (Option<OffsetDateTime>, &str) {
+pub(crate) fn leading_timestamp(line: &str) -> (Option<OffsetDateTime>, &str) {
     let b = line.as_bytes();
     let digits = |r: std::ops::Range<usize>| -> Option<u32> {
         let s = line.get(r)?;

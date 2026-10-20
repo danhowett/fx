@@ -345,6 +345,7 @@ pub async fn run_hunt(
             }
         }
     }
+    reapply_allowlist(store);
     read_detections(store)
 }
 
@@ -822,6 +823,7 @@ pub async fn ioc_sweep(
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
     let report = fx_hunt::ioc::sweep(store, &parsed).map_err(|e| e.to_string())?;
+    reapply_allowlist(store);
     // Save the list and its results with the case, so the IOC hunt view shows
     // them again next time the case is opened. Best-effort: a failed save must
     // not lose the results the analyst is about to see.
@@ -981,6 +983,7 @@ pub async fn sigma_hunt(app: tauri::AppHandle, state: tauri::State<'_, AppState>
             }
         }
     }
+    reapply_allowlist(store);
     if let Ok(j) = serde_json::to_string(&config) {
         let _ = store.kv_set("sigma.config", &j);
     }
@@ -1003,6 +1006,97 @@ pub async fn sigma_saved(state: tauri::State<'_, AppState>) -> Result<SigmaSaved
     let store = guard.as_ref().ok_or("no case open")?;
     let get = |k: &str| store.kv_get(k).ok().flatten().and_then(|j| serde_json::from_str(&j).ok());
     Ok(SigmaSaved { config: get("sigma.config"), results: get("sigma.results") })
+}
+
+
+// ── Allow-list (suppressed findings) ─────────────────────────────────────────
+
+/// The case's allow-list (kv `allowlist`), re-applied after every hunt so a
+/// re-run never resurrects findings the analyst has already ruled benign.
+fn allow_entries(store: &CaseStore) -> Vec<fx_store::allowlist::AllowEntry> {
+    store.kv_get("allowlist").ok().flatten().and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default()
+}
+
+fn reapply_allowlist(store: &CaseStore) {
+    let entries = allow_entries(store);
+    if let Err(e) = store.apply_allowlist(&entries) {
+        eprintln!("apply allow-list: {e}");
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct AllowStatus {
+    pub entries: Vec<fx_store::allowlist::AllowEntry>,
+    pub counts: std::collections::BTreeMap<String, u64>,
+    pub suppressed: Vec<fx_store::allowlist::SuppressedRow>,
+}
+
+fn allow_status(store: &CaseStore, counts: Vec<(String, u64)>) -> Result<AllowStatus, String> {
+    Ok(AllowStatus {
+        entries: allow_entries(store),
+        counts: counts.into_iter().collect(),
+        suppressed: store.suppressed().map_err(|e| e.to_string())?,
+    })
+}
+
+#[tauri::command]
+pub async fn allowlist_get(state: tauri::State<'_, AppState>) -> Result<AllowStatus, String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    let mut counts: std::collections::BTreeMap<String, u64> = Default::default();
+    for r in store.suppressed().map_err(|e| e.to_string())? {
+        *counts.entry(r.allow_id).or_insert(0) += 1;
+    }
+    allow_status(store, counts.into_iter().collect())
+}
+
+/// Replace the case's allow-list and re-apply it (restores anything no longer listed).
+#[tauri::command]
+pub async fn allowlist_set(
+    state: tauri::State<'_, AppState>,
+    entries: Vec<fx_store::allowlist::AllowEntry>,
+) -> Result<AllowStatus, String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    let j = serde_json::to_string(&entries).map_err(|e| e.to_string())?;
+    store.kv_set("allowlist", &j).map_err(|e| e.to_string())?;
+    let counts = store.apply_allowlist(&entries).map_err(|e| e.to_string())?;
+    allow_status(store, counts)
+}
+
+/// Switch one Sigma rule off for this case: its findings go now, and the
+/// saved run summary drops it. (The frontend keeps the machine-wide list of
+/// disabled rules and sends it with every Sigma run.)
+#[tauri::command]
+pub async fn sigma_disable_rule(
+    state: tauri::State<'_, AppState>,
+    rule_id: String,
+) -> Result<Option<serde_json::Value>, String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    store.delete_rule_findings("sigma", &rule_id).map_err(|e| e.to_string())?;
+    let mut results: Option<serde_json::Value> =
+        store.kv_get("sigma.results").ok().flatten().and_then(|j| serde_json::from_str(&j).ok());
+    if let Some(r) = results.as_mut() {
+        let mut removed = 0u64;
+        if let Some(hits) = r.get_mut("hits").and_then(|h| h.as_array_mut()) {
+            hits.retain(|h| {
+                let hit = h.get("rule_id").and_then(|v| v.as_str()) == Some(rule_id.as_str());
+                if hit {
+                    removed += h.get("findings").and_then(|v| v.as_u64()).unwrap_or(0);
+                }
+                !hit
+            });
+            let n = hits.len();
+            r["rules_hit"] = serde_json::json!(n);
+        }
+        let f = r.get("findings").and_then(|v| v.as_u64()).unwrap_or(0);
+        r["findings"] = serde_json::json!(f.saturating_sub(removed));
+        let d = r.get("disabled").and_then(|v| v.as_u64()).unwrap_or(0);
+        r["disabled"] = serde_json::json!(d + 1);
+        let _ = store.kv_set("sigma.results", &r.to_string());
+    }
+    Ok(results)
 }
 
 // ── Host information ─────────────────────────────────────────────────────────
