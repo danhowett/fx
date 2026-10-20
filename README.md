@@ -18,7 +18,7 @@ RESPONSE, Velociraptor, CyLR, or a raw copy — and fx:
 1. **Identifies** every file by content (magic bytes), not by extension.
 2. **Normalises** everything onto one timeline (`fx_core::Event`).
 3. **Hunts** with 37 behaviour-based built-in rules (generic ATT&CK techniques
-   + the top ransomware crews' TTPs), embedded in the binary — and, optionally,
+   plus the top ransomware crews' TTPs), embedded in the binary — and, optionally,
    the ~2,000 community **SigmaHQ** Windows rules and your own **IOC lists**.
 4. Lets you **triage, tag, pivot, visualise activity, and export** findings —
    with the SHA-256-hashed evidence behind every result.
