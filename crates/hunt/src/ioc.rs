@@ -249,6 +249,20 @@ fn variants(ioc: &Ioc) -> Vec<String> {
     out
 }
 
+/// The lower-case search forms for one indicator value as typed (defanged or
+/// not), as the sweep matches them. Used to show *every* event matching an
+/// indicator in the timeline, beyond the ids stored with its finding.
+pub fn search_forms(value: &str) -> Vec<String> {
+    let parsed = parse_iocs(value);
+    let mut out: Vec<String> = parsed.iocs.iter().flat_map(variants).collect();
+    if out.is_empty() {
+        out.push(value.trim().to_ascii_lowercase());
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn boundary_ok(text: &str, start: usize, end: usize) -> bool {
     let tok = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
     let before = text[..start].chars().next_back();

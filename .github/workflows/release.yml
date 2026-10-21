@@ -1,0 +1,69 @@
+# Builds fx-gui.exe and fx.exe on a clean Windows runner from the tagged
+# source and attaches them, with SHA-256 checksums, to the GitHub release.
+#
+# Use: draft the release on github.com as usual (tag vX.Y.Z on main, title,
+# notes) and Publish it WITHOUT attaching binaries. This workflow then builds
+# both executables from that tag and uploads them plus SHA256SUMS.txt to the
+# same release (about 20-30 minutes; the first run is the slowest). It can
+# also be run by hand from the Actions tab for an existing tag.
+name: Release build
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build and upload to (e.g. v0.1.9)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Install Rust (stable, MSVC)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the command-line tool
+        run: cargo build --release --locked -p fx-cli
+
+      - name: Build the desktop app
+        run: cargo build --release --locked -p fx-gui --features tauri/custom-protocol
+
+      - name: Collect binaries and checksums
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\fx.exe dist\fx.exe
+          Copy-Item target\release\fx-gui.exe dist\fx-gui.exe
+          $lines = Get-ChildItem dist\*.exe | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          }
+          $lines += ""
+          $lines += "Built by GitHub Actions from tag $env:TAG (commit $env:GITHUB_SHA)."
+          $lines += "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $lines | Set-Content -Encoding ascii dist\SHA256SUMS.txt
+          Get-Content dist\SHA256SUMS.txt
+
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          files: |
+            dist/fx-gui.exe
+            dist/fx.exe
+            dist/SHA256SUMS.txt

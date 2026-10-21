@@ -1,0 +1,62 @@
+name: Bug report
+description: Something crashed, failed to parse, or behaved wrongly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing fx. **Please don't attach real case data or anything identifying a client.** Screenshots with sensitive values blurred, or a description, are fine.
+  - type: input
+    id: version
+    attributes:
+      label: fx version
+      description: The release you downloaded (from the GitHub Releases page).
+      placeholder: v0.1.8
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where did it happen?
+      options:
+        - Desktop app (fx-gui)
+        - Command line (fx)
+        - Both
+    validations:
+      required: true
+  - type: dropdown
+    id: collector
+    attributes:
+      label: Collection tool
+      options:
+        - KAPE
+        - Velociraptor
+        - Magnet RESPONSE
+        - CyLR
+        - Raw / manual copy
+        - Other / not sure
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version of the analysed host
+      placeholder: e.g. Windows 11 23H2, Windows Server 2019
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: ingestlog
+    attributes:
+      label: Ingest log / error text
+      description: If a file failed or looked wrong, the line from the ingest log (rail → view ingest log), or the error shown. Remove anything sensitive.
+      render: text
+  - type: input
+    id: size
+    attributes:
+      label: Rough case size
+      placeholder: e.g. 2.5M events, 1,400 files, 12 GB collection

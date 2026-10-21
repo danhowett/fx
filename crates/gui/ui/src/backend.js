@@ -434,6 +434,8 @@ function applyFilter(rows, f = {}) {
   let out = rows;
   if (f.text) { const q = f.text.toLowerCase();
     out = out.filter((e) => (e.message || "").toLowerCase().includes(q) || (e.user||"").toLowerCase().includes(q)); }
+  if (f.ioc) { const q = String(f.ioc).toLowerCase();
+    out = out.filter((e) => (e.message || "").toLowerCase().includes(q)); }
   if (f.artefact) out = out.filter((e) => e.artefact === f.artefact);
   if (f.category) out = out.filter((e) => e.category === f.category);
   if (f.flagged_only) out = out.filter((e) => e.flagged);

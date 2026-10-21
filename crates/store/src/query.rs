@@ -43,6 +43,11 @@ pub struct TimelineFilter {
     /// Only events behind a finding (rule / Sigma / IOC) or triaged as
     /// validated / unconfirmed. SQL predicate, whole-case.
     pub flagged_only: bool,
+    /// Events whose searchable text (the lifted columns AND the raw record —
+    /// the same text the IOC hunt searches) contains ANY of these lower-case
+    /// strings. Lets the timeline show every match of an indicator, paged,
+    /// rather than the capped id list stored with an IOC finding.
+    pub any_text: Vec<String>,
     pub limit: usize,
     pub offset: usize,
 }
@@ -204,6 +209,20 @@ impl CaseStore {
             let like = format!("%{t}%");
             for _ in 0..5 {
                 binds.push(Box::new(like.clone()));
+            }
+        }
+        if !f.any_text.is_empty() {
+            let terms: Vec<&String> = f.any_text.iter().filter(|t| !t.is_empty()).take(16).collect();
+            if !terms.is_empty() {
+                sql.push_str(" AND (");
+                let hay = "lower(concat_ws(chr(10), message, command_line, process_path, process_name, \
+                           target_path, target_value, src_ip, dst_ip, process_sha1, host, user_name, CAST(raw AS VARCHAR)))";
+                let ors: Vec<String> = terms.iter().map(|_| format!("contains({hay}, ?)")).collect();
+                sql.push_str(&ors.join(" OR "));
+                sql.push_str(")");
+                for t in terms {
+                    binds.push(Box::new(t.to_lowercase()));
+                }
             }
         }
         if let Some(cat) = &f.category {

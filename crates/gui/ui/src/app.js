@@ -1072,8 +1072,8 @@ function renderIocResults(r) {
       // match case-insensitively — paths and hashes keep their case here.
       const want = (":" + v).toLowerCase();
       const det = (state.detections || []).find((d) => d.engine === "ioc" && d.rule_id.toLowerCase().endsWith(want));
-      if (det) showIocEvents(det, v);
-      else toast("No events stored for this indicator — run the hunt again");
+      // The timeline view is a live search, so it doesn't need the stored finding.
+      showIocEvents(det || { rule_id: "ioc:text:" + v.toLowerCase() }, v);
     };
   });
 }
@@ -1177,7 +1177,7 @@ function clearAllFilters() {
 }
 function allEventsActive() {
   const f = state.filter || {};
-  return state.view === "timeline" && !state.idFilter && !f.text && !f.category && !f.artefact && !f.triage && !f.flagged_only && !f.after && !f.before;
+  return state.view === "timeline" && !state.idFilter && !f.ioc && !f.text && !f.category && !f.artefact && !f.triage && !f.flagged_only && !f.after && !f.before;
 }
 
 // A narrow, time-proportional histogram of the whole case above the event
@@ -1457,13 +1457,16 @@ function renderSigmaResults(r) {
 
 // Show every event an IOC finding matched, in time order, in the timeline.
 function showIocEvents(det, shownAs) {
-  const ids = det.event_ids || [];
-  if (!ids.length) return;
-  const label = shownAs || det.rule_id.replace(/^ioc:[^:]*:/, "");
+  // Every event matching the indicator, as a live (paged) timeline filter
+  // over the whole case: the same text the sweep searched, raw records
+  // included. Not limited to the ids stored with the finding.
+  const value = det.rule_id.replace(/^ioc:[^:]*:/, "");
+  if (!value) return;
   state.view = "timeline";
   state.huntOnly = null;
-  state.filter = { text: "", category: null, artefact: null, triage: null, flagged_only: false, limit: 5000, offset: 0 };
-  state.idFilter = { kind: "ioc", label, ids, key: JSON.stringify(state.filter) };
+  state.idFilter = null;
+  state.filter = { text: "", category: null, artefact: null, triage: null, flagged_only: false, limit: 5000, offset: 0, ioc: value };
+  state.iocLabel = shownAs || value;
   closeDetail();
   renderRail(); renderToolbar();
   refresh();
@@ -1686,11 +1689,27 @@ async function refresh() {
     try { state.total = await backend.countTimeline({ ...state.filter }); } catch (e) { state.total = null; }
   }
   renderResultCount(triageActive);
+  renderIocBar();
   renderStatus();
   renderWindow();
   viewport.scrollTop = 0; // a new page starts at the top
   // Calibrate the row height once, after layout. Not re-run during scroll.
   requestAnimationFrame(() => requestAnimationFrame(calibrateRowHeight));
+}
+
+// Bar above the timeline while it is filtered to one IOC's matches.
+function renderIocBar() {
+  const bar = el("idfBar"); if (!bar) return;
+  const v = state.filter.ioc;
+  if (!v) { if (!state.idFilter) bar.hidden = true; return; }
+  const n = state.total;
+  bar.classList.remove("is-tag");
+  bar.innerHTML = `<span class="idf-tag">IOC</span><span class="idf-val" title="${escapeHtml(state.iocLabel || v)}">${escapeHtml(state.iocLabel || v)}</span>`
+    + `<span class="idf-n">${n == null ? "" : `${fmt(n)} matching event${n === 1 ? "" : "s"}`}</span><span class="idf-sp"></span>`
+    + `<button class="idf-btn" id="idfBack">Back to IOC hunt</button><button class="idf-btn" id="idfClear">Clear filter</button>`;
+  bar.hidden = false;
+  el("idfBack").onclick = () => { state.iocTab = "ioc"; delete state.filter.ioc; state.view = "ioc"; closeDetail(); renderRail(); renderToolbar(); refresh(); };
+  el("idfClear").onclick = () => { delete state.filter.ioc; state.filter.offset = 0; renderToolbar(); refresh(); };
 }
 
 // Result-count + paging indicator. Shows the window position within the full
@@ -2129,7 +2148,9 @@ async function select(id) {
           <div class="action">${escapeHtml(e.action)}</div>
           <div class="when">${time(e.ts)} · ${escapeHtml(e.ts_kind)}</div>
         </div>
-        ${state.view === "hunt" && state.detailFinding ? `<button class="topbtn det-tl" id="detTimeline" title="Open this finding's event${(state.detailFinding.event_ids || []).length > 1 ? "s" : ""} in the timeline">${(state.detailFinding.event_ids || []).length > 1 ? `Show all ${fmt(state.detailFinding.event_ids.length)} events` : "Show in timeline"}</button>` : ""}
+        ${state.view === "hunt" && state.detailFinding ? (() => { const f = state.detailFinding, n = (f.event_ids || []).length;
+          const lbl = f.engine === "ioc" ? "Show all matches" : n > 1 ? `Show all ${fmt(n)} events` : "Show in timeline";
+          return `<button class="topbtn det-tl" id="detTimeline" title="${f.engine === "ioc" ? "Every event in the case matching this indicator, paged" : "Open this finding's event" + (n > 1 ? "s" : "") + " in the timeline"}">${lbl}</button>`; })() : ""}
         <button class="dh-icon" id="detWide" title="${state.detailWide ? "Restore width" : "Widen panel"}">${state.detailWide ? "⇥" : "⇤"}</button>
         <button class="dh-icon" id="detClose" title="Close (Esc)">✕</button>
       </div>
@@ -2191,6 +2212,7 @@ async function select(id) {
       if (isNaN(t)) return;
       const iso = (ms) => new Date(ms).toISOString().slice(0, 19) + "Z";
       state.view = "timeline";
+      delete state.filter.ioc; // a pivot shows everything around the event
       state.filter.after = iso(t - secs * 1000);
       state.filter.before = iso(t + secs * 1000);
       state.filter.category = null; state.filter.artefact = null; state.filter.triage = null;

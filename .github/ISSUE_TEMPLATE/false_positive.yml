@@ -1,0 +1,52 @@
+name: False positive / noisy finding
+description: A built-in rule (or Sigma rule) fires on something benign.
+labels: ["false positive", "rules"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        These reports directly improve the rules, thank you. **Please don't paste real client data**: replace usernames, hostnames and paths that identify anyone, but keep the shape of the value (for example `C:\Users\<user>\AppData\Local\...`).
+  - type: input
+    id: version
+    attributes:
+      label: fx version
+      placeholder: v0.1.8
+    validations:
+      required: true
+  - type: input
+    id: rule
+    attributes:
+      label: Rule title or id
+      description: As shown on the finding, e.g. "Scheduled task launching from a suspicious location" or `suspicious_scheduled_task`. For Sigma, the rule title.
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Engine
+      options:
+        - Built-in rule
+        - Sigma rule
+        - IOC hunt
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: What it matched
+      description: The finding summary and the relevant raw-record fields (command line, path, event ID…), sanitised.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it's benign
+      description: e.g. built-in Windows task, a vendor's updater, the collection tool itself.
+    validations:
+      required: true
+  - type: input
+    id: count
+    attributes:
+      label: How many findings did it produce on the case?
+      placeholder: e.g. 1, 40, every host

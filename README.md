@@ -42,9 +42,10 @@ source** — see [Licence](#licence).
 
 | | |
 |---|---|
-| **Run it** | Download `fx-gui.exe` (desktop) and/or `fx.exe` (CLI) from the [**Releases**](../../releases) page. Rules are embedded — nothing else needed. |
+| **Run it** | Download `fx-gui.exe` (desktop) and/or `fx.exe` (CLI) from the [**Releases**](../../releases) page. Rules are embedded — nothing else needed. Release binaries are built by GitHub Actions from the tagged source; check them against the release's `SHA256SUMS.txt` with `Get-FileHash fx-gui.exe`. |
 | **Build it** | See [**`INSTALL.md`**](INSTALL.md) — step by step from a bare machine. A normal clone builds with no dependency fiddling (`Cargo.lock` is committed; `nom` is pinned). |
 | **Learn it** | [**`HELP.md`**](HELP.md) — every view and feature. · [**`RUNBOOK.md`**](RUNBOOK.md) — end-to-end operator workflow. · [**`ARCHITECTURE.md`**](ARCHITECTURE.md) — how it's built. · [**`ROADMAP.md`**](ROADMAP.md) — what's needed for 1.0. |
+| **Report it** | Found a bug or a noisy rule? [Open an issue](../../issues/new/choose) — there are forms for bugs, false positives and feature requests. Please don't attach real case data. |
 
 > **Antivirus note:** fx is an unsigned binary carrying hunt rules that name
 > offensive tools. Defender / EDR may quarantine it — expected for a DFIR tool.

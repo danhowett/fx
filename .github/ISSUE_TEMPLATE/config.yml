@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Usage questions and how-to
+    url: https://github.com/danhowett/fx/blob/main/HELP.md
+    about: Every view and feature is described in HELP.md.

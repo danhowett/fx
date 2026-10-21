@@ -104,3 +104,28 @@ fn local_time_events_convert_with_host_rule() {
     // Second pass is a no-op (the event is now marked as converted).
     assert_eq!(store.convert_local_times(&r).unwrap(), 0);
 }
+
+#[test]
+fn any_text_filter_pages_through_every_match() {
+    let dir = std::env::temp_dir().join(format!("fxcase-any-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = CaseStore::create(&dir.join("a.fxcase"), "any", None, "UTC").unwrap();
+    let evid = Uuid::new_v4();
+    {
+        let mut w = store.event_writer();
+        for i in 0..1200 {
+            let mut e = sample_event(evid, "process.execute", &format!("C:/tmp/tool{i}.exe"));
+            if i % 2 == 0 {
+                e.raw = serde_json::json!({"note": "contains EvilMarker in raw only"});
+            }
+            w.emit(e);
+        }
+        w.flush().unwrap();
+    }
+    let f = |offset| TimelineFilter { any_text: vec!["evilmarker".into()], limit: 500, offset, ..Default::default() };
+    assert_eq!(store.count_timeline(&f(0)).unwrap(), 600, "raw-only matches are found");
+    assert_eq!(store.timeline(&f(0)).unwrap().len(), 500);
+    assert_eq!(store.timeline(&f(500)).unwrap().len(), 100, "matches beyond 500 reachable by paging");
+    let none = TimelineFilter { any_text: vec!["nothing-here".into()], ..Default::default() };
+    assert_eq!(store.count_timeline(&none).unwrap(), 0);
+}

@@ -17,9 +17,8 @@ collection tool produced it, and what looked wrong.
 
 ### Accuracy
 - [x] Duplicate findings: byte-identical files are parsed once, Sigma rules load once per id
-- [ ] Tighten the scheduled-task rule: `rundll32` / `regsvr32` only when the DLL
-      sits outside System32 / SysWOW64 or uses script / URL tricks (built-in
-      Windows tasks currently match)
+- [x] Tighten the scheduled-task rule: `rundll32` / `regsvr32` only when the DLL
+      sits outside System32 / SysWOW64 or uses script / URL tricks
 - [x] Convert local-time sources (setupapi, TeamViewer) to UTC using the
       analysed host's own time-zone rule, keeping the original value
 - [x] Optional display time zone (UTC / host local)
@@ -30,7 +29,8 @@ collection tool produced it, and what looked wrong.
 
 ### Trustworthy builds
 - [ ] Release builds produced by GitHub Actions from the tagged source
-- [ ] SHA-256 checksums published with every release
+      (workflow added; tick once the first release has built cleanly)
+- [ ] SHA-256 checksums published with every release (same workflow)
 - [ ] Code signing (reduces antivirus quarantines)
 
 ### Documentation

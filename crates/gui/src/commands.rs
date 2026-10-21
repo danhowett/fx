@@ -110,6 +110,9 @@ pub struct FilterInput {
     pub user: Option<String>,
     pub text: Option<String>,
     pub flagged_only: Option<bool>,
+    /// An IOC value: show every event matching it (same search as the sweep).
+    #[serde(default)]
+    pub ioc: Option<String>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
 }
@@ -272,6 +275,7 @@ pub async fn query_timeline(
         // page is a true slice and paging via limit/offset is correct.
         category: filter.category,
         flagged_only: filter.flagged_only.unwrap_or(false),
+        any_text: filter.ioc.as_deref().map(fx_hunt::ioc::search_forms).unwrap_or_default(),
         limit: filter.limit.unwrap_or(1000),
         offset: filter.offset.unwrap_or(0),
     };
@@ -300,6 +304,7 @@ pub async fn count_timeline(
         text: filter.text,
         category: filter.category,
         flagged_only: filter.flagged_only.unwrap_or(false),
+        any_text: filter.ioc.as_deref().map(fx_hunt::ioc::search_forms).unwrap_or_default(),
         limit: 0,
         offset: 0,
     };
