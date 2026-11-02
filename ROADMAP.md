@@ -14,6 +14,8 @@ collection tool produced it, and what looked wrong.
 - [ ] Confirm the v0.1.6 / v0.1.7 parsers on real artefacts: user activity
       (NTUSER.DAT), PCA, setupapi, pagefile / swapfile carving, Defender MPLog
 - [ ] Allow-list and Sigma runs on a multi-million-event case
+- [ ] Multi-host cases (v0.1.9) on real collections: host naming, per-host time
+      zones, and adding a host to a case made by an earlier version
 
 ### Accuracy
 - [x] Duplicate findings: byte-identical files are parsed once, Sigma rules load once per id
@@ -38,7 +40,12 @@ collection tool produced it, and what looked wrong.
 - [ ] Consistent "Parses / Look for" notes for every artefact in the rail
 
 ## After 1.0 (ideas, not promises)
+- Multi-host, phase 3: lateral-movement links (a logon on one host from another
+  host's IP opens that host's events at that moment) and a spread view (which
+  hosts each finding or IOC reached, and when it was first seen on each)
 - Hibernation file decompression, so `hiberfil.sys` can be searched like the pagefile
 - More artefacts: User Access Logging (servers), IIS logs, Windows Firewall log,
   Windows Error Reporting, WMI persistence (`OBJECTS.DATA`)
 - Tags in exports and the HTML report
+- Decode at ingest: run Decode on every encoded PowerShell command and script
+  block and raise its findings automatically

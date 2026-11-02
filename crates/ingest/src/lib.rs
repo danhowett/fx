@@ -52,7 +52,9 @@ impl ArtefactStatus {
     fn detail(&self) -> Option<String> {
         match self {
             ArtefactStatus::Failed(m) => Some(m.clone()),
-            ArtefactStatus::Duplicate(orig) => Some(format!("identical (SHA-256) to {orig}; not parsed again")),
+            ArtefactStatus::Duplicate(orig) => {
+                Some(format!("identical (SHA-256) to {orig}; not parsed again"))
+            }
             _ => None,
         }
     }
@@ -66,29 +68,75 @@ pub struct IngestReport {
     pub total_events: u64,
     /// True when the user cancelled part-way; artefacts already parsed are kept.
     pub cancelled: bool,
+    /// The machine this collection came from (see `fx_store::hosts`).
+    pub host: Option<String>,
+    /// True when that host was already in the case (a re-collection).
+    pub merged_host: bool,
+    /// Set when the collection was refused (e.g. already in the case); nothing
+    /// was ingested.
+    pub refused: Option<String>,
 }
 
 /// Run the full pipeline over an extracted collection directory, persisting
-/// everything into `store`.
-pub fn ingest_into_store(root: &Path, registry: &ParserRegistry, store: &CaseStore) -> IngestReport {
-    use fx_core::progress;
-    progress::set_phase("Scanning collection");
-    let scan: CollectionScan = scan_collection(root);
+/// everything into `store`. Works for a new case and for adding another
+/// collection (another host) to an existing one.
+pub fn ingest_into_store(
+    root: &Path,
+    registry: &ParserRegistry,
+    store: &CaseStore,
+) -> IngestReport {
+    ingest_collection_as(root, registry, store, None)
+}
 
+/// As [`ingest_into_store`], with an analyst-chosen host name (otherwise it
+/// is read from the collection).
+pub fn ingest_collection_as(
+    root: &Path,
+    registry: &ParserRegistry,
+    store: &CaseStore,
+    host_name: Option<&str>,
+) -> IngestReport {
+    use fx_core::progress;
     let mut report = IngestReport {
-        profile: scan.profile.clone(),
-        artefacts: Vec::with_capacity(scan.artefacts.len()),
-        unclassified: scan.unclassified.len(),
-        scan_errors: scan.errors.clone(),
+        profile: None,
+        artefacts: Vec::new(),
+        unclassified: 0,
+        scan_errors: Vec::new(),
         total_events: 0,
         cancelled: false,
+        host: None,
+        merged_host: false,
+        refused: None,
     };
+    // An older single-host case gets its collection record first, so the new
+    // collection's rows aren't claimed by it.
+    if let Err(e) = store.ensure_legacy_collection() {
+        report
+            .scan_errors
+            .push(format!("prepare case for another host: {e}"));
+    }
+    let collection = match store.begin_collection(&root.display().to_string()) {
+        Ok(id) => id,
+        Err(e) => {
+            report.refused = Some(e.to_string());
+            return report;
+        }
+    };
+
+    progress::set_phase("Scanning collection");
+    let scan: CollectionScan = scan_collection(root);
+    report.profile = scan.profile.clone();
+    report.artefacts = Vec::with_capacity(scan.artefacts.len());
+    report.unclassified = scan.unclassified.len();
+    report.scan_errors.extend(scan.errors.clone());
 
     // Register (and hash) unclassified files first — they're evidence too, and
     // recording them is the "nothing dropped" guarantee made durable.
     for u in &scan.unclassified {
         if let Err(e) = store.register_unclassified(u) {
-            report.scan_errors.push(format!("register unclassified {}: {e}", u.source_path));
+            report
+                .scan_errors
+                .push(format!("register unclassified {}: {e}", u.source_path));
         }
     }
 
@@ -101,29 +149,62 @@ pub fn ingest_into_store(root: &Path, registry: &ParserRegistry, store: &CaseSto
         .collect();
     progress::set_totals(scan.artefacts.len() as u64, sizes.iter().sum());
     progress::set_phase("Hashing and parsing artefacts");
-    let mut seen: std::collections::HashMap<(String, String), String> = std::collections::HashMap::new();
+    let mut seen: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
     for (artefact, size) in scan.artefacts.iter().zip(&sizes) {
         if progress::cancelled() {
             report.cancelled = true;
             break;
         }
-        progress::set_current(&format!("{:?}|{}|{}", artefact.artefact, artefact.source_path, size));
-        let r = ingest_one(artefact, registry, store, &mut report.total_events, &mut seen);
-        progress::file_done(*size, r.warnings.len() as u64, matches!(r.status, ArtefactStatus::Failed(_)));
+        progress::set_current(&format!(
+            "{:?}|{}|{}",
+            artefact.artefact, artefact.source_path, size
+        ));
+        let r = ingest_one(
+            artefact,
+            registry,
+            store,
+            &mut report.total_events,
+            &mut seen,
+        );
+        progress::file_done(
+            *size,
+            r.warnings.len() as u64,
+            matches!(r.status, ArtefactStatus::Failed(_)),
+        );
         report.artefacts.push(r);
     }
 
+    // Everything registered by this run belongs to this collection.
+    if let Err(e) = store.claim_unassigned(&collection) {
+        report.scan_errors.push(format!("record collection: {e}"));
+    }
+
     // Artefacts that log host-local time go onto the UTC timeline using the
-    // host's own time-zone rule (read from the SYSTEM hive during this ingest).
+    // host's own time-zone rule (read from this collection's SYSTEM hive).
     progress::set_phase("Converting local times to UTC");
-    match store.host_tz_rule() {
-        Ok(Some(rule)) => match store.convert_local_times(&rule) {
-            Ok(n) if n > 0 => tracing::info!("converted {n} local-time events to UTC ({:?})", rule.name),
+    match store.host_tz_rule(Some(&collection)) {
+        Ok(Some(rule)) => match store.convert_local_times(&rule, Some(&collection)) {
+            Ok(n) if n > 0 => {
+                tracing::info!("converted {n} local-time events to UTC ({:?})", rule.name)
+            }
             Ok(_) => {}
-            Err(e) => report.scan_errors.push(format!("local time conversion: {e}")),
+            Err(e) => report
+                .scan_errors
+                .push(format!("local time conversion: {e}")),
         },
         Ok(None) => tracing::info!("host time zone unknown: local-time artefacts left as logged"),
         Err(e) => report.scan_errors.push(format!("read host time zone: {e}")),
+    }
+
+    // Name the host and stamp it on every event from this collection.
+    progress::set_phase("Identifying the host");
+    match store.name_collection_host(&collection, host_name) {
+        Ok((host, merged)) => {
+            report.host = Some(host);
+            report.merged_host = merged;
+        }
+        Err(e) => report.scan_errors.push(format!("name host: {e}")),
     }
 
     // Indexes are cheaper to build once, after the bulk load.
@@ -168,15 +249,30 @@ fn ingest_one(
                 events_emitted: 0,
                 warnings: Vec::new(),
             };
-            let _ = store.record_ingest(&r.source_path, &format!("{:?}", r.artefact), r.status.label(), r.status.detail().as_deref(), 0, 0, 0);
-            tracing::info!("duplicate [{:?}] {} (same as {orig})", artefact.artefact, artefact.source_path);
+            let _ = store.record_ingest(
+                &r.source_path,
+                &format!("{:?}", r.artefact),
+                r.status.label(),
+                r.status.detail().as_deref(),
+                0,
+                0,
+                0,
+            );
+            tracing::info!(
+                "duplicate [{:?}] {} (same as {orig})",
+                artefact.artefact,
+                artefact.source_path
+            );
             return r;
         }
         seen.insert(key, artefact.source_path.clone());
     }
 
     let mut writer = store.event_writer();
-    let mut counting = CountingSink { inner: &mut writer, count: 0 };
+    let mut counting = CountingSink {
+        inner: &mut writer,
+        count: 0,
+    };
 
     // Per-artefact fault isolation must survive a *panic*, not just an Err: the
     // parsers run on attacker-controllable binary artefacts, and a malformed file
@@ -189,7 +285,9 @@ fn ingest_one(
     // artefact is marked Failed).
     // Progress logging: one line before and after each artefact. If ingest ever
     // stalls, the last "parsing" line with no matching "done" names the file.
-    let size = std::fs::metadata(&artefact.path).map(|m| m.len()).unwrap_or(0);
+    let size = std::fs::metadata(&artefact.path)
+        .map(|m| m.len())
+        .unwrap_or(0);
     tracing::info!(
         "parsing [{:?}] {} ({:.1} MB)",
         artefact.artefact,
@@ -236,9 +334,8 @@ fn ingest_one(
         }
     };
 
+    // `counting` holds &mut writer; its borrow ends with this last use.
     let counted = counting.count;
-    // `counting` holds &mut writer; end that borrow before we touch writer.
-    drop(counting);
     // Ensure this artefact's events are committed before we write its report.
     if let Err(e) = writer.flush() {
         tracing::error!("flush after {}: {e}", artefact.source_path);

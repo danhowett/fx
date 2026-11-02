@@ -74,15 +74,30 @@ pub struct ParsedIocs {
 
 /// Restore defanged indicators: hxxp, [.], (.), {.}, [dot], [:], [://].
 fn defang(s: &str) -> String {
-    let mut t = s.trim().trim_matches(|c| c == '"' || c == '\'' || c == '`').to_string();
+    let mut t = s
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+        .to_string();
     for (a, b) in [
-        ("[.]", "."), ("(.)", "."), ("{.}", "."), ("[dot]", "."), ("(dot)", "."),
-        ("[:]", ":"), ("[://]", "://"), ("[@]", "@"), ("[at]", "@"),
+        ("[.]", "."),
+        ("(.)", "."),
+        ("{.}", "."),
+        ("[dot]", "."),
+        ("(dot)", "."),
+        ("[:]", ":"),
+        ("[://]", "://"),
+        ("[@]", "@"),
+        ("[at]", "@"),
     ] {
         t = t.replace(a, b);
     }
     let lower = t.to_ascii_lowercase();
-    for (a, b) in [("hxxps://", "https://"), ("hxxp://", "http://"), ("hxxps[:]//", "https://"), ("hxxp[:]//", "http://")] {
+    for (a, b) in [
+        ("hxxps://", "https://"),
+        ("hxxp://", "http://"),
+        ("hxxps[:]//", "https://"),
+        ("hxxp[:]//", "http://"),
+    ] {
         if lower.starts_with(a) {
             t = format!("{b}{}", &t[a.len()..]);
             break;
@@ -97,12 +112,15 @@ fn is_hex(s: &str) -> bool {
 
 fn is_ipv4(s: &str) -> bool {
     let p: Vec<&str> = s.split('.').collect();
-    p.len() == 4 && p.iter().all(|x| !x.is_empty() && x.len() <= 3 && x.parse::<u8>().is_ok())
+    p.len() == 4
+        && p.iter()
+            .all(|x| !x.is_empty() && x.len() <= 3 && x.parse::<u8>().is_ok())
 }
 
 const FILE_EXTS: &[&str] = &[
-    "exe", "dll", "sys", "ps1", "psm1", "bat", "cmd", "vbs", "vbe", "js", "jse", "hta", "scr", "msi", "lnk",
-    "zip", "rar", "7z", "iso", "img", "jar", "py", "bin", "dat", "tmp", "ocx", "cpl", "wsf", "docm", "xlsm",
+    "exe", "dll", "sys", "ps1", "psm1", "bat", "cmd", "vbs", "vbe", "js", "jse", "hta", "scr",
+    "msi", "lnk", "zip", "rar", "7z", "iso", "img", "jar", "py", "bin", "dat", "tmp", "ocx", "cpl",
+    "wsf", "docm", "xlsm",
 ];
 
 /// Decide what kind of indicator a (defanged) token is. None = ignore.
@@ -123,7 +141,9 @@ pub fn classify(v: &str) -> Option<IocKind> {
         return Some(IocKind::Url);
     }
     let ip_part = l.split(':').next().unwrap_or(&l); // tolerate 1.2.3.4:443
-    if is_ipv4(ip_part) && (l == ip_part || l[ip_part.len() + 1..].bytes().all(|b| b.is_ascii_digit())) {
+    if is_ipv4(ip_part)
+        && (l == ip_part || l[ip_part.len() + 1..].bytes().all(|b| b.is_ascii_digit()))
+    {
         return Some(IocKind::Ipv4);
     }
     if l.matches(':').count() >= 2 && l.bytes().all(|b| b.is_ascii_hexdigit() || b == b':') {
@@ -146,7 +166,9 @@ pub fn classify(v: &str) -> Option<IocKind> {
             let labels: Vec<&str> = l.split('.').collect();
             let tld_ok = ext.len() >= 2 && ext.bytes().all(|b| b.is_ascii_alphabetic());
             let labels_ok = labels.len() >= 2
-                && labels.iter().all(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
+                && labels.iter().all(|x| {
+                    !x.is_empty() && x.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                });
             if tld_ok && labels_ok {
                 return Some(IocKind::Domain);
             }
@@ -169,14 +191,19 @@ pub fn parse_iocs(text: &str) -> ParsedIocs {
             continue;
         }
         let fields: Vec<String> = line
-            .split(|c| c == ',' || c == ';' || c == '\t' || c == '|')
+            .split([',', ';', '\t', '|'])
             .map(defang)
             .filter(|f| !f.is_empty())
             .collect();
-        let typed: Vec<(String, IocKind)> =
-            fields.iter().filter_map(|f| classify(f).map(|k| (f.clone(), k))).collect();
-        let strong: Vec<(String, IocKind)> =
-            typed.iter().filter(|(_, k)| *k != IocKind::Text).cloned().collect();
+        let typed: Vec<(String, IocKind)> = fields
+            .iter()
+            .filter_map(|f| classify(f).map(|k| (f.clone(), k)))
+            .collect();
+        let strong: Vec<(String, IocKind)> = typed
+            .iter()
+            .filter(|(_, k)| *k != IocKind::Text)
+            .cloned()
+            .collect();
         let picked: Vec<(String, IocKind)> = if strong.len() >= 2 {
             strong
         } else if let Some(first) = fields.first() {
@@ -211,6 +238,8 @@ pub struct IocResult {
     pub last_seen: Option<String>,
     /// Matching events per artefact type, e.g. {"Evtx": 12, "Mft": 3}.
     pub artefacts: BTreeMap<String, u64>,
+    /// Matching events per host (multi-host cases), e.g. {"WKSTN-07": 40}.
+    pub hosts: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -223,12 +252,29 @@ pub struct SweepReport {
     pub results: Vec<IocResult>,
 }
 
+#[derive(Default)]
 struct Acc {
     events: u64,
     first: Option<String>,
     last: Option<String>,
     ids: Vec<Uuid>,
     artefacts: BTreeMap<String, u64>,
+}
+
+fn record_hit(a: &mut Acc, id: &str, ts: &str, art: &str) {
+    a.events += 1;
+    if a.first.as_deref().is_none_or(|f| ts < f) {
+        a.first = Some(ts.to_string());
+    }
+    if a.last.as_deref().is_none_or(|l| ts > l) {
+        a.last = Some(ts.to_string());
+    }
+    if a.ids.len() < EVENT_ID_CAP {
+        if let Ok(u) = Uuid::parse_str(id) {
+            a.ids.push(u);
+        }
+    }
+    *a.artefacts.entry(art.to_string()).or_default() += 1;
 }
 
 /// Search forms of an IOC (lower-case). Paths also match their JSON-escaped
@@ -240,7 +286,11 @@ fn variants(ioc: &Ioc) -> Vec<String> {
     if ioc.kind == IocKind::Path {
         out.push(v.replace('\\', "\\\\"));
         let slashed = v.replace('\\', "/");
-        let no_drive = if slashed.len() > 3 && slashed.as_bytes()[1] == b':' { slashed[3..].to_string() } else { slashed.clone() };
+        let no_drive = if slashed.len() > 3 && slashed.as_bytes()[1] == b':' {
+            slashed[3..].to_string()
+        } else {
+            slashed.clone()
+        };
         out.push(slashed);
         out.push(no_drive);
     }
@@ -267,7 +317,7 @@ fn boundary_ok(text: &str, start: usize, end: usize) -> bool {
     let tok = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
     let before = text[..start].chars().next_back();
     let after = text[end..].chars().next();
-    !before.map_or(false, tok) && !after.map_or(false, tok)
+    !before.is_some_and(tok) && !after.is_some_and(tok)
 }
 
 /// Run the sweep over the open case and replace its IOC findings.
@@ -288,7 +338,11 @@ pub fn sweep(store: &CaseStore, parsed: &ParsedIocs) -> Result<SweepReport, Stor
     let regexes: Vec<regex::Regex> = forms
         .chunks(BATCH)
         .filter_map(|chunk| {
-            let alt = chunk.iter().map(|(f, _)| regex::escape(f)).collect::<Vec<_>>().join("|");
+            let alt = chunk
+                .iter()
+                .map(|(f, _)| regex::escape(f))
+                .collect::<Vec<_>>()
+                .join("|");
             regex::RegexBuilder::new(&format!("(?i:{alt})"))
                 .size_limit(256 << 20)
                 .dfa_size_limit(64 << 20)
@@ -298,18 +352,29 @@ pub fn sweep(store: &CaseStore, parsed: &ParsedIocs) -> Result<SweepReport, Stor
         .collect();
 
     let mut acc: Vec<Acc> = (0..iocs.len())
-        .map(|_| Acc { events: 0, first: None, last: None, ids: Vec::new(), artefacts: BTreeMap::new() })
+        .map(|_| Acc {
+            events: 0,
+            first: None,
+            last: None,
+            ids: Vec::new(),
+            artefacts: BTreeMap::new(),
+        })
         .collect();
+    // The same IOC on two hosts is two findings (one per machine), so the
+    // findings list, counts and exports can be read per host.
+    let mut per_host: BTreeMap<(usize, String), Acc> = BTreeMap::new();
     let mut scanned = 0u64;
     let mut hit_now: Vec<usize> = Vec::new();
 
     if !regexes.is_empty() {
-        store.for_each_event_text(|id, ts, art, text| {
+        store.for_each_event_text(|id, ts, art, host, text| {
             scanned += 1;
             hit_now.clear();
             for re in &regexes {
                 for m in re.find_iter(text) {
-                    let Some(&i) = lookup.get(&m.as_str().to_ascii_lowercase()) else { continue };
+                    let Some(&i) = lookup.get(&m.as_str().to_ascii_lowercase()) else {
+                        continue;
+                    };
                     if iocs[i].kind.bounded() && !boundary_ok(text, m.start(), m.end()) {
                         continue;
                     }
@@ -319,42 +384,55 @@ pub fn sweep(store: &CaseStore, parsed: &ParsedIocs) -> Result<SweepReport, Stor
                 }
             }
             for &i in &hit_now {
-                let a = &mut acc[i];
-                a.events += 1;
-                if a.first.as_deref().map_or(true, |f| ts < f) {
-                    a.first = Some(ts.to_string());
-                }
-                if a.last.as_deref().map_or(true, |l| ts > l) {
-                    a.last = Some(ts.to_string());
-                }
-                if a.ids.len() < EVENT_ID_CAP {
-                    if let Ok(u) = Uuid::parse_str(id) {
-                        a.ids.push(u);
-                    }
-                }
-                *a.artefacts.entry(art.to_string()).or_default() += 1;
+                record_hit(&mut acc[i], id, ts, art);
+                let h = per_host.entry((i, host.to_string())).or_default();
+                record_hit(h, id, ts, art);
             }
         })?;
     }
 
-    // Findings: one per matched IOC.
+    // Findings: one per matched IOC per host.
     let mut dets = Vec::new();
-    for (ioc, a) in iocs.iter().zip(acc.iter()) {
+    let mut host_counts: Vec<BTreeMap<String, u64>> = vec![BTreeMap::new(); iocs.len()];
+    for ((i, host), a) in per_host.iter() {
+        let ioc = &iocs[*i];
         if a.events == 0 {
             continue;
         }
-        let where_ = a.artefacts.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", ");
+        if !host.is_empty() {
+            host_counts[*i].insert(host.clone(), a.events);
+        }
+        let where_ = a
+            .artefacts
+            .iter()
+            .map(|(k, n)| format!("{k} {n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let ts = a
             .first
             .as_deref()
-            .and_then(|t| time::PrimitiveDateTime::parse(t, &time::format_description::well_known::Iso8601::DEFAULT).ok())
+            .and_then(|t| {
+                time::PrimitiveDateTime::parse(
+                    t,
+                    &time::format_description::well_known::Iso8601::DEFAULT,
+                )
+                .ok()
+            })
             .map(|p| p.assume_utc())
             .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
         dets.push(Detection {
             id: Uuid::new_v4(),
-            rule_id: format!("ioc:{}:{}", ioc.kind.label(), ioc.value.to_ascii_lowercase()),
+            rule_id: format!(
+                "ioc:{}:{}",
+                ioc.kind.label(),
+                ioc.value.to_ascii_lowercase()
+            ),
             title: format!("IOC match: {} ({})", ioc.value, ioc.kind.label()),
-            severity: if ioc.kind == IocKind::Text { Severity::Medium } else { Severity::High },
+            severity: if ioc.kind == IocKind::Text {
+                Severity::Medium
+            } else {
+                Severity::High
+            },
             attack: Vec::new(),
             summary: format!(
                 "{} event{} · {} · first {} · last {}",
@@ -366,7 +444,7 @@ pub fn sweep(store: &CaseStore, parsed: &ParsedIocs) -> Result<SweepReport, Stor
             ),
             event_ids: a.ids.clone(),
             timestamp: ts,
-            host: None,
+            host: (!host.is_empty()).then(|| host.clone()),
             engine: DetectionEngine::Ioc,
         });
     }
@@ -374,8 +452,10 @@ pub fn sweep(store: &CaseStore, parsed: &ParsedIocs) -> Result<SweepReport, Stor
 
     let mut results: Vec<IocResult> = iocs
         .iter()
-        .zip(acc.into_iter())
-        .map(|(ioc, a)| IocResult {
+        .zip(acc)
+        .zip(host_counts)
+        .map(|((ioc, a), hosts)| IocResult {
+            hosts,
             value: ioc.value.clone(),
             kind: ioc.kind,
             kind_label: ioc.kind.label(),
@@ -388,7 +468,7 @@ pub fn sweep(store: &CaseStore, parsed: &ParsedIocs) -> Result<SweepReport, Stor
     results.sort_by(|a, b| b.events.cmp(&a.events).then(a.value.cmp(&b.value)));
     Ok(SweepReport {
         iocs: iocs.len(),
-        matched: dets.len(),
+        matched: results.iter().filter(|r| r.events > 0).count(),
         events_scanned: scanned,
         skipped: parsed.skipped.clone(),
         results,
@@ -413,7 +493,8 @@ mod tests {
              ab\n\
              Invoke-Mimikatz\n",
         );
-        let kinds: Vec<(String, IocKind)> = p.iocs.iter().map(|i| (i.value.clone(), i.kind)).collect();
+        let kinds: Vec<(String, IocKind)> =
+            p.iocs.iter().map(|i| (i.value.clone(), i.kind)).collect();
         assert!(kinds.contains(&("44d88612fea8a8f36de82e1278abb02f".into(), IocKind::Md5)));
         assert!(kinds.contains(&("https://evil.example.com/payload.bin".into(), IocKind::Url)));
         assert!(kinds.contains(&("185.220.101.4:443".into(), IocKind::Ipv4)));
@@ -423,7 +504,10 @@ mod tests {
         assert!(kinds.contains(&("5.6.7.8".into(), IocKind::Ipv4)));
         assert!(kinds.contains(&("bad.example.org".into(), IocKind::Domain)));
         assert!(kinds.contains(&("Invoke-Mimikatz".into(), IocKind::Text)));
-        assert!(!kinds.iter().any(|(v, _)| v == "C2 server"), "trailing description must not become an IOC");
+        assert!(
+            !kinds.iter().any(|(v, _)| v == "C2 server"),
+            "trailing description must not become an IOC"
+        );
         assert!(p.skipped.contains(&"ab".to_string()));
     }
 
@@ -431,11 +515,15 @@ mod tests {
     fn token_boundaries() {
         let t = "dst 10.0.0.15 and 10.0.0.1, notevil.com sub.evil.com";
         let find = |needle: &str| {
-            t.match_indices(needle).any(|(s, m)| boundary_ok(t, s, s + m.len()))
+            t.match_indices(needle)
+                .any(|(s, m)| boundary_ok(t, s, s + m.len()))
         };
-        assert!(find("10.0.0.1"));          // the standalone 10.0.0.1
+        assert!(find("10.0.0.1")); // the standalone 10.0.0.1
         assert!(!t[..13].contains("10.0.0.1,"));
-        assert!(!{ let s = t.find("10.0.0.15").unwrap(); boundary_ok(t, s, s + "10.0.0.1".len()) });
+        assert!(!{
+            let s = t.find("10.0.0.15").unwrap();
+            boundary_ok(t, s, s + "10.0.0.1".len())
+        });
         let s = t.find("evil.com").unwrap(); // first occurrence is inside notevil.com
         assert!(!boundary_ok(t, s, s + 8));
         let s2 = t.rfind("evil.com").unwrap(); // sub.evil.com -> preceded by '.'
@@ -446,17 +534,51 @@ mod tests {
 #[cfg(test)]
 mod sweep_tests {
     use super::*;
-    use fx_core::{ArtefactKind, Event, EventSink, Principal, ProcessInfo, Provenance, Target, TimestampKind};
+    use fx_core::{
+        ArtefactKind, Event, EventSink, Principal, ProcessInfo, Provenance, Target, TimestampKind,
+    };
 
-    fn ev(ts: &str, art: ArtefactKind, msg: &str, cmd: Option<&str>, target: Option<&str>, raw: serde_json::Value) -> Event {
-        let t = time::PrimitiveDateTime::parse(ts, &time::format_description::well_known::Iso8601::DEFAULT).unwrap().assume_utc();
+    fn ev(
+        ts: &str,
+        art: ArtefactKind,
+        msg: &str,
+        cmd: Option<&str>,
+        target: Option<&str>,
+        raw: serde_json::Value,
+    ) -> Event {
+        let t = time::PrimitiveDateTime::parse(
+            ts,
+            &time::format_description::well_known::Iso8601::DEFAULT,
+        )
+        .unwrap()
+        .assume_utc();
         Event {
-            id: Uuid::new_v4(), timestamp: t, timestamp_kind: TimestampKind::Logged, artefact: art,
-            action: "test.event".into(), host: Some("WKSTN-07".into()), user: Principal::default(),
-            process: cmd.map(|c| ProcessInfo { command_line: Some(c.into()), ..Default::default() }),
-            target: target.map(|p| Target { path: Some(p.into()), value_name: None, hash_sha1: None, size: None }),
-            network: None, message: msg.into(),
-            provenance: Provenance { evidence_id: Uuid::nil(), source_path: "x".into(), parser: "t".into(), parser_version: "0".into(), source_ref: None },
+            id: Uuid::new_v4(),
+            timestamp: t,
+            timestamp_kind: TimestampKind::Logged,
+            artefact: art,
+            action: "test.event".into(),
+            host: Some("WKSTN-07".into()),
+            user: Principal::default(),
+            process: cmd.map(|c| ProcessInfo {
+                command_line: Some(c.into()),
+                ..Default::default()
+            }),
+            target: target.map(|p| Target {
+                path: Some(p.into()),
+                value_name: None,
+                hash_sha1: None,
+                size: None,
+            }),
+            network: None,
+            message: msg.into(),
+            provenance: Provenance {
+                evidence_id: Uuid::nil(),
+                source_path: "x".into(),
+                parser: "t".into(),
+                parser_version: "0".into(),
+                source_ref: None,
+            },
             raw,
         }
     }
@@ -468,24 +590,90 @@ mod sweep_tests {
         let store = CaseStore::create(&dir.join("c.fxcase"), "ioc", None, "UTC").unwrap();
         {
             let mut w = store.event_writer();
-            w.emit(ev("2026-02-10T22:14:05", ArtefactKind::Evtx, "Network connection to 185.220.101.4:51062", None, None, serde_json::json!({})));
-            w.emit(ev("2026-02-10T22:15:00", ArtefactKind::Evtx, "conn to 185.220.101.45", None, None, serde_json::json!({}))); // must NOT match .4
-            w.emit(ev("2026-02-10T22:16:00", ArtefactKind::BrowserHistory, "visit", None, Some("https://cdn.evil.example/p.bin"), serde_json::json!({})));
-            w.emit(ev("2026-02-10T22:17:00", ArtefactKind::BrowserHistory, "visit notevil.example", None, None, serde_json::json!({}))); // must NOT match evil.example
-            w.emit(ev("2026-02-10T22:18:00", ArtefactKind::Mft, "$SI created", None, Some("Users/Public/svc.exe"), serde_json::json!({})));
-            w.emit(ev("2026-02-10T22:19:00", ArtefactKind::Amcache, "presence", None, None,
-                      serde_json::json!({"sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709"})));
-            w.emit(ev("2026-02-10T22:20:00", ArtefactKind::PsHistory, "typed", Some("Invoke-Mimikatz -DumpCreds"), None, serde_json::json!({})));
+            w.emit(ev(
+                "2026-02-10T22:14:05",
+                ArtefactKind::Evtx,
+                "Network connection to 185.220.101.4:51062",
+                None,
+                None,
+                serde_json::json!({}),
+            ));
+            w.emit(ev(
+                "2026-02-10T22:15:00",
+                ArtefactKind::Evtx,
+                "conn to 185.220.101.45",
+                None,
+                None,
+                serde_json::json!({}),
+            )); // must NOT match .4
+            w.emit(ev(
+                "2026-02-10T22:16:00",
+                ArtefactKind::BrowserHistory,
+                "visit",
+                None,
+                Some("https://cdn.evil.example/p.bin"),
+                serde_json::json!({}),
+            ));
+            w.emit(ev(
+                "2026-02-10T22:17:00",
+                ArtefactKind::BrowserHistory,
+                "visit notevil.example",
+                None,
+                None,
+                serde_json::json!({}),
+            )); // must NOT match evil.example
+            w.emit(ev(
+                "2026-02-10T22:18:00",
+                ArtefactKind::Mft,
+                "$SI created",
+                None,
+                Some("Users/Public/svc.exe"),
+                serde_json::json!({}),
+            ));
+            w.emit(ev(
+                "2026-02-10T22:19:00",
+                ArtefactKind::Amcache,
+                "presence",
+                None,
+                None,
+                serde_json::json!({"sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709"}),
+            ));
+            w.emit(ev(
+                "2026-02-10T22:20:00",
+                ArtefactKind::PsHistory,
+                "typed",
+                Some("Invoke-Mimikatz -DumpCreds"),
+                None,
+                serde_json::json!({}),
+            ));
             w.flush().unwrap();
         }
         let parsed = parse_iocs("185.220.101.4\nevil[.]example\nC:\\Users\\Public\\svc.exe\nDA39A3EE5E6B4B0D3255BFEF95601890AFD80709\ninvoke-mimikatz\nnever-seen.example\n");
         let r = sweep(&store, &parsed).unwrap();
-        let by = |v: &str| r.results.iter().find(|x| x.value.eq_ignore_ascii_case(v)).unwrap().events;
+        let by = |v: &str| {
+            r.results
+                .iter()
+                .find(|x| x.value.eq_ignore_ascii_case(v))
+                .unwrap()
+                .events
+        };
         assert_eq!(r.events_scanned, 7);
         assert_eq!(by("185.220.101.4"), 1, "IP must not match 185.220.101.45");
-        assert_eq!(by("evil.example"), 1, "domain matches sub.domain but not notevil");
-        assert_eq!(by("C:\\Users\\Public\\svc.exe"), 1, "path matches MFT forward-slash form");
-        assert_eq!(by("DA39A3EE5E6B4B0D3255BFEF95601890AFD80709"), 1, "hash found in raw JSON, case-insensitive");
+        assert_eq!(
+            by("evil.example"),
+            1,
+            "domain matches sub.domain but not notevil"
+        );
+        assert_eq!(
+            by("C:\\Users\\Public\\svc.exe"),
+            1,
+            "path matches MFT forward-slash form"
+        );
+        assert_eq!(
+            by("DA39A3EE5E6B4B0D3255BFEF95601890AFD80709"),
+            1,
+            "hash found in raw JSON, case-insensitive"
+        );
         assert_eq!(by("invoke-mimikatz"), 1);
         assert_eq!(by("never-seen.example"), 0);
         assert_eq!(r.matched, 5);
@@ -495,10 +683,22 @@ mod sweep_tests {
         // Re-running the rules must keep the IOC findings.
         crate::run(&store, &crate::RuleSet::from_embedded());
         let after = store.detections().unwrap();
-        assert_eq!(after.iter().filter(|d| d.engine == "ioc").count(), 5, "rule hunt wiped IOC findings");
+        assert_eq!(
+            after.iter().filter(|d| d.engine == "ioc").count(),
+            5,
+            "rule hunt wiped IOC findings"
+        );
         // A new sweep replaces (not duplicates) the IOC findings.
         sweep(&store, &parse_iocs("185.220.101.4\n")).unwrap();
-        assert_eq!(store.detections().unwrap().iter().filter(|d| d.engine == "ioc").count(), 1);
+        assert_eq!(
+            store
+                .detections()
+                .unwrap()
+                .iter()
+                .filter(|d| d.engine == "ioc")
+                .count(),
+            1
+        );
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }

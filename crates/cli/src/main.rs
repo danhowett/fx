@@ -7,7 +7,7 @@
 //! Deliberately tiny: it exists to drive and smoke-test the pipeline before the
 //! Tauri GUI lands. The GUI will call the same fx-ingest / fx-store APIs.
 
-use fx_ingest::{ingest_into_store, ArtefactStatus};
+use fx_ingest::{ingest_collection_as, ingest_into_store, ArtefactStatus, IngestReport};
 use fx_parsers::ParserRegistry;
 use fx_store::CaseStore;
 use std::path::PathBuf;
@@ -16,8 +16,7 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -35,13 +34,14 @@ fn run(args: &[String]) -> anyhow::Result<ExitCode> {
     let cmd = args.get(1).map(String::as_str);
     match cmd {
         Some("ingest") => cmd_ingest(&args[2..]),
+        Some("add") => cmd_add(&args[2..]),
         Some("summary") => cmd_summary(&args[2..]),
         Some("hunt") => cmd_hunt(&args[2..]),
         Some("report") => cmd_report(&args[2..]),
         Some("import-iocs") => cmd_import_iocs(&args[2..]),
         _ => {
             eprintln!(
-                "usage:\n  fx ingest <collection_dir> <case.fxcase> [--name N] [--examiner W]\n  fx summary <case.fxcase>\n  fx hunt <case.fxcase> [--rules DIR] [--sigma DIR [--sigma-level medium] [--sigma-status stable,test]]\n  fx report <case.fxcase> <out.html>     write an HTML case report\n  fx import-iocs <pack.json> <out_dir>   convert an external IOC pack to rules"
+                "usage:\n  fx ingest <collection_dir> <case.fxcase> [--name N] [--examiner W]\n  fx add <case.fxcase> <collection_dir> [--host NAME]   add another host's collection, then re-run fx hunt\n  fx summary <case.fxcase>\n  fx hunt <case.fxcase> [--rules DIR] [--sigma DIR [--sigma-level medium] [--sigma-status stable,test]]\n  fx report <case.fxcase> <out.html> [--host NAME]   write an HTML case report (all hosts, or one)\n  fx import-iocs <pack.json> <out_dir>   convert an external IOC pack to rules"
             );
             Ok(ExitCode::FAILURE)
         }
@@ -49,17 +49,31 @@ fn run(args: &[String]) -> anyhow::Result<ExitCode> {
 }
 
 fn cmd_ingest(args: &[String]) -> anyhow::Result<ExitCode> {
-    let collection = PathBuf::from(args.first().ok_or_else(|| anyhow::anyhow!("missing collection dir"))?);
-    let case_path = PathBuf::from(args.get(1).ok_or_else(|| anyhow::anyhow!("missing case file"))?);
+    let collection = PathBuf::from(
+        args.first()
+            .ok_or_else(|| anyhow::anyhow!("missing collection dir"))?,
+    );
+    let case_path = PathBuf::from(
+        args.get(1)
+            .ok_or_else(|| anyhow::anyhow!("missing case file"))?,
+    );
 
     let mut name = "Untitled case".to_string();
     let mut examiner: Option<String> = None;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
-            "--name" => { name = args.get(i + 1).cloned().unwrap_or(name); i += 2; }
-            "--examiner" => { examiner = args.get(i + 1).cloned(); i += 2; }
-            other => { anyhow::bail!("unknown flag: {other}"); }
+            "--name" => {
+                name = args.get(i + 1).cloned().unwrap_or(name);
+                i += 2;
+            }
+            "--examiner" => {
+                examiner = args.get(i + 1).cloned();
+                i += 2;
+            }
+            other => {
+                anyhow::bail!("unknown flag: {other}");
+            }
         }
     }
 
@@ -67,12 +81,75 @@ fn cmd_ingest(args: &[String]) -> anyhow::Result<ExitCode> {
         anyhow::bail!("case file already exists: {}", case_path.display());
     }
 
-    let mut store = CaseStore::create(&case_path, &name, examiner.as_deref(), "UTC")?;
+    let store = CaseStore::create(&case_path, &name, examiner.as_deref(), "UTC")?;
     let registry = ParserRegistry::with_defaults();
 
     println!("Ingesting {} ...", collection.display());
-    let report = ingest_into_store(&collection, &registry, &mut store);
+    let report = ingest_into_store(&collection, &registry, &store);
+    print_ingest(&report);
+    println!("\nCase written to {}", case_path.display());
+    Ok(ExitCode::SUCCESS)
+}
 
+/// `fx add <case> <collection> [--host NAME]`: add another collection (usually
+/// another machine) to an existing case.
+fn cmd_add(args: &[String]) -> anyhow::Result<ExitCode> {
+    let case_path = PathBuf::from(
+        args.first()
+            .ok_or_else(|| anyhow::anyhow!("missing case file"))?,
+    );
+    let collection = PathBuf::from(
+        args.get(1)
+            .ok_or_else(|| anyhow::anyhow!("missing collection dir"))?,
+    );
+    let mut host: Option<String> = None;
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--host" => {
+                host = args.get(i + 1).cloned();
+                i += 2;
+            }
+            other => anyhow::bail!("unknown flag: {other}"),
+        }
+    }
+    let store = CaseStore::open(&case_path)?;
+    let registry = ParserRegistry::with_defaults();
+    println!(
+        "Adding {} to {} ...",
+        collection.display(),
+        case_path.display()
+    );
+    let report = ingest_collection_as(&collection, &registry, &store, host.as_deref());
+    if let Some(why) = &report.refused {
+        anyhow::bail!("{why}");
+    }
+    print_ingest(&report);
+    println!("\nHosts in this case:");
+    for h in store.hosts()? {
+        println!(
+            "  {:<24} {:>10} events   ({})",
+            h.host, h.events, h.host_source
+        );
+    }
+    println!(
+        "\nRun `fx hunt {}` to refresh findings across every host.",
+        case_path.display()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+fn print_ingest(report: &IngestReport) {
+    if let Some(h) = &report.host {
+        println!(
+            "Host: {h}{}",
+            if report.merged_host {
+                " (already in this case: events added to that host)"
+            } else {
+                ""
+            }
+        );
+    }
     if let Some(p) = &report.profile {
         println!("Detected collection profile: {p}");
     }
@@ -103,17 +180,24 @@ fn cmd_ingest(args: &[String]) -> anyhow::Result<ExitCode> {
             eprintln!("  {e}");
         }
     }
-
-    println!("\nCase written to {}", case_path.display());
-    Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_summary(args: &[String]) -> anyhow::Result<ExitCode> {
-    let case_path = PathBuf::from(args.first().ok_or_else(|| anyhow::anyhow!("missing case file"))?);
+    let case_path = PathBuf::from(
+        args.first()
+            .ok_or_else(|| anyhow::anyhow!("missing case file"))?,
+    );
     let store = CaseStore::open(&case_path)?;
 
     println!("Case: {}", store.case_id());
     println!("Total events: {}", store.event_count()?);
+    let hosts = store.hosts()?;
+    if hosts.len() > 1 {
+        println!("\nHosts:");
+        for h in hosts {
+            println!("  {:<24} {:>10} events", h.host, h.events);
+        }
+    }
 
     println!("\nEvents by artefact:");
     for (artefact, count) in store.counts_by_artefact()? {
@@ -168,13 +252,24 @@ fn truncate_str(s: &str, n: usize) -> String {
 }
 
 fn cmd_import_iocs(args: &[String]) -> anyhow::Result<ExitCode> {
-    let pack_path = PathBuf::from(args.first().ok_or_else(|| anyhow::anyhow!("missing pack.json"))?);
-    let out_dir = PathBuf::from(args.get(1).ok_or_else(|| anyhow::anyhow!("missing out_dir"))?);
+    let pack_path = PathBuf::from(
+        args.first()
+            .ok_or_else(|| anyhow::anyhow!("missing pack.json"))?,
+    );
+    let out_dir = PathBuf::from(
+        args.get(1)
+            .ok_or_else(|| anyhow::anyhow!("missing out_dir"))?,
+    );
     std::fs::create_dir_all(&out_dir)?;
 
     let text = std::fs::read_to_string(&pack_path)?;
     let pack: fx_hunt::import::IocPack = serde_json::from_str(&text)?;
-    println!("Importing {} v{} ({} rules)", pack.name, pack.version, pack.rules.len());
+    println!(
+        "Importing {} v{} ({} rules)",
+        pack.name,
+        pack.version,
+        pack.rules.len()
+    );
 
     let result = fx_hunt::import::import_pack(&pack);
 
@@ -190,7 +285,10 @@ fn cmd_import_iocs(args: &[String]) -> anyhow::Result<ExitCode> {
 
     println!("\nConverted {written} rules -> {}", out_dir.display());
     if !result.repaired.is_empty() {
-        println!("\nRepaired {} fragile regex(es) (transparent — logged here):", result.repaired.len());
+        println!(
+            "\nRepaired {} fragile regex(es) (transparent — logged here):",
+            result.repaired.len()
+        );
         for (id, before, after) in &result.repaired {
             println!("  {id}");
             println!("    before: {}", truncate_str(before, 80));
@@ -198,13 +296,19 @@ fn cmd_import_iocs(args: &[String]) -> anyhow::Result<ExitCode> {
         }
     }
     if !result.dormant.is_empty() {
-        println!("\n{} rule(s) imported but DORMANT — need a parser we don't have yet:", result.dormant.len());
+        println!(
+            "\n{} rule(s) imported but DORMANT — need a parser we don't have yet:",
+            result.dormant.len()
+        );
         for (id, sources) in &result.dormant {
             println!("  {id}  (needs: {})", sources.join(", "));
         }
     }
     if !result.skipped.is_empty() {
-        println!("\n{} rule(s) skipped (unconvertible):", result.skipped.len());
+        println!(
+            "\n{} rule(s) skipped (unconvertible):",
+            result.skipped.len()
+        );
         for (id, why) in &result.skipped {
             println!("  {id}: {why}");
         }
@@ -213,15 +317,24 @@ fn cmd_import_iocs(args: &[String]) -> anyhow::Result<ExitCode> {
 }
 
 fn cmd_report(args: &[String]) -> anyhow::Result<ExitCode> {
-    let case_path = PathBuf::from(args.first().ok_or_else(|| anyhow::anyhow!("missing case file"))?);
+    let case_path = PathBuf::from(
+        args.first()
+            .ok_or_else(|| anyhow::anyhow!("missing case file"))?,
+    );
     let out_path = PathBuf::from(
         args.get(1)
+            .filter(|a| !a.starts_with("--"))
             .cloned()
             .unwrap_or_else(|| "case-report.html".into()),
     );
+    let host = args
+        .iter()
+        .position(|a| a == "--host")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
 
     let store = CaseStore::open(&case_path)?;
-    let html = fx_hunt::report::generate_report(&store)?;
+    let html = store.scoped(host, fx_hunt::report::generate_report)?;
     std::fs::write(&out_path, html)?;
 
     println!("Report written to {}", out_path.display());
@@ -230,7 +343,10 @@ fn cmd_report(args: &[String]) -> anyhow::Result<ExitCode> {
 }
 
 fn cmd_hunt(args: &[String]) -> anyhow::Result<ExitCode> {
-    let case_path = PathBuf::from(args.first().ok_or_else(|| anyhow::anyhow!("missing case file"))?);
+    let case_path = PathBuf::from(
+        args.first()
+            .ok_or_else(|| anyhow::anyhow!("missing case file"))?,
+    );
 
     // Default rule dir sits next to the hunt crate; overridable with --rules.
     let mut rules_dir = PathBuf::from("crates/hunt/rules");
@@ -248,11 +364,15 @@ fn cmd_hunt(args: &[String]) -> anyhow::Result<ExitCode> {
                 i += 2;
             }
             "--sigma-level" => {
-                sigma_filter.min_level = args.get(i + 1).cloned().unwrap_or_else(|| "medium".into());
+                sigma_filter.min_level =
+                    args.get(i + 1).cloned().unwrap_or_else(|| "medium".into());
                 i += 2;
             }
             "--sigma-status" => {
-                sigma_filter.statuses = args.get(i + 1).map(|s| s.split(',').map(|x| x.trim().to_string()).collect()).unwrap_or_default();
+                sigma_filter.statuses = args
+                    .get(i + 1)
+                    .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
+                    .unwrap_or_default();
                 i += 2;
             }
             other => anyhow::bail!("unknown flag: {other}"),
@@ -301,9 +421,17 @@ fn cmd_hunt(args: &[String]) -> anyhow::Result<ExitCode> {
             for e in &sr.errors {
                 eprintln!("  sigma error: {e}");
             }
-            println!("Sigma: {} findings from {} rules", sr.findings, sr.rules_hit);
+            println!(
+                "Sigma: {} findings from {} rules",
+                sr.findings, sr.rules_hit
+            );
             for h in sr.hits.iter().take(40) {
-                println!("    [{:<8}] {:<60} {:>5} finding(s)", h.level.to_uppercase(), h.title, h.findings);
+                println!(
+                    "    [{:<8}] {:<60} {:>5} finding(s)",
+                    h.level.to_uppercase(),
+                    h.title,
+                    h.findings
+                );
             }
         }
     }
@@ -316,9 +444,15 @@ fn cmd_hunt(args: &[String]) -> anyhow::Result<ExitCode> {
     if !allow.is_empty() {
         let counts = store.apply_allowlist(&allow)?;
         let n: u64 = counts.iter().map(|c| c.1).sum();
-        println!("Allow-list: {} entries, {n} finding(s) suppressed", allow.len());
+        println!(
+            "Allow-list: {} entries, {n} finding(s) suppressed",
+            allow.len()
+        );
     }
-    println!("\n{} detections from {} rules:\n", report.detections, report.rules_run);
+    println!(
+        "\n{} detections from {} rules:\n",
+        report.detections, report.rules_run
+    );
 
     for d in store.detections()? {
         let host = d.host.unwrap_or_else(|| "-".into());

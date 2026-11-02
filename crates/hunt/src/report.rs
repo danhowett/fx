@@ -13,53 +13,21 @@ use serde::Serialize;
 
 /// ATT&CK technique id -> (tactic, human name).
 fn technique_info(tech: &str) -> (&'static str, &'static str) {
-    match tech {
-        "T1189" => ("Initial Access", "Drive-by / abused file-sharing download"),
-        "T1078.004" => ("Initial Access", "Valid cloud accounts"),
-        "T1566" => ("Initial Access", "Phishing"),
-        "T1190" => ("Initial Access", "Exploit public-facing app"),
-        "T1059.001" => ("Execution", "PowerShell"),
-        "T1059.003" => ("Execution", "Windows command shell"),
-        "T1204" => ("Execution", "User execution"),
-        "T1053.005" => ("Persistence", "Scheduled task"),
-        "T1543.003" => ("Persistence", "Windows service"),
-        "T1547.001" => ("Persistence", "Registry Run keys"),
-        "T1546" => ("Persistence", "Event-triggered execution"),
-        "T1136" => ("Persistence", "Create account"),
-        "T1562.001" => ("Defense Evasion", "Disable/modify tools"),
-        "T1036.005" => ("Defense Evasion", "Masquerading"),
-        "T1112" => ("Defense Evasion", "Modify registry"),
-        "T1070.001" => ("Defense Evasion", "Clear Windows event logs"),
-        "T1070" => ("Defense Evasion", "Indicator removal"),
-        "T1003" => ("Credential Access", "OS credential dumping"),
-        "T1003.001" => ("Credential Access", "LSASS memory"),
-        "T1552" => ("Credential Access", "Unsecured credentials"),
-        "T1087" => ("Discovery", "Account discovery"),
-        "T1018" => ("Discovery", "Remote system discovery"),
-        "T1021.001" => ("Lateral Movement", "Remote Desktop Protocol"),
-        "T1021.002" => ("Lateral Movement", "SMB/admin shares"),
-        "T1570" => ("Lateral Movement", "Lateral tool transfer"),
-        "T1005" => ("Collection", "Data from local system"),
-        "T1074" => ("Collection", "Data staged"),
-        "T1071" => ("Command and Control", "Application-layer protocol"),
-        "T1572" => ("Command and Control", "Protocol tunneling"),
-        "T1219" => ("Command and Control", "Remote access software"),
-        "T1048" => ("Exfiltration", "Exfil over alternative protocol"),
-        "T1567" => ("Exfiltration", "Exfil to web service"),
-        "T1567.002" => ("Exfiltration", "Exfil to cloud storage"),
-        "T1490" => ("Impact", "Inhibit system recovery"),
-        "T1486" => ("Impact", "Data encrypted for impact"),
-        "T1657" => ("Impact", "Financial theft / extortion"),
-        "T1489" => ("Impact", "Service stop"),
-        _ => ("Other", "Uncategorized technique"),
-    }
+    // Official MITRE ATT&CK names and tactics (see `crate::attack`). A
+    // technique in several tactics is placed under the first in matrix order.
+    let tactic = crate::attack::tactics_for(tech)
+        .into_iter()
+        .next()
+        .unwrap_or("Other");
+    let name = crate::attack::technique_name(tech).unwrap_or("Uncategorized technique");
+    (tactic, name)
 }
 
-const TACTIC_ORDER: &[&str] = &[
-    "Initial Access", "Execution", "Persistence", "Privilege Escalation",
-    "Defense Evasion", "Credential Access", "Discovery", "Lateral Movement",
-    "Collection", "Command and Control", "Exfiltration", "Impact", "Other",
-];
+fn tactic_order() -> Vec<String> {
+    let mut v = crate::attack::map().tactics.clone();
+    v.push("Other".into());
+    v
+}
 
 fn severity_rank(s: &str) -> u8 {
     match s {
@@ -80,23 +48,96 @@ struct ReportData {
     artefacts: Vec<KvJson>,
     ingest: Vec<KvJson>,
     evidence: Vec<EvidenceJson>,
+    /// Per-host summary (multi-host cases): shown as a Hosts panel.
+    hosts: Vec<HostJson>,
     tactic_order: Vec<String>,
     generated_utc: String,
 }
 #[derive(Serialize)]
-struct MetaJson { case_id: String, name: String, examiner: String, created_utc: String, timezone: String, verdict: String, verdict_level: String }
+struct MetaJson {
+    case_id: String,
+    name: String,
+    examiner: String,
+    created_utc: String,
+    timezone: String,
+    verdict: String,
+    verdict_level: String,
+    /// The host(s) this report covers, e.g. "WKSTN-07" or "WKSTN-07, SRV-01".
+    hosts: String,
+    /// "host" when the report was produced for one host of a multi-host case.
+    scope: String,
+}
 #[derive(Serialize)]
-struct CountsJson { total_findings: usize, critical: u32, high: u32, medium: u32, low: u32, info: u32, events: u64, evidence_items: usize, unclassified: u64, validated: u32, unconfirmed: u32, false_positive: u32, dismissed: u32, excluded: u32 }
+struct CountsJson {
+    total_findings: usize,
+    critical: u32,
+    high: u32,
+    medium: u32,
+    low: u32,
+    info: u32,
+    events: u64,
+    evidence_items: usize,
+    unclassified: u64,
+    validated: u32,
+    unconfirmed: u32,
+    false_positive: u32,
+    dismissed: u32,
+    excluded: u32,
+}
 #[derive(Serialize)]
-struct FindingJson { rule_id: String, title: String, severity: String, sev_rank: u8, tactic: String, techniques: Vec<TechJson>, summary: String, ts: String, host: String, engine: String, triage: String, note: String }
+struct FindingJson {
+    rule_id: String,
+    title: String,
+    severity: String,
+    sev_rank: u8,
+    tactic: String,
+    techniques: Vec<TechJson>,
+    summary: String,
+    ts: String,
+    host: String,
+    engine: String,
+    triage: String,
+    note: String,
+}
 #[derive(Serialize)]
-struct TechJson { id: String, name: String }
+struct TechJson {
+    id: String,
+    name: String,
+}
 #[derive(Serialize)]
-struct AttackJson { id: String, name: String, tactic: String, count: u64 }
+struct AttackJson {
+    id: String,
+    name: String,
+    tactic: String,
+    count: u64,
+}
 #[derive(Serialize)]
-struct KvJson { label: String, count: u64 }
+struct KvJson {
+    label: String,
+    count: u64,
+}
 #[derive(Serialize)]
-struct EvidenceJson { source_path: String, artefact: String, sha256: String, size: String, id_method: String, confidence: u32 }
+struct HostJson {
+    host: String,
+    events: u64,
+    findings: u32,
+    critical: u32,
+    high: u32,
+    medium: u32,
+    low: u32,
+    excluded: u32,
+    collected_from: String,
+}
+#[derive(Serialize)]
+struct EvidenceJson {
+    source_path: String,
+    artefact: String,
+    sha256: String,
+    size: String,
+    id_method: String,
+    confidence: u32,
+    host: String,
+}
 
 /// Generate the full HTML report for a case.
 pub fn generate_report(store: &CaseStore) -> Result<String, StoreError> {
@@ -108,6 +149,12 @@ pub fn generate_report(store: &CaseStore) -> Result<String, StoreError> {
     let ingest = store.ingest_summary()?;
     let unclassified = store.unclassified_count()?;
     let attack_raw = store.attack_coverage()?;
+    let host_rows = store.hosts()?;
+    let all_hosts: Vec<String> = host_rows.iter().map(|h| h.host.clone()).collect();
+    let (hosts_label, scope_label) = match store.host_scope() {
+        Some(h) => (h, if all_hosts.len() > 1 { "host" } else { "case" }),
+        None => (all_hosts.join(", "), "case"),
+    };
 
     // Analyst triage: each finding carries the state of the first of its events
     // that was triaged (untriaged = "unconfirmed", as in the app and exports).
@@ -123,22 +170,46 @@ pub fn generate_report(store: &CaseStore) -> Result<String, StoreError> {
             .unwrap_or_else(|| ("unconfirmed".into(), String::new()))
     };
 
-    let mut findings: Vec<FindingJson> = detections.iter().map(|d| {
-        let techs: Vec<TechJson> = d.attack.split(',').filter(|s| !s.trim().is_empty()).map(|t| {
-            let (_, name) = technique_info(t.trim());
-            TechJson { id: t.trim().to_string(), name: name.to_string() }
-        }).collect();
-        let tactic = if d.engine == "ioc" { "IOC matches".to_string() }
-            else { techs.first().map(|t| technique_info(&t.id).0.to_string()).unwrap_or_else(|| "Other".to_string()) };
-        let (triage, note) = tri_for(&d.event_ids);
-        FindingJson {
-            rule_id: d.rule_id.clone(), title: d.title.clone(), severity: d.severity.clone(),
-            sev_rank: severity_rank(&d.severity), tactic, techniques: techs,
-            summary: d.summary.clone(), ts: d.ts.clone(),
-            host: d.host.clone().unwrap_or_else(|| "—".into()), engine: d.engine.clone(),
-            triage, note,
-        }
-    }).collect();
+    let mut findings: Vec<FindingJson> = detections
+        .iter()
+        .map(|d| {
+            let techs: Vec<TechJson> = d
+                .attack
+                .split(',')
+                .filter(|s| !s.trim().is_empty())
+                .map(|t| {
+                    let (_, name) = technique_info(t.trim());
+                    TechJson {
+                        id: t.trim().to_string(),
+                        name: name.to_string(),
+                    }
+                })
+                .collect();
+            let tactic = if d.engine == "ioc" {
+                "IOC matches".to_string()
+            } else {
+                techs
+                    .first()
+                    .map(|t| technique_info(&t.id).0.to_string())
+                    .unwrap_or_else(|| "Other".to_string())
+            };
+            let (triage, note) = tri_for(&d.event_ids);
+            FindingJson {
+                rule_id: d.rule_id.clone(),
+                title: d.title.clone(),
+                severity: d.severity.clone(),
+                sev_rank: severity_rank(&d.severity),
+                tactic,
+                techniques: techs,
+                summary: d.summary.clone(),
+                ts: d.ts.clone(),
+                host: d.host.clone().unwrap_or_else(|| "—".into()),
+                engine: d.engine.clone(),
+                triage,
+                note,
+            }
+        })
+        .collect();
 
     // Events the analyst tagged by hand that no rule fired on — the same
     // "manual findings" the CSV / STIX exports carry.
@@ -178,9 +249,19 @@ pub fn generate_report(store: &CaseStore) -> Result<String, StoreError> {
     // headline. They stay in the report (filterable) for transparency.
     let mut counts = CountsJson {
         total_findings: findings.len(),
-        critical: 0, high: 0, medium: 0, low: 0, info: 0,
-        events: total_events, evidence_items: evidence.len(), unclassified,
-        validated: 0, unconfirmed: 0, false_positive: 0, dismissed: 0, excluded: 0,
+        critical: 0,
+        high: 0,
+        medium: 0,
+        low: 0,
+        info: 0,
+        events: total_events,
+        evidence_items: evidence.len(),
+        unclassified,
+        validated: 0,
+        unconfirmed: 0,
+        false_positive: 0,
+        dismissed: 0,
+        excluded: 0,
     };
     for f in &findings {
         match f.triage.as_str() {
@@ -215,35 +296,105 @@ pub fn generate_report(store: &CaseStore) -> Result<String, StoreError> {
         ("No automated detections fired against the ingested evidence. This is not proof of a clean host — coverage is limited to the artefacts and rules available.", "info")
     };
 
-    let attack: Vec<AttackJson> = attack_raw.iter().map(|(id, count)| {
-        let (tactic, name) = technique_info(id);
-        AttackJson { id: id.clone(), name: name.to_string(), tactic: tactic.to_string(), count: *count }
-    }).collect();
+    // Per-host summary, in the order the hosts were added (scoped reports
+    // show just their own host).
+    let scope_host = store.host_scope();
+    let hosts: Vec<HostJson> = host_rows
+        .iter()
+        .filter(|h| scope_host.as_deref().is_none_or(|s| s == h.host))
+        .map(|h| {
+            let mut j = HostJson {
+                host: h.host.clone(),
+                events: h.events,
+                findings: 0,
+                critical: 0,
+                high: 0,
+                medium: 0,
+                low: 0,
+                excluded: 0,
+                collected_from: h
+                    .collections
+                    .iter()
+                    .map(|c| c.source_root.clone())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            };
+            for f in findings.iter().filter(|f| f.host == h.host) {
+                j.findings += 1;
+                if f.triage == "false_positive" || f.triage == "dismissed" {
+                    j.excluded += 1;
+                    continue;
+                }
+                match f.severity.as_str() {
+                    "critical" => j.critical += 1,
+                    "high" => j.high += 1,
+                    "medium" => j.medium += 1,
+                    _ => j.low += 1,
+                }
+            }
+            j
+        })
+        .collect();
+
+    let attack: Vec<AttackJson> = attack_raw
+        .iter()
+        .map(|(id, count)| {
+            let (tactic, name) = technique_info(id);
+            AttackJson {
+                id: id.clone(),
+                name: name.to_string(),
+                tactic: tactic.to_string(),
+                count: *count,
+            }
+        })
+        .collect();
 
     let data = ReportData {
         meta: MetaJson {
-            case_id: meta.case_id, name: meta.name,
+            case_id: meta.case_id,
+            name: meta.name,
             examiner: meta.examiner.unwrap_or_else(|| "—".into()),
-            created_utc: meta.created_utc, timezone: meta.display_timezone,
-            verdict: verdict.into(), verdict_level: verdict_level.into(),
+            created_utc: meta.created_utc,
+            timezone: meta.display_timezone,
+            verdict: verdict.into(),
+            verdict_level: verdict_level.into(),
+            hosts: hosts_label,
+            scope: scope_label.into(),
         },
         counts,
         findings,
         attack,
-        artefacts: by_artefact.into_iter().map(|(label, count)| KvJson { label, count }).collect(),
-        ingest: ingest.into_iter().map(|(label, count)| KvJson { label, count }).collect(),
-        evidence: evidence.iter().map(|e| EvidenceJson {
-            source_path: e.source_path.clone(), artefact: e.artefact_kind.clone(),
-            sha256: e.sha256.clone(), size: human_bytes(e.size_bytes),
-            id_method: e.id_method.clone(), confidence: (e.id_confidence * 100.0) as u32,
-        }).collect(),
-        tactic_order: TACTIC_ORDER.iter().map(|s| s.to_string()).chain(["IOC matches".to_string(), "Analyst findings".to_string()]).collect(),
+        artefacts: by_artefact
+            .into_iter()
+            .map(|(label, count)| KvJson { label, count })
+            .collect(),
+        ingest: ingest
+            .into_iter()
+            .map(|(label, count)| KvJson { label, count })
+            .collect(),
+        evidence: evidence
+            .iter()
+            .map(|e| EvidenceJson {
+                source_path: e.source_path.clone(),
+                artefact: e.artefact_kind.clone(),
+                sha256: e.sha256.clone(),
+                size: human_bytes(e.size_bytes),
+                id_method: e.id_method.clone(),
+                confidence: (e.id_confidence * 100.0) as u32,
+                host: e.host.clone(),
+            })
+            .collect(),
+        hosts,
+        tactic_order: tactic_order()
+            .into_iter()
+            .chain(["IOC matches".to_string(), "Analyst findings".to_string()])
+            .collect(),
         generated_utc: now_utc(),
     };
 
-    let json = serde_json::to_string(&data).map_err(|e| {
-        StoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-    })?;
+    let json = serde_json::to_string(&data)
+        .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
     Ok(build_html(&json))
 }
 
@@ -251,8 +402,15 @@ fn human_bytes(n: u64) -> String {
     const U: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut v = n as f64;
     let mut i = 0;
-    while v >= 1024.0 && i < U.len() - 1 { v /= 1024.0; i += 1; }
-    if i == 0 { format!("{n} B") } else { format!("{v:.1} {}", U[i]) }
+    while v >= 1024.0 && i < U.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", U[i])
+    }
 }
 
 fn now_utc() -> String {
@@ -392,6 +550,16 @@ h1 .dot{color:var(--accent);}
 .kv-row .v{font-family:var(--mono);word-break:break-all;}
 .caret{color:var(--faint);transition:transform .15s;}
 .finding.open .caret{transform:rotate(90deg);}
+.hostpanel[hidden]{display:none;}
+.hostpanel table{width:100%;border-collapse:collapse;font-size:13px;}
+.hostpanel th{text-align:left;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);padding:6px 10px;border-bottom:1px solid var(--rule);}
+.hostpanel td{padding:8px 10px;border-bottom:1px solid var(--rule);}
+.hostpanel tbody tr{cursor:pointer;} .hostpanel tbody tr:hover{background:var(--deep);}
+.hostpanel tbody tr.on{background:var(--deep);box-shadow:inset 3px 0 0 var(--accent);}
+.hostpanel .r{text-align:right;font-family:var(--mono);}
+.hostpanel .hn{font-weight:700;}
+.hostpanel .z{color:var(--muted);}
+.f-hosts{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px;}
 .f-count{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--fg);background:var(--deep);border:1px solid var(--rule);border-radius:20px;padding:1px 8px;white-space:nowrap;}
 .f-trisum{font-size:11px;color:var(--faint);white-space:nowrap;}
 .inst{width:100%;border-collapse:collapse;margin:10px 0 2px;font-size:12px;}
@@ -465,6 +633,7 @@ footer{margin-top:36px;padding-top:20px;border-top:1px solid var(--rule);color:v
     <div class="scores" id="scores"></div>
     <div class="trirow" id="trirow"></div>
     <div class="verdict" id="verdict"></div>
+    <div class="panel hostpanel" id="hostpanel" hidden><h2>Hosts in this case</h2><table class="hosttbl"><thead><tr><th>Host</th><th class="r">Events</th><th class="r">Findings</th><th class="r">Critical</th><th class="r">High</th><th class="r">Medium</th><th class="r">Low / info</th><th>Collected from</th></tr></thead><tbody></tbody></table><p class="muted small">Click a host to show only its findings. Counts exclude findings triaged as false positive or dismissed, as in the summary above.</p></div>
     <div class="panel"><h2>Timeline</h2><div class="tl" id="tl"></div><div class="tl-axis" id="tl-axis"></div></div>
     <div class="verdict info" style="border-left-color:var(--accent)">
       <strong>Hunt output — analyst review required.</strong> Findings are pattern matches against the active rule set. They are investigative leads, not conclusions; corroborate each in context before escalation. Absence of findings is not proof of a clean host.</div>
@@ -492,7 +661,7 @@ footer{margin-top:36px;padding-top:20px;border-top:1px solid var(--rule);color:v
       </div>
       <h2 class="sec">Evidence — chain of custody</h2>
       <p class="muted">Every finding traces to one of these source files. SHA-256 recorded at ingest.</p>
-      <table id="tbl-ev"><thead><tr><th>Source &amp; SHA-256</th><th>Artefact</th><th class="r">Size</th><th>Ident.</th></tr></thead><tbody></tbody></table>
+      <table id="tbl-ev"><thead><tr><th class="ev-host">Host</th><th>Source &amp; SHA-256</th><th>Artefact</th><th class="r">Size</th><th>Ident.</th></tr></thead><tbody></tbody></table>
     </div>
     <footer>
       <p><strong>Scope &amp; limitations.</strong> This report reflects automated analysis of the artefacts ingested into this case using the rule set active at generation time. Findings are investigative leads to be corroborated by an analyst. Timestamps are UTC unless noted.</p>
@@ -507,9 +676,9 @@ const esc = s => String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>'
 const SEVS = ['critical','high','medium','low','info'];
 
 // header + meta
-document.getElementById('case-title').innerHTML = 'fx<span class="dot">.</span> ' + esc(D.meta.name);
+document.getElementById('case-title').innerHTML = 'fx<span class="dot">.</span> ' + esc(D.meta.name) + (D.meta.scope==='host' ? ' <span class="muted">· ' + esc(D.meta.hosts) + '</span>' : '');
 document.getElementById('metagrid').innerHTML = [
-  ['Case ID', D.meta.case_id],['Examiner', D.meta.examiner],['Timezone', D.meta.timezone],
+  ['Case ID', D.meta.case_id],[D.meta.scope==='host' ? 'Host (this report)' : (D.meta.hosts.includes(',') ? 'Hosts' : 'Host'), D.meta.hosts || '—'],['Examiner', D.meta.examiner],['Timezone', D.meta.timezone],
   ['Created', D.meta.created_utc],['Report generated', D.generated_utc],['Events analysed', D.counts.events.toLocaleString()],
 ].map(([k,v])=>`<div><div class="k">${esc(k)}</div><div class="v mono">${esc(v)}</div></div>`).join('');
 
@@ -601,6 +770,13 @@ const tacs=D.tactic_order.filter(t=>D.findings.some(f=>f.tactic===t));
 document.getElementById('ftac').innerHTML='<option value="">All tactics</option>'+tacs.map(t=>`<option>${esc(t)}</option>`).join('');
 
 const TRI_LABEL={validated:'Validated',unconfirmed:'Unconfirmed',false_positive:'False positive',dismissed:'Dismissed'};
+// Which hosts a finding group was seen on (multi-host reports only).
+function hostsOf(items){
+  if(!D.hosts||D.hosts.length<2) return '';
+  const hs=[...new Set(items.map(f=>f.host).filter(h=>h&&h!=='—'))];
+  if(!hs.length) return '';
+  return `<span class="f-hosts" title="${esc(hs.join(', '))}">on ${hs.length>2?esc(hs.length+' hosts'):esc(hs.join(', '))}</span>`;
+}
 function renderFindings(){
   const q=document.getElementById('q').value.toLowerCase();
   const fs=document.getElementById('fsev').value, ft=document.getElementById('ftac').value, fh=document.getElementById('fhost').value, fr=document.getElementById('ftri').value;
@@ -645,12 +821,26 @@ function renderFindings(){
     return `<div class="finding ${g.severity}${allMuted?' muted':''}" id="${g.id}">
       <div class="f-head" onclick="this.parentNode.classList.toggle('open')">
         <span class="caret">▸</span><span class="pill ${g.severity}">${g.severity}</span>
-        <span class="f-title">${esc(g.title)}</span>${count}${triHead}
+        <span class="f-title">${esc(g.title)}</span>${count}${hostsOf(items)}${triHead}
         <span class="f-att"><span class="f-tactic">${esc(g.tactic)}</span>${atts}</span>
       </div>
       <div class="f-body">${body}</div></div>`;
   }).join('');
 }
+// Hosts panel (multi-host case reports): one row per machine.
+(function(){
+  if(!D.hosts||D.hosts.length<2) return;
+  const p=document.getElementById('hostpanel'); p.hidden=false;
+  const n=v=>v?Number(v).toLocaleString():'<span class="z">0</span>';
+  p.querySelector('tbody').innerHTML=D.hosts.map(h=>`<tr data-host="${esc(h.host)}"><td class="hn">${esc(h.host)}</td><td class="r">${Number(h.events).toLocaleString()}</td><td class="r">${n(h.findings-h.excluded)}</td><td class="r">${n(h.critical)}</td><td class="r">${n(h.high)}</td><td class="r">${n(h.medium)}</td><td class="r">${n(h.low)}</td><td class="small mono">${esc(h.collected_from||'—')}</td></tr>`).join('');
+  p.querySelectorAll('tbody tr').forEach(tr=>tr.addEventListener('click',()=>{
+    const sel=document.getElementById('fhost'); const on=sel.value===tr.dataset.host;
+    sel.value=on?'':tr.dataset.host;
+    p.querySelectorAll('tbody tr').forEach(r=>r.classList.toggle('on',!on&&r===tr));
+    renderFindings();
+    document.getElementById('tabs').scrollIntoView({behavior:'smooth',block:'start'});
+  }));
+})();
 ['q','fsev','ftac','fhost','ftri'].forEach(id=>document.getElementById(id).addEventListener('input',renderFindings));
 renderFindings();
 
@@ -662,7 +852,9 @@ document.getElementById('attgrid').innerHTML = D.attack.length ? D.attack.map(a=
 // data tables
 document.getElementById('tbl-art').innerHTML=D.artefacts.map(r=>`<tr><td>${esc(r.label)}</td><td class="r mono">${r.count.toLocaleString()}</td></tr>`).join('');
 document.getElementById('tbl-ing').innerHTML=D.ingest.map(r=>`<tr><td>${esc(r.label)}</td><td class="r mono">${r.count}</td></tr>`).join('')+`<tr><td>unclassified files</td><td class="r mono">${D.counts.unclassified}</td></tr>`;
-document.querySelector('#tbl-ev tbody').innerHTML=D.evidence.map(e=>`<tr><td><div class="src-path mono small">${esc(e.source_path)}</div><div class="src-hash mono" title="SHA-256 — click to select"><span class="src-hash-lbl">SHA-256</span>${esc(e.sha256)}</div></td><td class="nowrap">${esc(e.artefact)}</td><td class="r mono small nowrap">${esc(e.size)}</td><td class="small nowrap">${esc(e.id_method)} (${e.confidence}%)</td></tr>`).join('');
+const evMulti=new Set(D.evidence.map(e=>e.host)).size>1;
+document.querySelectorAll('#tbl-ev .ev-host').forEach(th=>{th.hidden=!evMulti;});
+document.querySelector('#tbl-ev tbody').innerHTML=D.evidence.map(e=>`<tr>${evMulti?`<td class="small nowrap">${esc(e.host||'—')}</td>`:''}<td><div class="src-path mono small">${esc(e.source_path)}</div><div class="src-hash mono" title="SHA-256 — click to select"><span class="src-hash-lbl">SHA-256</span>${esc(e.sha256)}</div></td><td class="nowrap">${esc(e.artefact)}</td><td class="r mono small nowrap">${esc(e.size)}</td><td class="small nowrap">${esc(e.id_method)} (${e.confidence}%)</td></tr>`).join('');
 
 // jump-to-finding from nav / timeline. The ▸ on a multi-hit nav group only
 // expands its list of hits; anywhere else jumps to the group's card (and to a

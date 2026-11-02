@@ -6,6 +6,7 @@
 // stays responsive across the millions of events a real case holds.
 
 import { backend } from "./backend.js";
+import { psAnalyze, ATTACK, ATTACK_DATE } from "./psparse.js";
 
 const CATEGORIES = [
   ["execution", "Execution", "var(--cat-execution)"],
@@ -74,7 +75,8 @@ async function init() {
 /// Show the "no case open" empty state in the main area.
 function showEmptyState() {
   el("caseName").textContent = "no case open";
-  state.host = null; if (el("hostChip")) el("hostChip").hidden = true;
+  state.host = null; state.hosts = []; state.hostSel = null; backend.setHostScope(null);
+  syncHostUi();
   el("rail").innerHTML = `<section style="padding:24px 16px;color:var(--ink-dim);font-size:13px;line-height:1.6">
     <div style="font-size:15px;color:var(--ink);margin-bottom:10px">Welcome to fx</div>
     <b>+ New case</b> — pick a folder of extracted Windows artefacts (KAPE / RESPONSE / Velociraptor output) and fx will ingest, hunt, and display it.<br><br>
@@ -96,6 +98,8 @@ function showEmptyState() {
 /// open_case). Pulls detections and paints rail, timeline, everything.
 async function renderCase(overview, label) {
   state.overview = overview;
+  state.hostSel = null; backend.setHostScope(null);
+  try { state.hosts = (await backend.listHosts()) || []; } catch (e) { state.hosts = []; }
   el("caseName").textContent = label
     || (backend.isLive() ? `case ${short(overview.case_id)}` : "sample case · demo data");
   state.allow = null;
@@ -103,10 +107,12 @@ async function renderCase(overview, label) {
   state.detections = await backend.huntResults();
   state.triage = (await backend.listTriage()) || [];
   try { state.labels = (await backend.listLabels()) || []; } catch (e) { state.labels = []; }
-  try { state.host = await backend.hostInfo(); } catch (e) { state.host = null; }
+  // Host facts (and the host-local clock) only make sense for one machine.
+  if (multiHost()) state.host = null;
+  else { try { state.host = await backend.hostInfo(); } catch (e) { state.host = null; } }
   state.tzMode = loadPref("fx.tz", "utc");
   applyTzLabels();
-  renderHostChip();
+  syncHostUi();
   state.ioc = null;
   state.sigma = undefined;
   state.days = null;
@@ -268,12 +274,27 @@ function wireCaseButtons() {
   const openBtn = el("openCaseBtn");
   if (newBtn) newBtn.addEventListener("click", onNewCase);
   if (openBtn) openBtn.addEventListener("click", onOpenCase);
+  const addHostBtn = el("addHostBtn");
+  if (addHostBtn) addHostBtn.addEventListener("click", onAddHost);
+  wireHostMenu();
   const expCsvTop = el("exportCsvTop"), expStixTop = el("exportStixTop");
   if (expCsvTop) expCsvTop.addEventListener("click", () => exportFindings("csv"));
   if (expStixTop) expStixTop.addEventListener("click", () => exportFindings("stix"));
   wireExportMenu();
   const iocBtn = el("iocBtn");
   if (iocBtn) iocBtn.addEventListener("click", () => openIocHunt());
+  const decBtn = el("decodeBtn");
+  // Grab any selected text before the click can clear it.
+  let decSel = "";
+  if (decBtn) decBtn.addEventListener("mousedown", () => { decSel = String((window.getSelection && window.getSelection()) || "").trim(); });
+  if (decBtn) decBtn.addEventListener("click", () => {
+    if (state.view === "decode") { state.view = "timeline"; renderRail(); renderToolbar(); refresh(); return; }
+    // Text selected anywhere (raw record, message, a finding) is decoded directly.
+    const sel = decSel || String((window.getSelection && window.getSelection()) || "").trim(); decSel = "";
+    if (sel.length > 2) { openDecode(sel, null); return; }
+    const d = state.decode;
+    openDecode((d && d.input) || "", d && d.source && d.input === d.sourceText ? d.source : null);
+  });
   // Files dropped on the window go to the IOC list when that view is open.
   backend.onFileDrop((type, paths) => {
     const v = el("iocView");
@@ -301,7 +322,7 @@ async function renderIngestLog() {
   const by = (s) => rows.filter((r) => r.status === s).length;
   const totalEvents = rows.reduce((a, r) => a + (r.events_emitted || 0), 0);
   const totalWarn = rows.reduce((a, r) => a + (r.warning_count || 0), 0);
-  el("resultCount").textContent = `${fmt(n)} files ingested`;
+  el("resultCount").textContent = `${fmt(n)} files ingested${state.hostSel ? ` from ${state.hostSel}` : multiHost() ? ` across ${fmt(state.hosts.length)} hosts` : ""}`;
   const summary = `<div class="ilog-summary">
     <span><b style="color:#2e9e5b">${fmt(by("parsed"))}</b> parsed</span>
     <span><b style="color:#c99a2e">${fmt(by("unsupported"))}</b> unsupported</span>
@@ -317,9 +338,10 @@ async function renderIngestLog() {
   // "never silently drop a file" guarantee holds. Failures sort to the top.
   const groups = new Map();
   for (const r of rows) {
-    const key = `${r.artefact_kind}\u0000${r.status}`;
+    const byHost = hostCol();
+    const key = `${byHost ? r.host || "" : ""}\u0000${r.artefact_kind}\u0000${r.status}`;
     let g = groups.get(key);
-    if (!g) { g = { artefact: r.artefact_kind, status: r.status, items: [], events: 0, records: 0, warn: 0 }; groups.set(key, g); }
+    if (!g) { g = { host: byHost ? r.host || "" : "", artefact: r.artefact_kind, status: r.status, items: [], events: 0, records: 0, warn: 0 }; groups.set(key, g); }
     g.items.push(r);
     g.events += r.events_emitted || 0;
     g.records += r.records_read || 0;
@@ -349,7 +371,7 @@ async function renderIngestLog() {
       <tr class="ilog-group" data-group="${id}" data-open="${open ? 1 : 0}">
         <td class="gname"><span class="caret">${open ? "▾" : "▸"}</span>
           <span class="st-badge st-${g.status}">${g.status}</span>
-          <b>${escapeHtml(g.artefact)}</b>
+          ${g.host ? `<span class="hostpill"><span class="hdot ${hostClass(g.host)}"></span>${escapeHtml(g.host)}</span>` : ""}<b>${escapeHtml(g.artefact)}</b>
           <span class="gcount">${fmt(g.items.length)} file${g.items.length === 1 ? "" : "s"}</span>
         </td>
         <td class="r">${fmt(g.records)}</td>
@@ -504,7 +526,7 @@ async function renderActivityGraph() {
   el("rows").innerHTML = `
     <div class="actwrap">
       <div class="act-head">
-        <div class="act-title">Events per day <span class="act-year">${yearNote} · UTC</span></div>
+        <div class="act-title">Events per day <span class="act-year">${yearNote} · UTC${state.hostSel ? ` · ${escapeHtml(state.hostSel)}` : multiHost() ? ` · all ${fmt(state.hosts.length)} hosts` : ""}</span></div>
         <div class="act-sub">${spikeNote}. Bar height is the day's total; the darker base is the rule-flagged / validated portion. Click a day to pivot the timeline.</div>
         <div class="act-legend">
           <span><i class="sw sw-total"></i> total</span>
@@ -755,7 +777,7 @@ function renderRail() {
       <div class="facet" style="cursor:pointer"><span class="name" style="color:var(--focus)">${state.view === "activity" ? "▾ activity graph" : "▸ activity graph"}</span></div>
       <div class="actlink-sub">events per day · spot untagged spikes</div>
     </section>
-    ${renderHostSection()}
+    ${multiHost() ? renderHostsSection() : renderHostSection()}
     ${renderTriageSummary()}
     ${renderLabelSummary()}
     <section>
@@ -788,7 +810,7 @@ const TRI_STATES = [
   ["dismissed", "Dismissed", "#55607a"],
 ];
 function renderTriageSummary() {
-  const t = state.triage || [];
+  const t = viewTriage();
   if (!t.length) return "";
   const counts = {};
   t.forEach((x) => (counts[x.triage_state] = (counts[x.triage_state] || 0) + 1));
@@ -831,7 +853,7 @@ function facetRow(kind, label, count, color, value) {
 // Findings: the hunt-result summary, given top billing in the rail because a
 // detection is the highest-value thing in a case. Clicking enters the hunt view.
 function renderFindings() {
-  const d = state.detections || [];
+  const d = viewDetections();
   if (!d.length) return "";
   const bySev = {};
   d.forEach((x) => (bySev[x.severity] = (bySev[x.severity] || 0) + 1));
@@ -844,7 +866,7 @@ function renderFindings() {
   const sevColor = { critical: "var(--alert)", high: "#d98c4a", medium: "#d9c04a" }[worst] || "var(--focus)";
   // How much of the list still needs eyes: a detection counts as reviewed once
   // any of its events carries a triage state other than unconfirmed.
-  const tri = new Map((state.triage || []).map((t) => [t.event_id, t.triage_state]));
+  const tri = new Map(viewTriage().map((t) => [t.event_id, t.triage_state]));
   let reviewed = 0;
   d.forEach((x) => {
     const st = (x.event_ids || []).map((id) => tri.get(id)).find(Boolean);
@@ -1050,7 +1072,7 @@ function renderIocResults(r) {
     + `<td class="n">${x.events ? fmt(x.events) : "—"}</td>`
     + `<td class="ts">${x.first_seen ? escapeHtml(ukDateTime(x.first_seen)) : ""}</td>`
     + `<td class="ts">${x.last_seen && x.events > 1 ? escapeHtml(ukDateTime(x.last_seen)) : ""}</td>`
-    + `<td class="where">${Object.entries(x.artefacts || {}).map(([k, n]) => `${escapeHtml(k)} ${fmt(n)}`).join(", ")}</td><td class="go">${x.events ? "›" : ""}</td></tr>`;
+    + `<td class="where">${multiHost() && Object.keys(x.hosts || {}).length ? Object.entries(x.hosts).map(([h, n]) => `<span class="hostpill" title="${fmt(n)} event${n === 1 ? "" : "s"} on ${escapeHtml(h)}"><span class="hdot ${hostClass(h)}"></span>${escapeHtml(h)}</span>`).join("") : ""}${Object.entries(x.artefacts || {}).map(([k, n]) => `${escapeHtml(k)} ${fmt(n)}`).join(", ")}</td><td class="go">${x.events ? "›" : ""}</td></tr>`;
   box.innerHTML = `<div class="iocv-sumrow">
       <div class="iocv-sum"><span class="big">${fmt(r.matched)}</span> of ${fmt(r.iocs)} indicator${r.iocs === 1 ? "" : "s"} found <span class="faint">across ${fmt(r.events_scanned)} events</span></div>
       ${r.matched ? `<button class="topbtn" id="iocAsFindings">Show as findings</button>` : ""}
@@ -1091,7 +1113,200 @@ function osLine(os) {
 // collapsed (hostname, then OS · time zone), expandable to the key facts, with
 // a link to the full Host view. Labelled so it's clear this is the machine the
 // evidence came from.
-function renderHostChip() { const c = el("hostChip"); if (c) c.hidden = true; }
+
+// ── Multi-host ───────────────────────────────────────────────────────────────
+// A case can hold several collections (machines). state.hosts lists them;
+// state.hostSel is the one being looked at (null = all hosts together). The
+// backend applies the selection to the timeline and every case summary; the
+// findings and triage lists are filtered here.
+
+function multiHost() { return (state.hosts || []).length > 1; }
+// The Host column shows when several hosts share the timeline.
+function hostCol() { return multiHost() && !state.hostSel; }
+const HOST_COLORS = ["#4c8dd6", "#d9822b", "#3aa57a", "#b05cc8", "#d4b23a", "#2fb3c0", "#d0566c", "#8a9a3a"];
+function hostColor(name) {
+  const i = (state.hosts || []).findIndex((h) => h.host === name);
+  return i < 0 ? "var(--ink-faint)" : HOST_COLORS[i % HOST_COLORS.length];
+}
+// Colour by class (hc0..hc7, defined in index.html): inline style attributes
+// can be dropped by the desktop app's content-security policy.
+function hostClass(name) {
+  const i = (state.hosts || []).findIndex((h) => h.host === name);
+  return i < 0 ? "" : "hc" + (i % HOST_COLORS.length);
+}
+function viewDetections() {
+  const d = state.detections || [];
+  return state.hostSel ? d.filter((x) => x.host === state.hostSel) : d;
+}
+function viewTriage() {
+  const t = state.triage || [];
+  if (!state.hostSel) return t;
+  // Entries triaged this session may not carry a host yet: look it up.
+  return t.filter((x) => (x.host || (state.rows.find((r) => r.id === x.event_id) || {}).host) === state.hostSel);
+}
+
+// Top bar: "+ Add host" once a case is open; the host switcher once there are two.
+function syncHostUi() {
+  const open = !!state.overview;
+  const add = el("addHostBtn"); if (add) add.hidden = !open;
+  const wrap = el("hostMenuWrap"), chip = el("hostChip");
+  if (el("app")) el("app").classList.toggle("multihost", hostCol());
+  if (!wrap || !chip) return;
+  wrap.hidden = !(open && multiHost());
+  if (wrap.hidden) return;
+  chip.innerHTML = state.hostSel
+    ? `<span class="hdot ${hostClass(state.hostSel)}"></span>${escapeHtml(state.hostSel)} <span class="hcx">· 1 of ${fmt(state.hosts.length)}</span> <span class="chev">▾</span>`
+    : `All hosts <span class="hcx">· ${fmt(state.hosts.length)}</span> <span class="chev">▾</span>`;
+  const findN = (h) => (state.detections || []).filter((d) => !h || d.host === h).length;
+  el("hostMenu").innerHTML = [
+    `<button class="menuitem ${state.hostSel ? "" : "on"}" role="menuitem" data-host=""><span class="hdot"></span><span class="mi-t">All hosts</span><span class="mi-s">${fmt(state.hosts.reduce((a, h) => a + h.events, 0))} events</span></button>`,
+    `<div class="menusep"></div>`,
+    ...state.hosts.map((h) => `<button class="menuitem ${state.hostSel === h.host ? "on" : ""}" role="menuitem" data-host="${escapeHtml(h.host)}"><span class="hdot ${hostClass(h.host)}"></span><span class="mi-t">${escapeHtml(h.host)}</span><span class="mi-s">${fmt(h.events)} events · ${fmt(findN(h.host))} findings</span></button>`),
+  ].join("");
+}
+
+function wireHostMenu() {
+  const wrap = el("hostMenuWrap"), btn = el("hostChip");
+  if (!wrap || !btn) return;
+  const close = () => { wrap.classList.remove("open"); btn.setAttribute("aria-expanded", "false"); };
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = !wrap.classList.contains("open");
+    wrap.classList.toggle("open", open);
+    btn.setAttribute("aria-expanded", String(open));
+    if (open) { const cur = wrap.querySelector(".menuitem.on") || wrap.querySelector(".menuitem"); if (cur) cur.focus(); }
+  });
+  el("hostMenu").addEventListener("click", (e) => {
+    const it = e.target.closest(".menuitem[data-host]");
+    if (!it) return;
+    close();
+    selectHost(it.dataset.host || null);
+  });
+  document.addEventListener("click", (e) => { if (!wrap.contains(e.target)) close(); });
+  document.addEventListener("keydown", (e) => {
+    if (!wrap.classList.contains("open")) return;
+    if (e.key === "Escape") { close(); btn.focus(); }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      const items = Array.from(wrap.querySelectorAll(".menuitem"));
+      const i = items.indexOf(document.activeElement);
+      const n = e.key === "ArrowDown" ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
+      items[n].focus(); e.preventDefault();
+    }
+  });
+}
+
+// Look at one host (or all of them): reload the case summaries for it.
+async function selectHost(h) {
+  h = h || null;
+  if (h === state.hostSel) return;
+  state.hostSel = h;
+  backend.setHostScope(h);
+  closeDetail();
+  try { state.overview = await backend.caseOverview(); } catch (e) { /* keep the last overview */ }
+  if (h || !multiHost()) { try { state.host = await backend.hostInfo(); } catch (e) { state.host = null; } }
+  else state.host = null;
+  if (!state.host && tzMode() === "host") applyTzLabels();
+  applyTzLabels();
+  state.days = null;
+  state.filter.offset = 0;
+  if (state.view === "host" && !h) state.view = "timeline";
+  syncHostUi(); renderRail(); renderToolbar(); renderStatus();
+  await refresh();
+}
+
+// Rail: the hosts in the case, with counts; click to look at one.
+function renderHostsSection() {
+  const findN = (h) => (state.detections || []).filter((d) => d.host === h).length;
+  const total = state.hosts.reduce((a, h) => a + h.events, 0);
+  const h = state.host;
+  const os = h && h.os ? h.os.value : null;
+  const sub = h ? [os ? [os.product, os.version].filter(Boolean).join(" ") : "", h.timezone && h.timezone.value.utc_offset ? h.timezone.value.utc_offset : ""].filter(Boolean).join(" · ") : "";
+  const rows = state.hosts.map((x) => `<div class="hrow ${state.hostSel === x.host ? "on" : ""}" data-host="${escapeHtml(x.host)}" title="${escapeHtml(`${x.host}\nName from: ${x.host_source || "unknown"}\n${x.collections.length} collection${x.collections.length === 1 ? "" : "s"}: ${x.collections.map((c) => c.source_root).filter(Boolean).join(", ")}`)}">
+      <span class="hdot ${hostClass(x.host)}"></span><span class="hname">${escapeHtml(x.host)}</span>
+      <span class="hfind" title="Findings on this host">${findN(x.host) ? fmt(findN(x.host)) : ""}</span><span class="hcnt" title="Events">${fmt(x.events)}</span>
+      <button class="hren" data-host="${escapeHtml(x.host)}" title="Rename this host" aria-label="Rename ${escapeHtml(x.host)}">✎</button>
+    </div>${state.hostSel === x.host && sub ? `<div class="hsrc">${escapeHtml(sub)}</div>` : ""}`).join("");
+  return `<section class="hostsec ${state.view === "host" ? "active" : ""}">
+    <h2>Hosts</h2>
+    <div class="hostrows">
+      <div class="hrow ${state.hostSel ? "" : "on"}" data-host=""><span class="hdot"></span><span class="hname">All hosts</span><span class="hfind" title="Findings across all hosts">${(state.detections || []).length ? fmt(state.detections.length) : ""}</span><span class="hcnt">${fmt(total)}</span><span class="hren-gap"></span></div>
+      ${rows}
+      ${(() => {
+        // Findings whose host isn't one of the case's hosts (no events to
+        // attribute them by): shown so the counts always add up.
+        const known = new Set(state.hosts.map((x) => x.host));
+        const n = (state.detections || []).filter((d) => !known.has(d.host)).length;
+        return n ? `<div class="hrow hrow-none" title="Findings that couldn't be attributed to a host (for example a correlation with no events). Shown in All hosts."><span class="hdot"></span><span class="hname">No host</span><span class="hfind">${fmt(n)}</span><span class="hcnt"></span><span></span></div>` : "";
+      })()}
+      ${state.hostSel ? `<div class="hlink" id="hostDetailsLink">${state.view === "host" ? "← Back to timeline" : "Full host details →"}</div>` : ""}
+    </div>
+  </section>`;
+}
+
+async function renameHostPrompt(old) {
+  const name = window.prompt(`Rename host "${old}" to:`, old);
+  if (name == null || !name.trim() || name.trim() === old) return;
+  try {
+    await backend.renameHost(old, name.trim());
+    await reloadHosts();
+    if (state.hostSel === old) { state.hostSel = name.trim(); backend.setHostScope(state.hostSel); }
+    state.detections = (await backend.huntResults()) || [];
+    try { state.triage = (await backend.listTriage()) || state.triage; } catch (e) {}
+    syncHostUi(); renderRail(); refresh();
+    toast(`Renamed ${old} to ${name.trim()}`);
+  } catch (e) { alert("Couldn't rename the host:\n" + (e && e.message ? e.message : e)); }
+}
+
+async function reloadHosts() {
+  try { state.hosts = (await backend.listHosts()) || []; } catch (e) { /* keep */ }
+}
+
+// "+ Add host": ingest another collection into the open case, then refresh the
+// findings across every host (built-in rules, Sigma if it runs on new cases,
+// and the saved IOC list).
+async function onAddHost() {
+  if (!state.overview) return;
+  if (!backend.isLive() && !window.__fxDemoPick) {
+    alert("Adding a host is only available in the desktop app (not the browser preview).");
+    return;
+  }
+  try {
+    const folder = await backend.pickFolder("Choose the next host's collection folder");
+    if (!folder) return;
+    showOverlay("Adding host", folder);
+    startProgress("ingest");
+    const res = await backend.addCollection(folder, null);
+    const cancelled = await jobCancelled();
+    showOverlay("Running detections", "fx's built-in rules across every host in the case.");
+    startProgress("hunt");
+    await backend.runHunt(null);
+    const sc = sigmaConfig();
+    if (sc.auto && sc.folder) {
+      showOverlay("Running Sigma rules", "Community rules from " + sc.folder);
+      startProgress("hunt");
+      try { await backend.sigmaHunt({ folder: sc.folder, filter: sc.filter }); } catch (e) { /* built-in results stand */ }
+    }
+    let saved = null;
+    try { saved = await backend.iocSaved(); } catch (e) {}
+    if (saved && saved.text && saved.text.trim()) {
+      showOverlay("Re-running the IOC hunt", "Your saved indicator list, across every host.");
+      try { await backend.iocSweep(saved.text); } catch (e) { /* keep the old results */ }
+    }
+    hideOverlay();
+    const label = el("caseName").textContent;
+    await renderCase(res.overview, label);
+    const msg = res.merged
+      ? `Added to ${res.host}, which was already in this case (${fmt(res.events)} events). If that's not the same machine, rename it from the Hosts list.`
+      : `Added host ${res.host} (${fmt(res.events)} events). Use the host switcher to look at one host or all together.`;
+    toast(cancelled ? "Ingest was cancelled part-way. " + msg : msg, 7000);
+  } catch (e) {
+    alert("Couldn't add the host:\n" + (e && e.message ? e.message : e));
+  } finally {
+    hideOverlay();
+  }
+}
+
+function renderHostChip() { syncHostUi(); }
 function renderHostSection() {
   const h = state.host;
   if (!h) return "";
@@ -1516,7 +1731,7 @@ async function exportReport() {
   try {
     const path = await backend.pickExportFile("html");
     if (!path) return; // cancelled
-    showOverlay("Building case report…", "Findings, ATT&CK matrix, timeline and evidence hashes.");
+    showOverlay("Building case report…", (state.hostSel ? `For ${state.hostSel} only. ` : multiHost() ? `All ${state.hosts.length} hosts. ` : "") + "Findings, ATT&CK matrix, timeline and evidence hashes.");
     const bytes = await backend.exportReport(path);
     hideOverlay();
     alert(`Case report saved (${humanBytes(bytes)}) to:\n${path}\n\nOpen it in any browser; print to PDF to archive.`);
@@ -1541,7 +1756,7 @@ function chooseExportStates(format, counts) {
   return new Promise((resolve) => {
     const modal = el("exportModal");
     const label = format === "stix" ? "STIX 2.1" : "CSV";
-    el("expTitle").textContent = `Export findings — ${label}`;
+    el("expTitle").textContent = `Export findings — ${label}${state.hostSel ? ` · ${state.hostSel}` : multiHost() ? " · all hosts" : ""}`;
     el("expRows").innerHTML = TRI_STATES.map(([k, name, color]) => {
       const n = (counts && counts[k]) || 0;
       const checked = EXPORT_DEFAULT.includes(k) && n > 0 ? "checked" : "";
@@ -1620,10 +1835,12 @@ async function refresh() {
   el("app").dataset.view = state.view;
   renderHostChip();
   const ib = el("iocBtn"); if (ib) ib.classList.toggle("active", state.view === "ioc");
+  const db = el("decodeBtn"); if (db) db.classList.toggle("active", state.view === "decode");
   if (el("idfBar") && (state.view !== "timeline" || !state.idFilter)) el("idfBar").hidden = true;
   if (el("miniTl")) el("miniTl").hidden = state.view !== "timeline";
   if (state.view === "timeline") renderMiniTimeline();
   if (state.view === "ioc") { renderIocView(); return; }
+  if (state.view === "decode") { renderDecodeView(); return; }
   if (state.view === "hunt") {
     renderHuntView();
     return;
@@ -1875,10 +2092,10 @@ function renderAllowView() {
 }
 
 function renderHuntView() {
-  const rules = state.detections || [];
+  const rules = viewDetections();
   // Manual findings: triaged events not already covered by a rule detection.
-  const covered = new Set(rules.flatMap((d) => d.event_ids || []));
-  const manual = (state.triage || [])
+  const covered = new Set((state.detections || []).flatMap((d) => d.event_ids || []));
+  const manual = viewTriage()
     .filter((t) => !covered.has(t.event_id))
     .map((t) => ({
       rule_id: "manual-triage",
@@ -1892,6 +2109,7 @@ function renderHuntView() {
       engine: "manual",
     }));
   let d = rules.concat(manual);
+  const grouped = multiHost() && !state.hostSel && loadPref("fx.groupByHost", true) && !state.huntOnly;
   if (state.huntOnly === "ioc" || state.huntOnly === "sigma") {
     const sg = state.huntOnly === "sigma";
     d = rules.filter((x) => x.engine === state.huntOnly);
@@ -1900,12 +2118,35 @@ function renderHuntView() {
   } else {
     const manualNote = manual.length ? ` (${rules.length} rule + ${manual.length} analyst)` : "";
     const nSup = allowSuppressedCount();
-    el("resultCount").innerHTML = `${fmt(d.length)} findings${manualNote} <button class="linkbtn" id="huntAllow">Allow-list${nSup ? ` (${fmt(nSup)} suppressed)` : ""}</button>`;
+    const scope = state.hostSel ? ` on ${escapeHtml(state.hostSel)}` : multiHost() ? ` across ${fmt(state.hosts.length)} hosts` : "";
+    const groupBtn = multiHost() && !state.hostSel ? ` <button class="linkbtn" id="huntGroup">${grouped ? "Ungroup" : "Group by host"}</button>` : "";
+    el("resultCount").innerHTML = `${fmt(d.length)} findings${scope}${manualNote}${groupBtn} <button class="linkbtn" id="huntAllow">Allow-list${nSup ? ` (${fmt(nSup)} suppressed)` : ""}</button>`;
     el("huntAllow").onclick = () => { state.view = "allow"; renderRail(); renderToolbar(); refresh(); };
+    if (el("huntGroup")) el("huntGroup").onclick = () => { savePref("fx.groupByHost", !grouped); renderHuntView(); };
+  }
+  if (grouped) {
+    // Combined view: one block per host (worst-first inside), hosts in the
+    // order they were added, so each machine reads as its own story.
+    const order = state.hosts.map((h) => h.host);
+    d = d.slice().sort((a, b) => {
+      const ia = order.indexOf(a.host || ""), ib = order.indexOf(b.host || "");
+      return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+    });
   }
   el("spTop").style.height = "0px";
   el("spBot").style.height = "0px";
-  el("rows").innerHTML = d.map((x, i) => huntRowHtml(x, i)).join("") ||
+  let lastHost = null;
+  state.huntGrouped = grouped;
+  el("rows").innerHTML = d.map((x, i) => {
+    let head = "";
+    if (grouped && (x.host || "") !== lastHost) {
+      lastHost = x.host || "";
+      const n = d.filter((y) => (y.host || "") === lastHost).length;
+      const crit = d.filter((y) => (y.host || "") === lastHost && (y.severity === "critical" || y.severity === "high")).length;
+      head = `<div class="hgroup-h"><span class="hdot ${hostClass(lastHost)}"></span>${escapeHtml(lastHost || "Unknown host")}<span class="hg-n">${fmt(n)} finding${n === 1 ? "" : "s"}${crit ? ` · ${fmt(crit)} critical / high` : ""}</span></div>`;
+    }
+    return head + huntRowHtml(x, i);
+  }).join("") ||
     `<div class="empty"><div class="box"><h2>No findings</h2><p>No rule detections and nothing triaged yet. Validate events in the timeline to add analyst findings here.</p></div></div>`;
   // Clicking a finding jumps to its event in the timeline + opens the detail
   // pane (raw record + triage buttons live there).
@@ -1921,7 +2162,8 @@ function renderHuntView() {
 }
 
 function huntRowHtml(d, i) {
-  const attack = (d.attack || []).map((t) => `<span class="att">${t}</span>`).join("");
+  const tactics = (d.tactics || []).map((t) => `<span class="tac" title="MITRE ATT&CK tactic">${escapeHtml(t)}</span>`).join("");
+  const attack = tactics + (d.attack || []).map((t) => `<span class="att" title="MITRE ATT&CK technique">${t}</span>`).join("");
   const eng = d.engine === "correlation" ? "correlated" : d.engine === "ioc" ? "IOC match" : d.engine === "sigma" ? "Sigma" : "single-event";
   const eid = (d.event_ids && d.event_ids.length) ? d.event_ids[0] : "";
   const tri = eid ? triageStateFor(eid) : "";
@@ -1930,12 +2172,12 @@ function huntRowHtml(d, i) {
   return `<div class="hitrow sev-border-${d.severity}${sel}" data-i="${i}" data-event="${eid}" data-ts="${escapeHtml(d.ts || "")}"${d.engine === "ioc" ? ` data-rule="${escapeHtml(d.rule_id)}"` : ""}>
     <div class="hit-main">
       <span class="sev-tag sev-${d.severity}">${d.severity}</span>
-      <span class="hit-title">${escapeHtml(d.title)}</span>
+      ${multiHost() && !state.hostSel && !state.huntGrouped && d.host ? `<span class="hostpill"><span class="hdot ${hostClass(d.host)}"></span>${escapeHtml(d.host)}</span>` : ""}<span class="hit-title">${escapeHtml(d.title)}</span>
       <span class="hit-att">${triBadge}${attack}</span>
     </div>
     <div class="hit-sub">
       <span class="hit-summary">${escapeHtml(d.summary)}</span>
-      <span class="hit-meta">${d.engine !== "manual" && i != null ? `<button class="hit-sup" data-i="${i}" title="Hide findings like this one (known benign). Reversible from the allow-list.">Suppress…</button>` : ""}${time(d.ts)} · ${d.host || "—"} · ${eng} · click to open ▸</span>
+      <span class="hit-meta">${d.engine !== "manual" && i != null ? `<button class="hit-sup" data-i="${i}" title="Hide findings like this one (known benign). Reversible from the allow-list.">Suppress…</button>` : ""}${time(d.ts)} · ${escapeHtml(d.host || "—")} · ${eng} · click to open ▸</span>
     </div>
   </div>`;
 }
@@ -1975,6 +2217,158 @@ function findingToTimeline(det) {
     return;
   }
   openFindingEvent(ids[0], det.ts || "");
+}
+
+
+// ── Decode (psparse) ─────────────────────────────────────────────────────────
+// Offline deobfuscation and explanation of PowerShell / command lines, using
+// the psparse engine (src/psparse.js). Everything it returns is evidence text,
+// so every value is escaped before it reaches the DOM.
+
+const CMD_KEYS = /^(commandline|command_line|scriptblocktext|payload|command|arguments|parentcommandline|imagepath|cmd|cmdline|script)$/i;
+
+// The most useful command text in an event: from the raw record's command /
+// script fields (process creation, 4104 script blocks, 4103 payloads, tasks,
+// services, PSReadLine, RunMRU, pagefile remnants), else the message.
+function commandTextFor(e, raw) {
+  const found = [];
+  const walk = (v, key) => {
+    if (v == null) return;
+    if (typeof v === "string") { if (key && CMD_KEYS.test(key) && v.trim().length > 2) found.push([key.toLowerCase(), v]); return; }
+    if (Array.isArray(v)) { v.forEach((x) => walk(x, key)); return; }
+    if (typeof v === "object") for (const [k, x] of Object.entries(v)) walk(x, k);
+  };
+  try { walk(typeof raw === "string" ? JSON.parse(raw) : raw, ""); } catch (err) {}
+  const pick = (k) => (found.find((f) => f[0] === k) || [])[1];
+  const cmd = pick("command"), args = pick("arguments");
+  const best = pick("scriptblocktext") || pick("commandline") || pick("command_line") || pick("payload")
+    || (cmd ? (args ? `${cmd} ${args}` : cmd) : null) || pick("cmdline") || pick("cmd") || pick("script") || pick("imagepath") || pick("parentcommandline");
+  return best || (e && e.message) || "";
+}
+
+// Only offer Decode where there is something to decode: a shell, script host,
+// LOLBin, PowerShell cmdlet or a long Base64 run. Ordinary file / registry /
+// logon events don't get the option (the top-bar Decode view is always there).
+const DECODABLE = /\b(?:powershell|pwsh|cmd(?:\.exe)?\s+\/[ckr]|rundll32|regsvr32|mshta|wscript|cscript|certutil|bitsadmin|wmic|schtasks|msiexec|iex|invoke-[a-z]+|frombase64string|new-object|start-process|add-type|downloadstring|-e(?:nc(?:odedcommand)?|c)?\s+[A-Za-z0-9+/]{16,})|\[char\]\s*\d|`[a-z]`[a-z]/i;
+// A long Base64 blob on its own also counts, but not hex (hashes, GUIDs,
+// Dell / Windows snapshot file names) and not a run that is really a path.
+function hasBase64Blob(text) {
+  const re = /[A-Za-z0-9+/]{60,}={0,2}/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const run = m[0].replace(/=+$/, "");
+    if ((run.match(/\//g) || []).length > 2) continue;          // a path, not Base64
+    if (/^[0-9A-Fa-f/]+$/.test(run)) continue;                   // hex: hashes, snapshot names
+    if (/[a-z]/.test(run) && /[A-Z]/.test(run) && /\d/.test(run)) return true;
+  }
+  return false;
+}
+function looksDecodable(text) {
+  return !!text && text.length > 8 && (DECODABLE.test(text) || hasBase64Blob(text));
+}
+
+function decodeEvent(e, raw) {
+  const text = commandTextFor(e, raw);
+  openDecode(text, e ? { id: e.id, label: `${e.artefact} · ${time(e.ts)}`, action: e.action } : null);
+}
+
+async function openDecode(text, source) {
+  closeDetail();
+  state.view = "decode";
+  state.decode = { input: text || "", source: source || null, sourceText: text || "", result: null, busy: !!(text && text.trim()) };
+  renderRail(); renderToolbar(); refresh();
+  if (state.decode.busy) await runDecode();
+}
+
+async function runDecode() {
+  const d = state.decode; if (!d) return;
+  const box = el("decInput"); if (box) d.input = box.value;
+  // Edited or replaced text no longer belongs to the event, so it can't be saved as that event's note.
+  if (d.source && d.input !== d.sourceText) d.source = null;
+  if (!d.input.trim()) { d.result = null; d.busy = false; renderDecodeView(); return; }
+  d.busy = true; renderDecodeView();
+  try { d.result = await psAnalyze(d.input); d.error = null; }
+  catch (err) { d.result = null; d.error = String(err && err.message ? err.message : err); }
+  d.busy = false;
+  if (state.view === "decode") renderDecodeView();
+}
+
+const DEC_SEV_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+function attackTactics(id) { const a = ATTACK[id]; return a ? a[1] : ""; }
+
+function renderDecodeView() {
+  const d = state.decode || { input: "", source: null, result: null };
+  el("resultCount").innerHTML = `Decode · offline PowerShell / command-line analysis${d.source ? ` <button class="linkbtn" id="decBack">Back to event</button>` : ""}`;
+  el("spTop").style.height = "0px"; el("spBot").style.height = "0px";
+  const r = d.result;
+  const esc = escapeHtml;
+  const sevPill = (s) => `<span class="sev-tag sev-${esc(s === "ok" ? "low" : s)}">${esc(s === "ok" ? "benign" : s)}</span>`;
+  const iocVals = r ? Object.entries(r.iocs || {}) : [];
+  const huntable = r ? [...new Set([...(r.iocs.url || []), ...(r.iocs.ipv4 || []), ...(r.iocs.domain || []), ...(r.iocs.ip_port || []).map((v) => v.split(":")[0])])] : [];
+  const findings = r ? [...r.findings].sort((a, b) => (DEC_SEV_ORDER[a.sev] ?? 9) - (DEC_SEV_ORDER[b.sev] ?? 9)) : [];
+  const techs = r ? [...new Set([...(r.mitre || []), ...r.steps.map((s) => s.mitre)])].filter(Boolean).sort() : [];
+  el("rows").innerHTML = `<div class="decv">
+    <div class="decv-left">
+      <h2 class="iocv-h">Decode</h2>
+      <p class="iocv-sub">Paste a PowerShell command, script block or command line. fx peels obfuscation (Base64 / UTF-16, Gzip / Deflate, backticks, reversed strings, -f format strings, char codes), explains each part and flags known techniques. Nothing leaves this machine and nothing is executed.</p>
+      ${d.source ? `<div class="dec-src">From event <b>${esc(d.source.label)}</b>${d.source.action ? ` · <span class="mono">${esc(d.source.action)}</span>` : ""}</div>` : ""}
+      <textarea id="decInput" class="dec-input" spellcheck="false" placeholder="powershell -nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkA...">${esc(d.input || "")}</textarea>
+      <div class="iocv-actions"><span class="iocv-drop">${r && r.truncated ? "Input over 200,000 characters was truncated." : ""}</span><button class="btn-primary" id="decGo">${d.busy ? "Analysing…" : "Analyse"}</button></div>
+    </div>
+    <div class="decv-right">${d.error ? `<div class="iocv-empty"><h3>Couldn't analyse that</h3><p>${esc(d.error)}</p></div>` : !r ? `<div class="iocv-empty"><h3>${d.busy ? "Analysing…" : "Nothing analysed yet"}</h3><p>Paste text on the left, or use <b>Decode command</b> on any event (detail panel or right-click).</p></div>` : `
+      <div class="dec-verdict sev-border-${esc(r.vsev === "ok" ? "low" : r.vsev)}">
+        <div class="dec-vtext">${sevPill(r.vsev)} <b>${esc(r.vtext)}</b></div>
+        <div class="dec-vmeta">score ${esc(String(r.score))} · ${esc(String(r.findings.length))} finding${r.findings.length === 1 ? "" : "s"} · ${esc(String(r.layers))} obfuscation layer${r.layers === 1 ? "" : "s"} peeled${r.sha ? ` · SHA-256 <span class="mono" title="${esc(r.sha)}">${esc(r.sha.slice(0, 16))}…</span>` : ""}</div>
+        <div class="dec-actions">
+          ${d.source ? `<button class="topbtn" id="decNote" title="Save the verdict and decoded command as this event's analyst note">Add as note</button>` : ""}
+          ${huntable.length ? `<button class="topbtn" id="decHunt" title="Add these URLs, IPs and domains to the IOC hunt list">Hunt ${fmt(huntable.length)} IOC${huntable.length === 1 ? "" : "s"} in this case</button>` : ""}
+          <button class="topbtn" id="decCopy">Copy decoded</button>
+        </div>
+      </div>
+      ${r.steps.length ? `<h3 class="dec-h">Deobfuscation (${fmt(r.steps.length)} step${r.steps.length === 1 ? "" : "s"})</h3>
+      <ol class="dec-steps">${r.steps.map((st) => `<li><b>${esc(st.tech)}</b> <span class="dec-dim">layer ${esc(String(st.layer))} · ${esc(st.detail)}</span>
+        <div class="dec-ba"><code>${esc(st.before)}</code><span class="dec-arrow">→</span><code>${esc(st.after)}</code></div></li>`).join("")}</ol>` : ""}
+      <h3 class="dec-h">${r.steps.length ? "Decoded command" : "Command"}</h3>
+      <pre class="raw dec-final" data-wrap="1">${esc(r.final)}</pre>
+      <h3 class="dec-h">Findings</h3>
+      ${findings.length ? findings.map((f) => `<div class="dec-find sev-border-${esc(f.sev === "info" ? "low" : f.sev)}">
+          <div class="dec-fhead">${sevPill(f.sev)} <b>${esc(f.name)}</b><span class="hit-att">${[...new Set((f.mitre || []).map(attackTactics).join(" / ").split(" / ").filter(Boolean))].map((t) => `<span class="tac">${esc(t)}</span>`).join("")}${(f.mitre || []).map((t) => `<span class="att" title="${esc((ATTACK[t] || [""])[0])}">${esc(t)}</span>`).join("")}</span></div>
+          <div class="dec-fdesc">${esc(f.desc || "")}</div>
+          ${(f.matched || []).length ? `<div class="dec-match">${f.matched.map((m) => `<code>${esc(m)}</code>`).join(" ")}</div>` : ""}
+        </div>`).join("") : `<p class="dec-dim">No known-bad techniques matched.</p>`}
+      ${iocVals.length ? `<h3 class="dec-h">Indicators</h3><table class="ioc-table dec-iocs"><tbody>${iocVals.map(([k, vals]) => vals.map((v) => `<tr><td class="dec-dim">${esc(k.replace("_", " "))}</td><td class="mono">${esc(v)}</td></tr>`).join("")).join("")}</tbody></table>` : ""}
+      ${techs.length ? `<h3 class="dec-h">MITRE ATT&CK</h3><div class="dec-attack">${techs.map((t) => `<div><span class="att">${esc(t)}</span> ${esc((ATTACK[t] || ["(not in reference table)"])[0])} <span class="dec-dim">${esc(attackTactics(t))}</span></div>`).join("")}<div class="dec-dim">MITRE ATT&CK Enterprise, data dated ${esc(ukDate(ATTACK_DATE))}</div></div>` : ""}
+      ${(r.segments || []).length ? `<details class="dec-bd"><summary>Breakdown: what each part does (${fmt(r.segments.length)})</summary><table class="ioc-table"><tbody>${r.segments.map((g) => `<tr class="dec-c-${esc(g.concern)}"><td class="mono">${esc(g.text)}</td><td>${esc(g.desc)}</td></tr>`).join("")}</tbody></table></details>` : ""}
+    `}</div>
+  </div>`;
+  el("decGo").onclick = runDecode;
+  el("decInput").onkeydown = (ev) => { if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") runDecode(); };
+  if (el("decBack")) el("decBack").onclick = () => { const id = d.source && d.source.id; state.view = "timeline"; renderRail(); renderToolbar(); refresh().then(() => { if (id && state.rows.find((x) => x.id === id)) select(id); }); };
+  if (el("decCopy")) el("decCopy").onclick = () => navigator.clipboard.writeText(r.final).then(() => toast("Decoded command copied")).catch(() => {});
+  if (el("decHunt")) el("decHunt").onclick = async () => {
+    if (!state.ioc) { try { state.ioc = (await backend.iocSaved()) || { text: "", results: null }; } catch (err) { state.ioc = { text: "", results: null }; } }
+    const have = new Set((state.ioc.text || "").split(/\r?\n/).map((l) => l.trim().toLowerCase()));
+    const add = huntable.filter((v) => !have.has(v.toLowerCase()));
+    if (add.length) {
+      state.ioc.text = (state.ioc.text && state.ioc.text.trim() ? state.ioc.text.trimEnd() + "\n" : "") + add.join("\n");
+      try { await backend.iocSaveList(state.ioc.text); } catch (err) {}
+    }
+    state.view = "ioc"; state.iocTab = "ioc";
+    renderRail(); renderToolbar(); refresh();
+    toast(add.length ? `Added ${add.length} indicator${add.length === 1 ? "" : "s"} to the IOC hunt list. Review, then Run hunt.` : "Those indicators are already in the IOC hunt list.", 4500);
+  };
+  if (el("decNote")) el("decNote").onclick = async () => {
+    const id = d.source.id;
+    const top = findings.filter((f) => f.sev !== "info").slice(0, 6).map((f) => `${f.name} (${(f.mitre || []).join(", ")})`).join("; ");
+    const decoded = r.final.length > 600 ? r.final.slice(0, 600) + " …" : r.final;
+    const note = `fx Decode: ${r.vtext}, score ${r.score}, ${r.layers} layer(s) peeled.` + (top ? `\nFindings: ${top}.` : "") + (r.steps.length ? `\nDecoded: ${decoded}` : "");
+    const prev = triageNoteFor(id);
+    try {
+      await setTriageFor(id, triageStateFor(id) || "unconfirmed", prev ? `${prev}\n\n${note}` : note, true);
+      toast("Saved as the event's analyst note");
+    } catch (err) { alert("Couldn't save the note:\n" + (err && err.message ? err.message : err)); }
+  };
+  renderStatus();
 }
 
 // Jump from a finding to its underlying event: switch to the timeline, find
@@ -2104,10 +2498,11 @@ function rowHtml(e) {
   const triBadge = tri ? `<span class="tri-badge ${tri}">${tri.replace("_"," ").slice(0,4)}</span>` : "";
   // Full message + full UK timestamp on hover, so a truncated row is readable
   // without opening the detail pane.
-  const tip = `${time(e.ts)} · ${e.artefact}${e.user ? " · " + e.user : ""}\n${e.message || ""}`;
+  const tip = `${time(e.ts)} · ${multiHost() && e.host ? e.host + " · " : ""}${e.artefact}${e.user ? " · " + e.user : ""}\n${e.message || ""}`;
   return `<div class="evrow ${sel} ${flagged}" data-id="${e.id}" title="${escapeHtml(tip)}">
     <span class="cat-tick" style="background:${color}"></span>
     <span class="c ts">${time(e.ts)}</span>
+    ${hostCol() ? `<span class="c host"><span class="hdot ${hostClass(e.host)}"></span>${escapeHtml(e.host || "—")}</span>` : ""}
     <span class="c kind">${e.ts_kind}</span>
     <span class="c art" style="color:${color}">${e.artefact}</span>
     <span class="c user">${e.user ? escapeHtml(e.user) : "—"}</span>
@@ -2139,6 +2534,7 @@ async function select(id) {
   const pretty = raw ? prettyJson(raw) : "";
   const note = triageNoteFor(id);
   const cur = triageStateFor(id);
+  const decodable = looksDecodable(commandTextFor(e, raw));
   const fact = (k, v, mono) => v ? `<span class="df"><span class="dk">${k}</span><span class="dv${mono ? " mono" : ""}">${escapeHtml(String(v))}</span></span>` : "";
   el("detail").innerHTML = `
     <div class="detail-resizer" id="detResizer" title="Drag to resize · double-click to reset"></div>
@@ -2186,10 +2582,12 @@ async function select(id) {
         <button class="mini" id="rawBigger" title="Larger text">A+</button>
         <button class="mini ${state.rawWrap ? "on" : ""}" id="rawWrap" title="Wrap long lines">Wrap</button>
         <button class="mini" id="rawCopy" title="Copy raw record">Copy</button>
+        ${decodable ? `<button class="mini" id="detDecode" title="This record holds a command or script. Deobfuscate and explain it (offline, nothing is run).">Decode</button>` : ""}
       </div>
       <pre class="raw" id="rawPre" style="font-size:${state.rawFont}px" data-wrap="${state.rawWrap ? 1 : 0}">${pretty ? highlightJson(pretty) : "no raw record"}</pre>
     </div>`;
   el("detClose").onclick = closeDetail;
+  if (el("detDecode")) el("detDecode").onclick = () => decodeEvent(e, raw);
   if (el("detTimeline")) el("detTimeline").onclick = () => findingToTimeline(state.detailFinding);
   el("detWide").onclick = () => { state.detailWide = !state.detailWide; applyDetailWidth(); select(id); };
   wireDetailResizer();
@@ -2205,7 +2603,7 @@ async function select(id) {
   };
 
   // Pivot buttons: set a time window around this event and show the timeline.
-  document.querySelectorAll("#detail .pv-btn").forEach((btn) => {
+  document.querySelectorAll("#detail .pv-btn[data-pivot]").forEach((btn) => {
     btn.onclick = () => {
       const secs = parseInt(btn.dataset.pivot, 10);
       const t = Date.parse((e.ts || "").replace(" ", "T").replace("Z", "") + "Z");
@@ -2313,7 +2711,8 @@ function openEventMenu(e, x, y, opts) {
     <div class="ctx-sep"></div>
     ${base ? `<button class="ctx-item" data-ioc="${escapeHtml(base)}">Add file name to IOC hunt <span class="ctx-v">${escapeHtml(base)}</span></button>` : ""}
     ${path && path !== base ? `<button class="ctx-item" data-ioc="${escapeHtml(path)}">Add path to IOC hunt</button>` : ""}
-    <button class="ctx-item" data-copy="1">Copy event text</button>`}`;
+    <button class="ctx-item" data-copy="1">Copy event text</button>
+    <button class="ctx-item" data-decode="1">Decode command</button>`}`;
   document.body.appendChild(m);
   // Keep the menu on screen.
   const r = m.getBoundingClientRect();
@@ -2325,6 +2724,8 @@ function openEventMenu(e, x, y, opts) {
   inp.onkeydown = (ev) => { if (ev.key === "Enter" && inp.value.trim()) { const t = inp.value.trim(); closeEventMenu(); if (!labelsFor(e.id).includes(t)) toggleLabel(e.id, t); } };
   m.querySelectorAll("[data-tri]").forEach((b) => { b.onclick = () => { closeEventMenu(); setTriageFor(e.id, b.dataset.tri, triageNoteFor(e.id) || null); }; });
   m.querySelectorAll("[data-ioc]").forEach((b) => { b.onclick = async () => { closeEventMenu(); await addToIocList(b.dataset.ioc); }; });
+  const dc = m.querySelector("[data-decode]");
+  if (dc) dc.onclick = async () => { closeEventMenu(); let raw = null; try { raw = await backend.eventRaw(e.id); } catch (err) {} decodeEvent(e, raw); };
   const cp = m.querySelector("[data-copy]");
   if (cp) cp.onclick = () => { closeEventMenu(); navigator.clipboard.writeText(`${time(e.ts)}\t${e.artefact}\t${e.message || ""}`).catch(() => {}); };
   setTimeout(() => { document.addEventListener("mousedown", ctxOutside, true); document.addEventListener("keydown", ctxKey, true); }, 0);
@@ -2586,6 +2987,10 @@ function wireEvents() {
       return;
     }
     if (e.target.closest("#allEventsLink")) { clearAllFilters(); return; }
+    const ren = e.target.closest(".hren");
+    if (ren) { e.stopPropagation(); renameHostPrompt(ren.dataset.host); return; }
+    const hrow = e.target.closest(".hrow[data-host]");
+    if (hrow) { selectHost(hrow.dataset.host || null); return; }
     if (e.target.closest("#hostDetailsLink")) {
       state.view = state.view === "host" ? "timeline" : "host";
       closeDetail(); renderRail(); renderToolbar(); refresh();

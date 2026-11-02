@@ -20,10 +20,12 @@ use uuid::Uuid;
 
 pub mod allowlist;
 pub mod evidence;
+pub mod hosts;
 pub mod hunt_support;
 pub mod query;
 pub mod schema;
 
+pub use hosts::{CollectionRow, HostRow, DUPLICATE_COLLECTION};
 pub use hunt_support::{CorrelationRow, DetectionRow};
 pub use query::{DailyActivity, SrumNetTotal, TimelineFilter, TimelineRow};
 
@@ -37,11 +39,15 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error("schema version mismatch: case is v{found}, tool expects v{expected}")]
     SchemaMismatch { found: i32, expected: i32 },
+    #[error("{0}")]
+    Refused(String),
 }
 
 pub struct CaseStore {
     conn: Connection,
     case_id: Uuid,
+    /// Host the case-level summaries are restricted to (see `hosts`).
+    scope: std::cell::RefCell<Option<String>>,
 }
 
 impl CaseStore {
@@ -73,7 +79,13 @@ impl CaseStore {
             ],
         )?;
 
-        Ok(Self { conn, case_id })
+        let store = Self {
+            conn,
+            case_id,
+            scope: Default::default(),
+        };
+        store.ensure_hosts_schema()?;
+        Ok(store)
     }
 
     /// Open an existing case file and validate the schema version.
@@ -95,7 +107,24 @@ impl CaseStore {
         // and its last results). Created lazily so older case files gain it on
         // open without a schema-version bump.
         conn.execute_batch(CASE_KV_DDL)?;
-        Ok(Self { conn, case_id })
+        let store = Self {
+            conn,
+            case_id,
+            scope: Default::default(),
+        };
+        store.ensure_hosts_schema()?;
+        // Multi-host cases: findings from runs made before a host was added or
+        // renamed are re-attributed to their events' host.
+        let hosts: i64 =
+            store
+                .conn
+                .query_row("SELECT COUNT(DISTINCT host) FROM collections", [], |r| {
+                    r.get(0)
+                })?;
+        if hosts > 1 {
+            store.sync_detection_hosts()?;
+        }
+        Ok(store)
     }
 
     pub fn case_id(&self) -> Uuid {
@@ -125,9 +154,12 @@ impl CaseStore {
 
     /// Evidence items (hashed source files) for the chain-of-custody section.
     pub fn evidence_list(&self) -> Result<Vec<EvidenceItem>, StoreError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT source_path, artefact_kind, sha256, size_bytes, id_method, id_confidence
-             FROM evidence ORDER BY artefact_kind, source_path",
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT source_path, artefact_kind, sha256, size_bytes, id_method, id_confidence,
+                    COALESCE((SELECT host FROM collections c WHERE c.collection_id = evidence.collection_id), '')
+             FROM evidence WHERE 1=1{} ORDER BY 7, artefact_kind, source_path",
+            self.scope_collection_sql("collection_id")
+        ),
         )?;
         let rows = stmt
             .query_map([], |r| {
@@ -138,6 +170,7 @@ impl CaseStore {
                     size_bytes: r.get::<_, i64>(3)? as u64,
                     id_method: r.get(4)?,
                     id_confidence: r.get(5)?,
+                    host: r.get(6)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -147,12 +180,13 @@ impl CaseStore {
     /// Host facts (`host.*` events from the registry) with their source hive,
     /// for the Host panel: (event id, action, raw JSON, source path).
     pub fn host_facts(&self) -> Result<Vec<(String, String, String, String)>, StoreError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT CAST(e.id AS VARCHAR), e.action, CAST(e.raw AS VARCHAR), COALESCE(v.source_path, '')
              FROM events e LEFT JOIN evidence v ON v.evidence_id = e.evidence_id
-             WHERE e.action LIKE 'host.%'
+             WHERE e.action LIKE 'host.%'{}
              ORDER BY e.ts",
-        )?;
+            self.scope_host_sql("e.host")
+        ))?;
         let rows = stmt
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -161,13 +195,18 @@ impl CaseStore {
 
     /// Collection summary: (tool, asserted host, asserted time zone, files,
     /// total bytes, first / last registration time).
-    pub fn collection_summary(&self) -> Result<(Option<String>, Option<String>, Option<String>, u64, u64), StoreError> {
+    pub fn collection_summary(
+        &self,
+    ) -> Result<(Option<String>, Option<String>, Option<String>, u64, u64), StoreError> {
+        let w = self.scope_collection_sql("collection_id");
         let row = self.conn.query_row(
-            "SELECT (SELECT collection_tool FROM evidence WHERE collection_tool IS NOT NULL GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1),
-                    (SELECT asserted_host FROM evidence WHERE asserted_host IS NOT NULL GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1),
-                    (SELECT asserted_timezone FROM evidence WHERE asserted_timezone IS NOT NULL GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1),
-                    COUNT(*), COALESCE(SUM(size_bytes), 0)
-             FROM evidence",
+            &format!(
+                "SELECT (SELECT collection_tool FROM evidence WHERE collection_tool IS NOT NULL{w} GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1),
+                        (SELECT asserted_host FROM evidence WHERE asserted_host IS NOT NULL{w} GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1),
+                        (SELECT asserted_timezone FROM evidence WHERE asserted_timezone IS NOT NULL{w} GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1),
+                        COUNT(*), COALESCE(SUM(size_bytes), 0)
+                 FROM evidence WHERE 1=1{w}"
+            ),
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? as u64, r.get::<_, i64>(4)? as u64)),
         )?;
@@ -176,9 +215,14 @@ impl CaseStore {
 
     /// Count of unclassified files (the "nothing dropped" accounting).
     pub fn unclassified_count(&self) -> Result<u64, StoreError> {
-        let n: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM unclassified", [], |r| r.get(0))?;
+        let n: i64 = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM unclassified WHERE 1=1{}",
+                self.scope_collection_sql("collection_id")
+            ),
+            [],
+            |r| r.get(0),
+        )?;
         Ok(n as u64)
     }
 
@@ -228,7 +272,9 @@ impl CaseStore {
 
     /// SHA-256 recorded for a registered evidence file.
     pub fn evidence_sha256(&self, evidence_id: &Uuid) -> Result<Option<String>, StoreError> {
-        let mut stmt = self.conn.prepare("SELECT sha256 FROM evidence WHERE evidence_id = CAST(? AS UUID)")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT sha256 FROM evidence WHERE evidence_id = CAST(? AS UUID)")?;
         let mut rows = stmt.query(params![evidence_id.to_string()])?;
         Ok(match rows.next()? {
             Some(r) => Some(r.get(0)?),
@@ -324,7 +370,10 @@ impl CaseStore {
         self.conn.execute_batch(CASE_KV_DDL)?;
         let mut stmt = self.conn.prepare("SELECT v FROM case_kv WHERE k = ?")?;
         let mut rows = stmt.query(params![key])?;
-        Ok(match rows.next()? { Some(r) => Some(r.get(0)?), None => None })
+        Ok(match rows.next()? {
+            Some(r) => Some(r.get(0)?),
+            None => None,
+        })
     }
 
     /// Write a per-case UI value.
@@ -349,9 +398,9 @@ impl CaseStore {
     /// Map of event_id -> (state, note) for every tagged event, so the GUI can
     /// show badges and filter. States come back without the "triage:" prefix.
     pub fn triage_map(&self) -> Result<Vec<(String, String, Option<String>)>, StoreError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT event_id, tag, note FROM tags WHERE tag LIKE 'triage:%'",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT event_id, tag, note FROM tags WHERE tag LIKE 'triage:%'")?;
         let rows = stmt
             .query_map([], |r| {
                 let id: String = r.get(0)?;
@@ -367,13 +416,16 @@ impl CaseStore {
     /// The per-file ingest log: what was ingested and whether it parsed. Powers
     /// the GUI's "Ingest log" view so analysts can see coverage and failures.
     pub fn ingest_log(&self) -> Result<Vec<IngestLogRow>, StoreError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT source_path, artefact_kind, status, detail,
-                    records_read, events_emitted, warning_count
+                    records_read, events_emitted, warning_count,
+                    COALESCE((SELECT host FROM collections c WHERE c.collection_id = ingest_report.collection_id), '')
              FROM ingest_report
+             WHERE 1=1{}
              ORDER BY CASE status WHEN 'failed' THEN 0 WHEN 'unsupported' THEN 1 ELSE 2 END,
                       source_path",
-        )?;
+            self.scope_collection_sql("collection_id")
+        ))?;
         let rows = stmt
             .query_map([], |r| {
                 Ok(IngestLogRow {
@@ -384,6 +436,7 @@ impl CaseStore {
                     records_read: r.get::<_, i64>(4)? as u64,
                     events_emitted: r.get::<_, i64>(5)? as u64,
                     warning_count: r.get::<_, i32>(6)? as u32,
+                    host: r.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -394,9 +447,7 @@ impl CaseStore {
     /// exports can include analyst-validated events that no rule fired on, not
     /// just rule detections. Returns (event_id, state, note, ts, host, action,
     /// artefact, message).
-    pub fn triaged_events(
-        &self,
-    ) -> Result<Vec<TriagedEvent>, StoreError> {
+    pub fn triaged_events(&self) -> Result<Vec<TriagedEvent>, StoreError> {
         // Reuse the proven per-id lookup (string bind against the UUID column,
         // same path as raw_json which is known to match) rather than a
         // column-to-column JOIN, which can behave differently for UUID types.
@@ -421,20 +472,26 @@ impl CaseStore {
                 });
             }
         }
+        if let Some(h) = self.host_scope() {
+            out.retain(|t| t.host.as_deref() == Some(h.as_str()));
+        }
         out.sort_by(|a, b| a.ts.cmp(&b.ts));
         Ok(out)
     }
 
     /// Count of events in each triage state, for the rail summary.
     pub fn triage_summary(&self) -> Result<Vec<(String, u64)>, StoreError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT tag, COUNT(*) FROM tags WHERE tag LIKE 'triage:%' GROUP BY tag",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT tag, COUNT(*) FROM tags WHERE tag LIKE 'triage:%' GROUP BY tag")?;
         let rows = stmt
             .query_map([], |r| {
                 let tag: String = r.get(0)?;
                 let c: i64 = r.get(1)?;
-                Ok((tag.strip_prefix("triage:").unwrap_or(&tag).to_string(), c as u64))
+                Ok((
+                    tag.strip_prefix("triage:").unwrap_or(&tag).to_string(),
+                    c as u64,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
@@ -612,6 +669,8 @@ pub struct EvidenceItem {
     pub size_bytes: u64,
     pub id_method: String,
     pub id_confidence: f32,
+    /// Host of the collection this file came from ("" for older cases).
+    pub host: String,
 }
 
 /// One row of the per-file ingest log.
@@ -624,6 +683,8 @@ pub struct IngestLogRow {
     pub records_read: u64,
     pub events_emitted: u64,
     pub warning_count: u32,
+    /// Host of the collection ("" for older cases).
+    pub host: String,
 }
 
 /// A triaged event joined to its event detail — for exporting analyst-validated
@@ -657,17 +718,28 @@ mod label_kv_tests {
             store.add_label(&id, "Patient zero").unwrap();
             store.set_triage(&id, "validated", Some("n")).unwrap();
             store.kv_set("ioc_hunt.list", "evil.example").unwrap();
-            store.kv_set("ioc_hunt.list", "evil.example\n1.2.3.4").unwrap();
+            store
+                .kv_set("ioc_hunt.list", "evil.example\n1.2.3.4")
+                .unwrap();
         }
         let store = CaseStore::open(&path).unwrap();
         let mut l = store.labels().unwrap();
         l.sort();
-        assert_eq!(l, vec![(id.clone(), "Lateral movement".into()), (id.clone(), "Patient zero".into())]);
+        assert_eq!(
+            l,
+            vec![
+                (id.clone(), "Lateral movement".into()),
+                (id.clone(), "Patient zero".into())
+            ]
+        );
         // Labels never leak into triage, and triage never shows as a label.
         assert_eq!(store.triage_map().unwrap().len(), 1);
         store.remove_label(&id, "Patient zero").unwrap();
         assert_eq!(store.labels().unwrap().len(), 1);
-        assert_eq!(store.kv_get("ioc_hunt.list").unwrap().as_deref(), Some("evil.example\n1.2.3.4"));
+        assert_eq!(
+            store.kv_get("ioc_hunt.list").unwrap().as_deref(),
+            Some("evil.example\n1.2.3.4")
+        );
         assert_eq!(store.kv_get("missing").unwrap(), None);
     }
 
@@ -703,7 +775,11 @@ mod case_meta_tests {
         let meta = store.case_meta().expect("case_meta must succeed");
         assert_eq!(meta.name, "Meta test");
         assert_eq!(meta.examiner.as_deref(), Some("A. Analyst"));
-        assert!(meta.created_utc.ends_with('Z') && meta.created_utc.contains('T'), "got {}", meta.created_utc);
+        assert!(
+            meta.created_utc.ends_with('Z') && meta.created_utc.contains('T'),
+            "got {}",
+            meta.created_utc
+        );
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }

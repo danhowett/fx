@@ -83,17 +83,23 @@ const FLAGGED_SQL: &str = " AND CAST(id AS VARCHAR) IN (
 impl CaseStore {
     /// Total event count (for the status bar / paging).
     pub fn event_count(&self) -> Result<u64, StoreError> {
-        let n: i64 = self
-            .connection()
-            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
+        let n: i64 = self.connection().query_row(
+            &format!(
+                "SELECT COUNT(*) FROM events WHERE 1=1{}",
+                self.scope_host_sql("host")
+            ),
+            [],
+            |r| r.get(0),
+        )?;
         Ok(n as u64)
     }
 
     /// Event counts grouped by artefact, for the dashboard.
     pub fn counts_by_artefact(&self) -> Result<Vec<(String, u64)>, StoreError> {
-        let mut stmt = self.connection().prepare(
-            "SELECT artefact, COUNT(*) FROM events GROUP BY artefact ORDER BY 2 DESC",
-        )?;
+        let mut stmt = self.connection().prepare(&format!(
+            "SELECT artefact, COUNT(*) FROM events WHERE 1=1{} GROUP BY artefact ORDER BY 2 DESC",
+            self.scope_host_sql("host")
+        ))?;
         let rows = stmt
             .query_map([], |r| {
                 let a: String = r.get(0)?;
@@ -120,7 +126,8 @@ impl CaseStore {
         // clearances and are deliberately excluded, so clearing a false positive
         // lowers the flagged portion. The two id sets are UNIONed and de-duped,
         // so an event that is both rule-flagged and triaged is counted once.
-        let sql = "
+        let sql = format!(
+            "
             WITH flagged_ids AS (
                 SELECT DISTINCT UNNEST(string_split(event_ids, ',')) AS eid
                 FROM detections
@@ -136,9 +143,12 @@ impl CaseStore {
                 COUNT(CASE WHEN f.eid IS NOT NULL THEN 1 END)   AS flagged
             FROM events e
             LEFT JOIN flagged_ids f ON CAST(e.id AS VARCHAR) = f.eid
+            WHERE 1=1{}
             GROUP BY day
-            ORDER BY day";
-        let mut stmt = self.connection().prepare(sql)?;
+            ORDER BY day",
+            self.scope_host_sql("e.host")
+        );
+        let mut stmt = self.connection().prepare(&sql)?;
         let rows = stmt
             .query_map([], |r| {
                 Ok(DailyActivity {
@@ -154,9 +164,10 @@ impl CaseStore {
     /// Ingest summary: (status, count) so the GUI can show parsed/unsupported/
     /// failed at a glance.
     pub fn ingest_summary(&self) -> Result<Vec<(String, u64)>, StoreError> {
-        let mut stmt = self.connection().prepare(
-            "SELECT status, COUNT(*) FROM ingest_report GROUP BY status ORDER BY 1",
-        )?;
+        let mut stmt = self.connection().prepare(&format!(
+            "SELECT status, COUNT(*) FROM ingest_report WHERE 1=1{} GROUP BY status ORDER BY 1",
+            self.scope_collection_sql("collection_id")
+        ))?;
         let rows = stmt
             .query_map([], |r| {
                 let s: String = r.get(0)?;
@@ -212,14 +223,22 @@ impl CaseStore {
             }
         }
         if !f.any_text.is_empty() {
-            let terms: Vec<&String> = f.any_text.iter().filter(|t| !t.is_empty()).take(16).collect();
+            let terms: Vec<&String> = f
+                .any_text
+                .iter()
+                .filter(|t| !t.is_empty())
+                .take(16)
+                .collect();
             if !terms.is_empty() {
                 sql.push_str(" AND (");
                 let hay = "lower(concat_ws(chr(10), message, command_line, process_path, process_name, \
-                           target_path, target_value, src_ip, dst_ip, process_sha1, host, user_name, CAST(raw AS VARCHAR)))";
-                let ors: Vec<String> = terms.iter().map(|_| format!("contains({hay}, ?)")).collect();
+                           target_path, target_value, src_ip, dst_ip, process_sha1, user_name, CAST(raw AS VARCHAR)))";
+                let ors: Vec<String> = terms
+                    .iter()
+                    .map(|_| format!("contains({hay}, ?)"))
+                    .collect();
                 sql.push_str(&ors.join(" OR "));
-                sql.push_str(")");
+                sql.push(')');
                 for t in terms {
                     binds.push(Box::new(t.to_lowercase()));
                 }
@@ -291,7 +310,8 @@ impl CaseStore {
                 "SELECT id, strftime(ts, '%Y-%m-%dT%H:%M:%S') AS ts, ts_kind, artefact, action, host, user_name, target_path, message, source_ref
                  FROM events WHERE CAST(id AS VARCHAR) IN ({marks})"
             );
-            let params: Vec<&dyn duckdb::ToSql> = chunk.iter().map(|s| s as &dyn duckdb::ToSql).collect();
+            let params: Vec<&dyn duckdb::ToSql> =
+                chunk.iter().map(|s| s as &dyn duckdb::ToSql).collect();
             let mut stmt = self.connection().prepare(&sql)?;
             let rows = stmt
                 .query_map(params.as_slice(), |r| {
@@ -344,10 +364,11 @@ impl CaseStore {
                  SUM(CAST(json_extract(raw, '$.bytes_sent') AS BIGINT)) AS sent,
                  SUM(CAST(json_extract(raw, '$.bytes_recv') AS BIGINT)) AS recv
              FROM events
-             WHERE artefact = 'Srum' AND action = 'network.usage'
+             WHERE artefact = 'Srum' AND action = 'network.usage'{scope}
              GROUP BY app, user
              ORDER BY sent DESC
-             LIMIT {limit}"
+             LIMIT {limit}",
+            scope = self.scope_host_sql("host")
         );
         let mut stmt = self.connection().prepare(&sql)?;
         let rows = stmt

@@ -25,6 +25,8 @@ pub struct CorrelationRow {
     pub first_ts: OffsetDateTime,
     pub event_ids: Vec<Uuid>,
     pub magnitude: i64,
+    /// The host the correlated events came from ("" when unknown).
+    pub host: String,
 }
 
 impl CaseStore {
@@ -76,13 +78,20 @@ impl CaseStore {
                 let first_ts: String = r.get(1)?;
                 let ids: String = r.get(2)?;
                 let magnitude: i64 = r.get::<_, Option<i64>>(3)?.unwrap_or(0);
-                Ok((group, first_ts, ids, magnitude))
+                // Optional 5th column: the host (older SQL shapes omit it).
+                let host: String = r
+                    .get::<_, Option<String>>(4)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                Ok((group, first_ts, ids, magnitude, host))
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(rows
             .into_iter()
-            .map(|(group, first_ts, ids, magnitude)| CorrelationRow {
+            .map(|(group, first_ts, ids, magnitude, host)| CorrelationRow {
+                host,
                 group,
                 first_ts: parse_ts(&first_ts),
                 event_ids: ids
@@ -98,21 +107,24 @@ impl CaseStore {
     /// detections. IOC-sweep findings (engine = 'ioc') are kept: re-running the
     /// rules must not throw away an analyst's IOC sweep.
     pub fn write_detections(&self, dets: &[Detection]) -> Result<(), StoreError> {
-        self.connection().execute_batch("DELETE FROM detections WHERE engine NOT IN ('ioc', 'sigma')")?;
+        self.connection()
+            .execute_batch("DELETE FROM detections WHERE engine NOT IN ('ioc', 'sigma')")?;
         self.clear_suppressed_where("engine NOT IN ('ioc', 'sigma')")?;
         self.insert_detections(dets)
     }
 
     /// Replace the Sigma-run findings (and only those) with a new run's.
     pub fn replace_sigma_detections(&self, dets: &[Detection]) -> Result<(), StoreError> {
-        self.connection().execute_batch("DELETE FROM detections WHERE engine = 'sigma'")?;
+        self.connection()
+            .execute_batch("DELETE FROM detections WHERE engine = 'sigma'")?;
         self.clear_suppressed_where("engine = 'sigma'")?;
         self.insert_detections(dets)
     }
 
     /// Replace the IOC-sweep findings (and only those) with a new sweep's.
     pub fn replace_ioc_detections(&self, dets: &[Detection]) -> Result<(), StoreError> {
-        self.connection().execute_batch("DELETE FROM detections WHERE engine = 'ioc'")?;
+        self.connection()
+            .execute_batch("DELETE FROM detections WHERE engine = 'ioc'")?;
         self.clear_suppressed_where("engine = 'ioc'")?;
         self.insert_detections(dets)
     }
@@ -134,7 +146,11 @@ impl CaseStore {
                     d.severity.as_str(),
                     d.attack.join(","),
                     d.summary,
-                    d.event_ids.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(","),
+                    d.event_ids
+                        .iter()
+                        .map(|u| u.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
                     fmt_ts_helper(d.timestamp),
                     d.host,
                     match d.engine {
@@ -151,19 +167,21 @@ impl CaseStore {
         Ok(())
     }
 
-    /// Stream every event as (id, timestamp, artefact, searchable text) for an
+    /// Stream every event as (id, timestamp, artefact, host, searchable text) for an
     /// IOC sweep. The text joins the lifted columns AND the raw record, so a
     /// hash, URL or domain is found wherever the parser kept it. No JSON
     /// parsing — the raw record is scanned as text.
     pub fn for_each_event_text(
         &self,
-        mut f: impl FnMut(&str, &str, &str, &str),
+        mut f: impl FnMut(&str, &str, &str, &str, &str),
     ) -> Result<(), StoreError> {
+        // `host` is passed separately (the machine the event came from) and is
+        // not part of the searched text: every event of a host carries its name.
         let mut stmt = self.connection().prepare(
-            "SELECT id, strftime(ts, '%Y-%m-%dT%H:%M:%S'), artefact,
+            "SELECT id, strftime(ts, '%Y-%m-%dT%H:%M:%S'), artefact, COALESCE(host, ''),
                     concat_ws(chr(10), message, command_line, process_path, process_name,
                               target_path, target_value, src_ip, dst_ip, process_sha1,
-                              host, user_name, CAST(raw AS VARCHAR))
+                              user_name, CAST(raw AS VARCHAR))
              FROM events",
         )?;
         let mut rows = stmt.query([])?;
@@ -171,22 +189,25 @@ impl CaseStore {
             let id: String = r.get(0)?;
             let ts: String = r.get(1)?;
             let art: String = r.get(2)?;
-            let text: Option<String> = r.get(3)?;
-            f(&id, &ts, &art, text.as_deref().unwrap_or(""));
+            let host: String = r.get(3)?;
+            let text: Option<String> = r.get(4)?;
+            f(&id, &ts, &art, &host, text.as_deref().unwrap_or(""));
         }
         Ok(())
     }
 
     /// Read detections back, worst severity first, for the GUI hunt view.
     pub fn detections(&self) -> Result<Vec<DetectionRow>, StoreError> {
-        let mut stmt = self.connection().prepare(
+        let mut stmt = self.connection().prepare(&format!(
             "SELECT rule_id, title, severity, attack, summary, event_ids,
                     strftime(ts, '%Y-%m-%dT%H:%M:%S') AS ts, host, engine
              FROM detections
+             WHERE 1=1{}
              ORDER BY CASE severity
                 WHEN 'critical' THEN 5 WHEN 'high' THEN 4 WHEN 'medium' THEN 3
                 WHEN 'low' THEN 2 ELSE 1 END DESC, ts",
-        )?;
+            self.scope_host_sql("host")
+        ))?;
         let rows = stmt
             .query_map([], |r| {
                 Ok(DetectionRow {
@@ -209,9 +230,10 @@ impl CaseStore {
     pub fn attack_coverage(&self) -> Result<Vec<(String, u64)>, StoreError> {
         // Flatten the comma-separated attack column in Rust; technique counts
         // are small, so read the rows and tally.
-        let mut stmt = self
-            .connection()
-            .prepare("SELECT attack FROM detections WHERE attack <> ''")?;
+        let mut stmt = self.connection().prepare(&format!(
+            "SELECT attack FROM detections WHERE attack <> ''{}",
+            self.scope_host_sql("host")
+        ))?;
         let rows = stmt
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -364,17 +386,35 @@ fn parse_artefact(s: &str) -> ArtefactKind {
 
 impl CaseStore {
     /// The analysed host's time-zone rule (from the SYSTEM hive), if known.
-    pub fn host_tz_rule(&self) -> Result<Option<fx_core::tz::TzRule>, StoreError> {
-        let mut stmt = self.connection().prepare(
-            "SELECT CAST(raw AS VARCHAR) FROM events WHERE action = 'host.timezone' ORDER BY source_ref",
-        )?;
-        let rows: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+    /// With `collection`, only that collection's SYSTEM hive is read, so each
+    /// host in a multi-host case converts with its own rule.
+    pub fn host_tz_rule(
+        &self,
+        collection: Option<&str>,
+    ) -> Result<Option<fx_core::tz::TzRule>, StoreError> {
+        let mut stmt = self.connection().prepare(&format!(
+            "SELECT CAST(raw AS VARCHAR) FROM events WHERE action = 'host.timezone'{} ORDER BY source_ref",
+            in_collection(collection)
+        ))?;
+        let rows: Vec<String> = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
         // Prefer ControlSet001 (the usual current set), else the first with a rule.
         let mut best: Option<fx_core::tz::TzRule> = None;
         for raw in rows {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
-            let Some(rule) = v.get("rule").and_then(|r| serde_json::from_value::<fx_core::tz::TzRule>(r.clone()).ok()) else { continue };
-            let current = v.get("control_set").and_then(|c| c.as_str()).map_or(false, |c| c.eq_ignore_ascii_case("ControlSet001"));
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                continue;
+            };
+            let Some(rule) = v
+                .get("rule")
+                .and_then(|r| serde_json::from_value::<fx_core::tz::TzRule>(r.clone()).ok())
+            else {
+                continue;
+            };
+            let current = v
+                .get("control_set")
+                .and_then(|c| c.as_str())
+                .is_some_and(|c| c.eq_ignore_ascii_case("ControlSet001"));
             if current || best.is_none() {
                 best = Some(rule);
                 if current {
@@ -385,39 +425,69 @@ impl CaseStore {
         Ok(best)
     }
 
-    /// Convert every local-time event to UTC with `rule`. Returns how many.
-    pub fn convert_local_times(&self, rule: &fx_core::tz::TzRule) -> Result<u64, StoreError> {
+    /// Convert every local-time event (of `collection`, if given) to UTC with
+    /// `rule`. Returns how many. Already-converted events are left alone.
+    pub fn convert_local_times(
+        &self,
+        rule: &fx_core::tz::TzRule,
+        collection: Option<&str>,
+    ) -> Result<u64, StoreError> {
         let c = self.connection();
-        let mut stmt = c.prepare(
+        let mut stmt = c.prepare(&format!(
             "SELECT CAST(id AS VARCHAR), strftime(ts, '%Y-%m-%dT%H:%M:%S.%f'), CAST(raw AS VARCHAR), message
              FROM events
-             WHERE json_extract_string(raw, '$.time_basis') = 'host local time (as logged)'",
-        )?;
+             WHERE json_extract_string(raw, '$.time_basis') = 'host local time (as logged)'{}",
+            in_collection(collection)
+        ))?;
         let rows: Vec<(String, String, String, String)> = stmt
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
             .collect::<Result<_, _>>()?;
-        let fmt_in = time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond]");
-        let fmt_out = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:6]");
-        let iso = time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
+        let fmt_in = time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond]"
+        );
+        let fmt_out = time::macros::format_description!(
+            "[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:6]"
+        );
+        let iso =
+            time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
         let mut n = 0u64;
         c.execute_batch("BEGIN TRANSACTION")?;
         {
             let mut upd = c.prepare("UPDATE events SET ts = CAST(? AS TIMESTAMP), raw = CAST(? AS JSON) WHERE id = CAST(? AS UUID)")?;
             for (id, ts, raw, _msg) in rows {
-                let Ok(local) = time::PrimitiveDateTime::parse(&ts, &fmt_in) else { continue };
+                let Ok(local) = time::PrimitiveDateTime::parse(&ts, &fmt_in) else {
+                    continue;
+                };
                 let utc = rule.local_to_utc(local.assume_utc());
-                let mut v: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+                let mut v: serde_json::Value =
+                    serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
                 v["time_basis"] = serde_json::json!("UTC (converted from host local time)");
-                v["local_time_as_logged"] = serde_json::json!(local.format(&iso).unwrap_or_default());
+                v["local_time_as_logged"] =
+                    serde_json::json!(local.format(&iso).unwrap_or_default());
                 v["local_utc_offset"] = serde_json::json!(rule.offset_label_at_local(local));
                 if let Some(tz) = &rule.name {
                     v["host_time_zone"] = serde_json::json!(tz);
                 }
-                upd.execute(duckdb::params![utc.format(&fmt_out).unwrap_or_default(), v.to_string(), id])?;
+                upd.execute(duckdb::params![
+                    utc.format(&fmt_out).unwrap_or_default(),
+                    v.to_string(),
+                    id
+                ])?;
                 n += 1;
             }
         }
         c.execute_batch("COMMIT")?;
         Ok(n)
+    }
+}
+
+/// `AND evidence_id IN (<collection's evidence>)`, or "" for the whole case.
+fn in_collection(collection: Option<&str>) -> String {
+    match collection {
+        Some(c) => format!(
+            " AND evidence_id IN (SELECT evidence_id FROM evidence WHERE collection_id = {})",
+            crate::hosts::sql_lit(c)
+        ),
+        None => String::new(),
     }
 }

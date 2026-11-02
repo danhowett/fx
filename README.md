@@ -2,7 +2,7 @@
 
 <p align="center"><b>Windows artefact analysis &amp; threat hunting — local, offline, hunting-first.</b></p>
 
-<p align="center"><i>Early developer preview · v0.1.8</i></p>
+<p align="center"><i>Early developer preview · v0.1.9</i></p>
 
 ---
 
@@ -176,6 +176,21 @@ and can be cancelled without losing the work already done.
   URLs, paths, defanged or not) and hunt the whole case in one pass. The list
   and results are saved with the case; every match is clickable, triageable
   and exportable.
+- **Decode** — make sense of PowerShell and command lines without leaving the
+  case. Right-click any event and choose **Decode command** (or select some
+  text, or paste anything, into the **Decode** view) and fx peels the obfuscation (Base64 / UTF-16, Gzip /
+  Deflate, backticks, reversed strings, `-f` format strings, char-code joins),
+  shows each layer, explains every part of the command and flags known
+  techniques with MITRE ATT&CK. Extracted URLs, IPs and domains go to the IOC
+  hunt in one click, and the verdict can be saved as the event's note. Fully
+  offline and deterministic: nothing is executed and no AI service is called.
+  The engine is the psparse rule pack (59 rules, each with its own self-tests).
+
+- **Multi-host cases** — add more machines to a case with **+ Add host**. Look
+  at one host or all of them in one merged timeline with a Host column;
+  findings group by host, correlations never mix machines, each host's
+  local-time artefacts use its own time zone, and exports and the report
+  cover one host or all of them.
 
 ### Analyst workspace
 - **Allow-list** — suppress known-benign findings (per case or for every case)
@@ -254,8 +269,14 @@ fx hunt host01.fxcase --rules C:\my\rules
 # Add community Sigma rules (optional level / status filters)
 fx hunt host01.fxcase --sigma C:\sigma\rules\windows --sigma-level medium --sigma-status stable,test
 
-# Write a self-contained HTML case report (print to PDF to archive)
+# Add a second machine to the same case, then hunt across both
+fx add host01.fxcase C:\evidence\dc01_triage
+fx hunt host01.fxcase
+
+# Write a self-contained HTML case report (print to PDF to archive),
+# for every host or just one
 fx report host01.fxcase report.html
+fx report host01.fxcase dc01-report.html --host DC01
 ```
 
 Or launch **`fx-gui`** for the analyst workspace: **New case** → pick the

@@ -217,6 +217,13 @@ RMM / tunnel / exfil stacks, and ransom-note filenames.
 searches for credentials or sensitive data, and interactive access to admin
 shares or IP-addressed UNC paths.
 
+**MITRE ATT&CK.** Every finding — built-in rule, Sigma rule (from the rule's
+own tags) or IOC — shows its ATT&CK **tactics** (e.g. *Credential Access*)
+before its technique ids. Tactics and technique names come from MITRE's own
+ATT&CK Enterprise data, embedded in fx (data dated 31/07/2026, including the
+newer *Stealth* and *Defense Impairment* tactics), and are used in the CSV
+export (a `tactics` column) and the HTML report's ATT&CK view.
+
 Detections come from two engines: **single-event** (one event matches a rule)
 and **correlation** (a pattern across events, e.g. mass file-rename bursts or
 bulk SRUM exfil).
@@ -247,6 +254,84 @@ machine and applies to every case.
 If the chosen folder contains the same Sigma rule more than once (overlapping
 folders, or a copy of a release inside another), each rule id is loaded once
 and the preview reports how many duplicates were ignored.
+
+### Decoding a command (Decode)
+
+Encoded or obfuscated PowerShell is hard to read in a timeline. **Decode**
+turns it into something you can reason about, entirely offline: nothing is
+executed and nothing leaves the machine.
+
+- **From any event:** right-click it and choose **Decode command**. fx takes
+  the most useful command text from the raw record (process `CommandLine`,
+  4104 `ScriptBlockText`, 4103 `Payload`, a scheduled task's command and
+  arguments, a service `ImagePath`…), falling back to the event message.
+- **From the raw record:** when an event's record holds a command or script,
+  a small **Decode** button sits next to **Copy** in the raw record bar.
+- **Just part of a record:** select the text (in the raw record, message or
+  anywhere else), then click **Decode** in the top bar.
+- **Anything else:** click **Decode** in the top bar with nothing selected,
+  paste a command, script block or command line, then **Analyse** (Ctrl+Enter).
+
+The result shows:
+- a **verdict** (Malicious / Suspicious / Benign) with a score;
+- the **deobfuscation steps**, layer by layer: Base64 (UTF-16LE / UTF-8),
+  Gzip / Deflate, backtick escapes, reversed strings, `-f` format strings and
+  `[char]` joins, with before / after for each;
+- the **decoded command**;
+- **findings** with severity, ATT&CK tactics and techniques and the exact text
+  that matched;
+- **indicators** (URLs, IPs, domains, hashes, paths) and an ATT&CK summary;
+- a **breakdown** explaining each part of the command.
+
+**Hunt N IOCs in this case** adds the URLs, IPs and domains to the IOC hunt
+list (review, then **Run hunt**). **Add as note** saves the verdict, findings
+and decoded command as the event's analyst note (marking it Unconfirmed if it
+wasn't triaged). Edited or pasted text isn't tied to an event, so it can't be
+saved as a note.
+
+Decode is a reading aid, not a sandbox. A Benign verdict means no known-bad
+pattern matched, not that the command is safe; confirm against the
+surrounding events.
+
+### More than one host (multi-host cases)
+
+A case can hold several machines. Open (or create) the case, click
+**+ Add host** in the top bar and pick the next machine's collection folder.
+fx ingests it into the same case, then re-runs the built-in rules (and Sigma,
+if it's set to run on new cases, and your saved IOC list) across every host.
+
+- **Which machine is which.** Each collection becomes a host. fx names it from
+  the SYSTEM hive's ComputerName, else the host the collection tool named,
+  else the most common event-log Computer value, else the folder name. Hover
+  a host in the rail to see where its name came from; click **✎** to rename it.
+  Every event gets the name of the machine it was collected from, in the
+  timeline's **Host** column (an event log's own `Computer` value is still in
+  the raw record).
+- **One host or all of them.** The host switcher next to the case name (and the
+  **Hosts** list in the rail) chooses what you're looking at. *All hosts* is one
+  merged timeline with a coloured Host column; picking a host scopes
+  everything to it: timeline, findings, counts, activity graph, ingest log,
+  host details, exports and the report.
+- **Findings across hosts.** In *All hosts*, the findings list is grouped by
+  host (each machine reads as its own story); **Ungroup** shows one list,
+  worst-first, with a host label on each finding. An IOC found on two
+  machines is two findings, one per host, and the IOC results show which hosts
+  each indicator was seen on.
+- **Exports and the report** cover whatever you're looking at: one host, or
+  every host with a Host column in the evidence (chain-of-custody) table.
+  File names default to include the host.
+- **Each host keeps its own clock.** Local-time artefacts (setupapi,
+  TeamViewer) are converted with that machine's own time-zone rule. The
+  host-local display option is available when one host is selected.
+- **Correlations never mix machines.** Correlated rules (a burst, a sequence, a
+  data-volume total) only combine events from the same host.
+- **Safety checks.** The same collection folder can't be added twice. If the
+  new collection turns out to be a host already in the case (a re-collection),
+  fx says so and adds its events to that host.
+
+Command line: `fx add case.fxcase <collection> [--host NAME]`, then
+`fx hunt case.fxcase`; `fx report case.fxcase out.html --host NAME` for one
+host's report.
 
 ## The workflow
 
@@ -410,6 +495,9 @@ cargo build --release -p fx-gui --features tauri/custom-protocol
 
 Requires Rust 1.81+, the Visual Studio C++ Build Tools, and (for the GUI on
 Windows Server) the WebView2 runtime.
+
+The Decode rule pack has its own self-tests (needs Node.js 22.7+):
+`node tools/psparse-selftest.mjs`.
 
 ---
 

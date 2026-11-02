@@ -14,6 +14,10 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::open_case,
             commands::ingest_collection,
+            commands::add_collection,
+            commands::list_hosts,
+            commands::rename_host,
+            commands::case_overview,
             commands::cancel_job,
             commands::allowlist_get,
             commands::allowlist_set,

@@ -149,6 +149,8 @@ pub struct DetectionDto {
     pub title: String,
     pub severity: String,
     pub attack: Vec<String>,
+    /// MITRE ATT&CK tactics of `attack`, in matrix order.
+    pub tactics: Vec<String>,
     pub summary: String,
     pub event_ids: Vec<String>,
     pub ts: String,
@@ -182,17 +184,15 @@ impl From<SrumNetTotal> for SrumRow {
 
 /// Open an existing case file. Replaces any currently open case.
 #[tauri::command]
-pub async fn open_case(state: tauri::State<'_, AppState>, path: String) -> Result<CaseOverview, String> {
+pub async fn open_case(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<CaseOverview, String> {
     let store = CaseStore::open(&PathBuf::from(path)).map_err(|e| e.to_string())?;
     let overview = build_overview(&store).map_err(|e| e.to_string())?;
     *state.store.lock().unwrap() = Some(store);
     Ok(overview)
 }
-
-/// Create a new case and ingest a collection directory into it, then open it.
-/// Long-running. `async` so Tauri runs it on a worker thread, not the window's
-/// main thread — a synchronous command here froze the window ("Not Responding")
-/// for the whole ingest even though work was progressing.
 
 /// Run `f` while a ticker thread forwards progress snapshots to the frontend
 /// as `fx-progress` events (about 4 per second), plus one final snapshot.
@@ -230,6 +230,10 @@ pub async fn progress_snapshot() -> Result<fx_core::progress::Snapshot, String> 
     Ok(fx_core::progress::snapshot())
 }
 
+/// Create a new case and ingest a collection directory into it, then open it.
+/// Long-running. `async` so Tauri runs it on a worker thread, not the window's
+/// main thread — a synchronous command here froze the window ("Not Responding")
+/// for the whole ingest even though work was progressing.
 #[tauri::command]
 pub async fn ingest_collection(
     app: tauri::AppHandle,
@@ -243,15 +247,111 @@ pub async fn ingest_collection(
     if case_path.exists() {
         return Err(format!("case file already exists: {}", case_path.display()));
     }
-    let mut store = CaseStore::create(&case_path, &case_name, examiner.as_deref(), "UTC")
+    let store = CaseStore::create(&case_path, &case_name, examiner.as_deref(), "UTC")
         .map_err(|e| e.to_string())?;
     let registry = ParserRegistry::with_defaults();
     fx_core::progress::reset();
-    let _report = with_progress(&app, || ingest_into_store(&PathBuf::from(collection_dir), &registry, &mut store));
+    let _report = with_progress(&app, || {
+        ingest_into_store(&PathBuf::from(collection_dir), &registry, &store)
+    });
     fx_core::progress::set_phase("Opening case");
     let overview = build_overview(&store).map_err(|e| e.to_string())?;
     *state.store.lock().unwrap() = Some(store);
     Ok(overview)
+}
+
+/// What adding a collection produced.
+#[derive(Debug, Serialize)]
+pub struct AddCollectionResult {
+    pub overview: CaseOverview,
+    /// The host the collection was filed under.
+    pub host: Option<String>,
+    /// True when that host was already in the case (a re-collection).
+    pub merged: bool,
+    pub events: u64,
+}
+
+/// Add another collection (usually another machine) to the open case. The
+/// host name is read from the collection unless `host_name` is given. A
+/// folder that's already in the case is refused. The caller re-runs the hunt
+/// afterwards, as for a new case.
+#[tauri::command]
+pub async fn add_collection(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    collection_dir: String,
+    host_name: Option<String>,
+) -> Result<AddCollectionResult, String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    let registry = ParserRegistry::with_defaults();
+    fx_core::progress::reset();
+    let report = with_progress(&app, || {
+        fx_ingest::ingest_collection_as(
+            &PathBuf::from(&collection_dir),
+            &registry,
+            store,
+            host_name.as_deref(),
+        )
+    });
+    if let Some(why) = report.refused {
+        return Err(why);
+    }
+    fx_core::progress::set_phase("Opening case");
+    Ok(AddCollectionResult {
+        overview: build_overview(store).map_err(|e| e.to_string())?,
+        host: report.host,
+        merged: report.merged_host,
+        events: report.total_events,
+    })
+}
+
+/// Hosts in the open case, with their collections.
+#[tauri::command]
+pub async fn list_hosts(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<fx_store::HostRow>, String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    store.hosts().map_err(|e| e.to_string())
+}
+
+/// Rename a host everywhere in the case.
+#[tauri::command]
+pub async fn rename_host(
+    state: tauri::State<'_, AppState>,
+    old_name: String,
+    new_name: String,
+) -> Result<(), String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    if store
+        .hosts()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|h| h.host == new_name.trim() && h.host != old_name)
+    {
+        return Err(format!(
+            "There's already a host called {}. Pick another name.",
+            new_name.trim()
+        ));
+    }
+    store
+        .rename_host(&old_name, &new_name)
+        .map_err(|e| e.to_string())
+}
+
+/// Case overview (rail counts), for the whole case or one host.
+#[tauri::command]
+pub async fn case_overview(
+    state: tauri::State<'_, AppState>,
+    host: Option<String>,
+) -> Result<CaseOverview, String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    store
+        .scoped(host, build_overview)
+        .map_err(|e| e.to_string())
 }
 
 /// Query the timeline with a filter. This is the frontend's workhorse.
@@ -275,7 +375,11 @@ pub async fn query_timeline(
         // page is a true slice and paging via limit/offset is correct.
         category: filter.category,
         flagged_only: filter.flagged_only.unwrap_or(false),
-        any_text: filter.ioc.as_deref().map(fx_hunt::ioc::search_forms).unwrap_or_default(),
+        any_text: filter
+            .ioc
+            .as_deref()
+            .map(fx_hunt::ioc::search_forms)
+            .unwrap_or_default(),
         limit: filter.limit.unwrap_or(1000),
         offset: filter.offset.unwrap_or(0),
     };
@@ -304,7 +408,11 @@ pub async fn count_timeline(
         text: filter.text,
         category: filter.category,
         flagged_only: filter.flagged_only.unwrap_or(false),
-        any_text: filter.ioc.as_deref().map(fx_hunt::ioc::search_forms).unwrap_or_default(),
+        any_text: filter
+            .ioc
+            .as_deref()
+            .map(fx_hunt::ioc::search_forms)
+            .unwrap_or_default(),
         limit: 0,
         offset: 0,
     };
@@ -313,7 +421,10 @@ pub async fn count_timeline(
 
 /// Fetch the full raw JSON for one event (right-pane detail).
 #[tauri::command]
-pub async fn event_raw(state: tauri::State<'_, AppState>, event_id: String) -> Result<Option<String>, String> {
+pub async fn event_raw(
+    state: tauri::State<'_, AppState>,
+    event_id: String,
+) -> Result<Option<String>, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
     store.raw_json(&event_id).map_err(|e| e.to_string())
@@ -360,13 +471,20 @@ pub struct IngestLogDto {
     pub records_read: u64,
     pub events_emitted: u64,
     pub warning_count: u32,
+    /// The host the file came from ("" for older cases).
+    pub host: String,
 }
 
 #[tauri::command]
-pub async fn ingest_log(state: tauri::State<'_, AppState>) -> Result<Vec<IngestLogDto>, String> {
+pub async fn ingest_log(
+    state: tauri::State<'_, AppState>,
+    host: Option<String>,
+) -> Result<Vec<IngestLogDto>, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
-    let rows = store.ingest_log().map_err(|e| e.to_string())?;
+    let rows = store
+        .scoped(host, |s| s.ingest_log())
+        .map_err(|e| e.to_string())?;
     Ok(rows
         .into_iter()
         .map(|r| IngestLogDto {
@@ -377,6 +495,7 @@ pub async fn ingest_log(state: tauri::State<'_, AppState>) -> Result<Vec<IngestL
             records_read: r.records_read,
             events_emitted: r.events_emitted,
             warning_count: r.warning_count,
+            host: r.host,
         })
         .collect())
 }
@@ -393,10 +512,15 @@ pub struct DailyActivityDto {
 /// analyst see the shape of the whole case at a glance and spot volume spikes
 /// that no rule tagged.
 #[tauri::command]
-pub async fn daily_activity(state: tauri::State<'_, AppState>) -> Result<Vec<DailyActivityDto>, String> {
+pub async fn daily_activity(
+    state: tauri::State<'_, AppState>,
+    host: Option<String>,
+) -> Result<Vec<DailyActivityDto>, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
-    let rows = store.daily_activity().map_err(|e| e.to_string())?;
+    let rows = store
+        .scoped(host, |s| s.daily_activity())
+        .map_err(|e| e.to_string())?;
     Ok(rows
         .into_iter()
         .map(|r| DailyActivityDto {
@@ -418,12 +542,17 @@ pub async fn set_triage(
 ) -> Result<(), String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
-    store.set_triage(&event_id, &triage_state, note.as_deref()).map_err(|e| e.to_string())
+    store
+        .set_triage(&event_id, &triage_state, note.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 /// Clear an event's triage state.
 #[tauri::command]
-pub async fn clear_triage(state: tauri::State<'_, AppState>, event_id: String) -> Result<(), String> {
+pub async fn clear_triage(
+    state: tauri::State<'_, AppState>,
+    event_id: String,
+) -> Result<(), String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
     store.clear_triage(&event_id).map_err(|e| e.to_string())
@@ -470,10 +599,12 @@ pub async fn export_findings(
     // "dismissed"). None / empty = everything (the old behaviour). A finding
     // nobody has triaged counts as "unconfirmed", matching what the UI shows.
     states: Option<Vec<String>>,
+    // One host, or None for every host in the case.
+    host: Option<String>,
 ) -> Result<usize, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
-    let (dets, triage) = collect_findings(store)?;
+    let (dets, triage) = store.scoped(host, collect_findings)?;
     let tri_for = |event_ids: &[String]| -> (String, String) {
         for eid in event_ids {
             if let Some((st, note)) = triage.get(eid) {
@@ -482,8 +613,9 @@ pub async fn export_findings(
         }
         (String::new(), String::new())
     };
-    let wanted: Option<std::collections::HashSet<String>> =
-        states.filter(|v| !v.is_empty()).map(|v| v.into_iter().collect());
+    let wanted: Option<std::collections::HashSet<String>> = states
+        .filter(|v| !v.is_empty())
+        .map(|v| v.into_iter().collect());
     let dets: Vec<DetectionDto> = match &wanted {
         None => dets,
         Some(w) => dets
@@ -515,10 +647,13 @@ pub struct ExportCounts {
 }
 
 #[tauri::command]
-pub async fn export_counts(state: tauri::State<'_, AppState>) -> Result<ExportCounts, String> {
+pub async fn export_counts(
+    state: tauri::State<'_, AppState>,
+    host: Option<String>,
+) -> Result<ExportCounts, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
-    let (dets, triage) = collect_findings(store)?;
+    let (dets, triage) = store.scoped(host, collect_findings)?;
     let mut c = ExportCounts::default();
     for d in &dets {
         let st = d
@@ -538,7 +673,11 @@ pub async fn export_counts(state: tauri::State<'_, AppState>) -> Result<ExportCo
 
 /// A finding with no triage tag is shown (and exported) as unconfirmed.
 fn effective_state(s: &str) -> String {
-    if s.is_empty() { "unconfirmed".into() } else { s.to_string() }
+    if s.is_empty() {
+        "unconfirmed".into()
+    } else {
+        s.to_string()
+    }
 }
 
 /// Rule detections plus analyst-validated events no rule fired on, and an
@@ -546,7 +685,10 @@ fn effective_state(s: &str) -> String {
 fn collect_findings(
     store: &CaseStore,
 ) -> Result<
-    (Vec<DetectionDto>, std::collections::HashMap<String, (String, String)>),
+    (
+        Vec<DetectionDto>,
+        std::collections::HashMap<String, (String, String)>,
+    ),
     String,
 > {
     let mut dets = read_detections(store)?;
@@ -576,6 +718,7 @@ fn collect_findings(
             }
             .into(),
             attack: Vec::new(),
+            tactics: Vec::new(),
             summary: t.message.clone(),
             event_ids: vec![t.event_id.clone()],
             ts: t.ts,
@@ -612,7 +755,7 @@ fn findings_to_csv(
         }
     }
     let mut out = String::from(
-        "rule_id,title,severity,attack,engine,timestamp_utc,host,triage_state,triage_note,event_ids\n",
+        "rule_id,title,severity,tactics,attack,engine,timestamp_utc,host,triage_state,triage_note,event_ids\n",
     );
     for d in dets {
         let (st, note) = tri_for(&d.event_ids);
@@ -620,6 +763,7 @@ fn findings_to_csv(
             d.rule_id.clone(),
             d.title.clone(),
             d.severity.clone(),
+            d.tactics.join("; "),
             d.attack.join(" "),
             d.engine.clone(),
             d.ts.clone(),
@@ -646,12 +790,20 @@ fn findings_to_stix(
     // Stable namespace for deterministic ids.
     let ns = uuid::Uuid::NAMESPACE_URL;
     let id5 = |kind: &str, seed: &str| -> String {
-        format!("{kind}--{}", uuid::Uuid::new_v5(&ns, format!("fx:{kind}:{seed}").as_bytes()))
+        format!(
+            "{kind}--{}",
+            uuid::Uuid::new_v5(&ns, format!("fx:{kind}:{seed}").as_bytes())
+        )
     };
     let now = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
-    let jesc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\t', "\\t");
+    let jesc = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\t', "\\t")
+    };
     let sev_label = |s: &str| match s {
         "critical" => "high",
         "high" => "high",
@@ -736,16 +888,32 @@ fn read_detections(store: &CaseStore) -> Result<Vec<DetectionDto>, String> {
     let rows = store.detections().map_err(|e| e.to_string())?;
     Ok(rows
         .into_iter()
-        .map(|d| DetectionDto {
-            rule_id: d.rule_id,
-            title: d.title,
-            severity: d.severity,
-            attack: d.attack.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect(),
-            summary: d.summary,
-            event_ids: d.event_ids.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect(),
-            ts: d.ts,
-            host: d.host,
-            engine: d.engine,
+        .map(|d| {
+            let attack: Vec<String> = d
+                .attack
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            let tactics = fx_hunt::attack::tactics_for_all(attack.iter().map(String::as_str));
+            DetectionDto {
+                rule_id: d.rule_id,
+                title: d.title,
+                severity: d.severity,
+                attack,
+                tactics,
+                summary: d.summary,
+                event_ids: d
+                    .event_ids
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                ts: d.ts,
+                host: d.host,
+                engine: d.engine,
+            }
         })
         .collect())
 }
@@ -780,10 +948,17 @@ fn parse_rfc3339(s: &str) -> Option<OffsetDateTime> {
 /// matrix, timeline, and the evidence chain-of-custody table with SHA-256s) —
 /// the same report as `fx report`. Returns the number of bytes written.
 #[tauri::command]
-pub async fn export_report(state: tauri::State<'_, AppState>, path: String) -> Result<usize, String> {
+pub async fn export_report(
+    state: tauri::State<'_, AppState>,
+    path: String,
+    // One host, or None for the whole case (all hosts).
+    host: Option<String>,
+) -> Result<usize, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
-    let html = fx_hunt::report::generate_report(store).map_err(|e| e.to_string())?;
+    let html = store
+        .scoped(host, fx_hunt::report::generate_report)
+        .map_err(|e| e.to_string())?;
     std::fs::write(&path, &html).map_err(|e| format!("write {path}: {e}"))?;
     Ok(html.len())
 }
@@ -807,7 +982,11 @@ pub async fn ioc_preview(text: String) -> Result<IocPreview, String> {
     for i in &p.iocs {
         *by_kind.entry(i.kind.label().to_string()).or_insert(0) += 1;
     }
-    Ok(IocPreview { total: p.iocs.len(), by_kind, skipped: p.skipped.len() })
+    Ok(IocPreview {
+        total: p.iocs.len(),
+        by_kind,
+        skipped: p.skipped.len(),
+    })
 }
 
 /// Sweep the open case for the IOC list. Post-processing — no re-ingest.
@@ -846,7 +1025,10 @@ pub struct IocSaved {
 pub async fn ioc_saved(state: tauri::State<'_, AppState>) -> Result<IocSaved, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
-    let text = store.kv_get("ioc_hunt.list").map_err(|e| e.to_string())?.unwrap_or_default();
+    let text = store
+        .kv_get("ioc_hunt.list")
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
     let results = store
         .kv_get("ioc_hunt.results")
         .map_err(|e| e.to_string())?
@@ -859,7 +1041,9 @@ pub async fn ioc_saved(state: tauri::State<'_, AppState>) -> Result<IocSaved, St
 pub async fn ioc_save_list(state: tauri::State<'_, AppState>, text: String) -> Result<(), String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
-    store.kv_set("ioc_hunt.list", &text).map_err(|e| e.to_string())
+    store
+        .kv_set("ioc_hunt.list", &text)
+        .map_err(|e| e.to_string())
 }
 
 /// One analyst label on one event.
@@ -882,7 +1066,11 @@ pub async fn list_labels(state: tauri::State<'_, AppState>) -> Result<Vec<LabelD
 }
 
 #[tauri::command]
-pub async fn add_label(state: tauri::State<'_, AppState>, event_id: String, tag: String) -> Result<(), String> {
+pub async fn add_label(
+    state: tauri::State<'_, AppState>,
+    event_id: String,
+    tag: String,
+) -> Result<(), String> {
     let tag = tag.trim().to_string();
     if tag.is_empty() || tag.len() > 60 {
         return Err("Tags must be 1–60 characters.".into());
@@ -893,10 +1081,16 @@ pub async fn add_label(state: tauri::State<'_, AppState>, event_id: String, tag:
 }
 
 #[tauri::command]
-pub async fn remove_label(state: tauri::State<'_, AppState>, event_id: String, tag: String) -> Result<(), String> {
+pub async fn remove_label(
+    state: tauri::State<'_, AppState>,
+    event_id: String,
+    tag: String,
+) -> Result<(), String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
-    store.remove_label(&event_id, &tag).map_err(|e| e.to_string())
+    store
+        .remove_label(&event_id, &tag)
+        .map_err(|e| e.to_string())
 }
 
 /// Read an IOC list file (txt / csv / any text; UTF-8 or UTF-16) for the
@@ -909,10 +1103,16 @@ pub async fn read_ioc_file(path: String) -> Result<String, String> {
     }
     let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
     let text = if bytes.starts_with(&[0xFF, 0xFE]) {
-        let u: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let u: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
         String::from_utf16_lossy(&u)
     } else if bytes.starts_with(&[0xFE, 0xFF]) {
-        let u: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        let u: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
         String::from_utf16_lossy(&u)
     } else {
         String::from_utf8_lossy(&bytes).into_owned()
@@ -949,16 +1149,22 @@ pub struct SigmaConfig {
 pub async fn sigma_preview(config: SigmaConfig) -> Result<fx_hunt::sigma::SigmaLoad, String> {
     let folder = config.folder.clone();
     let filter = config.filter.clone();
-    tauri::async_runtime::spawn_blocking(move || fx_hunt::sigma::load_dir(std::path::Path::new(&folder), &filter))
-        .await
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        fx_hunt::sigma::load_dir(std::path::Path::new(&folder), &filter)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Run a Sigma folder against the open case. Replaces only previous Sigma
 /// findings; the built-in rules' and IOC hunt's findings are untouched. The
 /// config and results are saved with the case.
 #[tauri::command]
-pub async fn sigma_hunt(app: tauri::AppHandle, state: tauri::State<'_, AppState>, config: SigmaConfig) -> Result<fx_hunt::SigmaRunReport, String> {
+pub async fn sigma_hunt(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    config: SigmaConfig,
+) -> Result<fx_hunt::SigmaRunReport, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
     fx_core::progress::reset();
@@ -1003,17 +1209,30 @@ pub struct SigmaSaved {
 pub async fn sigma_saved(state: tauri::State<'_, AppState>) -> Result<SigmaSaved, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
-    let get = |k: &str| store.kv_get(k).ok().flatten().and_then(|j| serde_json::from_str(&j).ok());
-    Ok(SigmaSaved { config: get("sigma.config"), results: get("sigma.results") })
+    let get = |k: &str| {
+        store
+            .kv_get(k)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).ok())
+    };
+    Ok(SigmaSaved {
+        config: get("sigma.config"),
+        results: get("sigma.results"),
+    })
 }
-
 
 // ── Allow-list (suppressed findings) ─────────────────────────────────────────
 
 /// The case's allow-list (kv `allowlist`), re-applied after every hunt so a
 /// re-run never resurrects findings the analyst has already ruled benign.
 fn allow_entries(store: &CaseStore) -> Vec<fx_store::allowlist::AllowEntry> {
-    store.kv_get("allowlist").ok().flatten().and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default()
+    store
+        .kv_get("allowlist")
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default()
 }
 
 fn reapply_allowlist(store: &CaseStore) {
@@ -1073,9 +1292,14 @@ pub async fn sigma_disable_rule(
 ) -> Result<Option<serde_json::Value>, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
-    store.delete_rule_findings("sigma", &rule_id).map_err(|e| e.to_string())?;
-    let mut results: Option<serde_json::Value> =
-        store.kv_get("sigma.results").ok().flatten().and_then(|j| serde_json::from_str(&j).ok());
+    store
+        .delete_rule_findings("sigma", &rule_id)
+        .map_err(|e| e.to_string())?;
+    let mut results: Option<serde_json::Value> = store
+        .kv_get("sigma.results")
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str(&j).ok());
     if let Some(r) = results.as_mut() {
         let mut removed = 0u64;
         if let Some(hits) = r.get_mut("hits").and_then(|h| h.as_array_mut()) {
@@ -1143,12 +1367,19 @@ pub struct HostInfoDto {
 
 /// Aggregate the case's host facts for the Host panel.
 #[tauri::command]
-pub async fn host_info(state: tauri::State<'_, AppState>) -> Result<HostInfoDto, String> {
+pub async fn host_info(
+    state: tauri::State<'_, AppState>,
+    host: Option<String>,
+) -> Result<HostInfoDto, String> {
     let guard = state.store.lock().unwrap();
     let store = guard.as_ref().ok_or("no case open")?;
-    let facts = store.host_facts().map_err(|e| e.to_string())?;
+    store.set_host_scope(host);
+    let facts = store.host_facts();
+    let summary = store.collection_summary();
+    store.set_host_scope(None);
+    let facts = facts.map_err(|e| e.to_string())?;
     let mut out = HostInfoDto::default();
-    if let Ok((tool, host, _tz, n, bytes)) = store.collection_summary() {
+    if let Ok((tool, host, _tz, n, bytes)) = summary {
         out.collection_tool = tool;
         out.asserted_host = host;
         out.evidence_files = n;
@@ -1156,12 +1387,22 @@ pub async fn host_info(state: tauri::State<'_, AppState>) -> Result<HostInfoDto,
     }
     let parsed: Vec<(String, String, serde_json::Value, String)> = facts
         .into_iter()
-        .map(|(id, action, raw, src)| (id, action, serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null), src))
+        .map(|(id, action, raw, src)| {
+            (
+                id,
+                action,
+                serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null),
+                src,
+            )
+        })
         .collect();
     let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
     // Which control set is current (SYSTEM\Select); facts from the others are
     // older copies and are only used if the current one lacks them.
-    let current_cs = parsed.iter().find(|(_, a, _, _)| a == "host.controlset").and_then(|(_, _, r, _)| s(r, "current"));
+    let current_cs = parsed
+        .iter()
+        .find(|(_, a, _, _)| a == "host.controlset")
+        .and_then(|(_, _, r, _)| s(r, "current"));
     let rank = |r: &serde_json::Value| -> u8 {
         match (s(r, "control_set"), &current_cs) {
             (Some(c), Some(cur)) if &c == cur => 0,
@@ -1170,16 +1411,30 @@ pub async fn host_info(state: tauri::State<'_, AppState>) -> Result<HostInfoDto,
         }
     };
     let pick = |action: &str| -> Option<&(String, String, serde_json::Value, String)> {
-        parsed.iter().filter(|(_, a, _, _)| a == action).min_by_key(|(_, _, r, _)| rank(r))
+        parsed
+            .iter()
+            .filter(|(_, a, _, _)| a == action)
+            .min_by_key(|(_, _, r, _)| rank(r))
     };
-    let sourced = |e: &(String, String, serde_json::Value, String), v: String| HostSourced { value: v, event_id: e.0.clone(), source: e.3.clone() };
+    let sourced = |e: &(String, String, serde_json::Value, String), v: String| HostSourced {
+        value: v,
+        event_id: e.0.clone(),
+        source: e.3.clone(),
+    };
 
-    let mut names: Vec<String> = parsed.iter().filter(|(_, a, _, _)| a == "host.computer_name").filter_map(|(_, _, r, _)| s(r, "value")).collect();
+    let mut names: Vec<String> = parsed
+        .iter()
+        .filter(|(_, a, _, _)| a == "host.computer_name")
+        .filter_map(|(_, _, r, _)| s(r, "value"))
+        .collect();
     names.sort();
     names.dedup();
     if let Some(e) = pick("host.computer_name") {
         if let Some(v) = s(&e.2, "value") {
-            out.other_names = names.into_iter().filter(|n| !n.eq_ignore_ascii_case(&v)).collect();
+            out.other_names = names
+                .into_iter()
+                .filter(|n| !n.eq_ignore_ascii_case(&v))
+                .collect();
             out.computer_name = Some(sourced(e, v));
         }
     }
@@ -1189,10 +1444,18 @@ pub async fn host_info(state: tauri::State<'_, AppState>) -> Result<HostInfoDto,
         }
     }
     if let Some(e) = pick("host.os") {
-        out.os = Some(HostSourced { value: e.2.clone(), event_id: e.0.clone(), source: e.3.clone() });
+        out.os = Some(HostSourced {
+            value: e.2.clone(),
+            event_id: e.0.clone(),
+            source: e.3.clone(),
+        });
     }
     if let Some(e) = pick("host.timezone") {
-        out.timezone = Some(HostSourced { value: e.2.clone(), event_id: e.0.clone(), source: e.3.clone() });
+        out.timezone = Some(HostSourced {
+            value: e.2.clone(),
+            event_id: e.0.clone(),
+            source: e.3.clone(),
+        });
     }
     if let Some(e) = pick("host.shutdown") {
         if let Some(t) = s(&e.2, "time") {
@@ -1201,23 +1464,38 @@ pub async fn host_info(state: tauri::State<'_, AppState>) -> Result<HostInfoDto,
     }
     // Interfaces: one per GUID, from the current control set where possible.
     let mut seen = std::collections::HashSet::new();
-    let mut ifs: Vec<&(String, String, serde_json::Value, String)> = parsed.iter().filter(|(_, a, _, _)| a == "host.interface").collect();
+    let mut ifs: Vec<&(String, String, serde_json::Value, String)> = parsed
+        .iter()
+        .filter(|(_, a, _, _)| a == "host.interface")
+        .collect();
     ifs.sort_by_key(|(_, _, r, _)| rank(r));
     for e in ifs {
         let key = s(&e.2, "guid").unwrap_or_default();
         if seen.insert(key) {
-            out.interfaces.push(HostSourced { value: e.2.clone(), event_id: e.0.clone(), source: e.3.clone() });
+            out.interfaces.push(HostSourced {
+                value: e.2.clone(),
+                event_id: e.0.clone(),
+                source: e.3.clone(),
+            });
         }
     }
     // Accounts: local SAM accounts (names + F/V activity, joined by RID) and
     // profile-only users (domain / Microsoft accounts) from ProfileList.
-    let mut accts: std::collections::BTreeMap<String, HostAccount> = std::collections::BTreeMap::new();
+    let mut accts: std::collections::BTreeMap<String, HostAccount> =
+        std::collections::BTreeMap::new();
     for (id, a, r, _) in &parsed {
         let rid = r.get("rid").and_then(|x| x.as_u64());
         match a.as_str() {
             "host.account" | "host.account_activity" => {
                 let Some(user) = s(r, "user") else { continue };
-                let acc = accts.entry(user.to_ascii_lowercase()).or_insert_with(|| HostAccount { user: user.clone(), local: true, event_id: id.clone(), ..Default::default() });
+                let acc = accts
+                    .entry(user.to_ascii_lowercase())
+                    .or_insert_with(|| HostAccount {
+                        user: user.clone(),
+                        local: true,
+                        event_id: id.clone(),
+                        ..Default::default()
+                    });
                 acc.rid = acc.rid.or(rid);
                 if a == "host.account" {
                     acc.created = s(r, "created");
@@ -1239,14 +1517,22 @@ pub async fn host_info(state: tauri::State<'_, AppState>) -> Result<HostInfoDto,
         }
         let Some(user) = s(r, "user") else { continue };
         let sid = s(r, "sid");
-        let local_rid = sid.as_deref().and_then(|x| x.rsplit('-').next()).and_then(|x| x.parse::<u64>().ok());
+        let local_rid = sid
+            .as_deref()
+            .and_then(|x| x.rsplit('-').next())
+            .and_then(|x| x.parse::<u64>().ok());
         // Match a SAM account by RID first (renamed profiles), else by name.
         let key = accts
             .iter()
             .find(|(_, v)| v.rid.is_some() && v.rid == local_rid)
             .map(|(k, _)| k.clone())
             .unwrap_or_else(|| user.to_ascii_lowercase());
-        let acc = accts.entry(key).or_insert_with(|| HostAccount { user: user.clone(), local: false, event_id: id.clone(), ..Default::default() });
+        let acc = accts.entry(key).or_insert_with(|| HostAccount {
+            user: user.clone(),
+            local: false,
+            event_id: id.clone(),
+            ..Default::default()
+        });
         acc.sid = sid;
         acc.profile_path = s(r, "path");
     }

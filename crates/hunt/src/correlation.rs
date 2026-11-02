@@ -73,7 +73,12 @@ pub enum Correlation {
 impl Correlation {
     /// Compile to (sql, description-of-grouping). The SQL must SELECT, in order:
     /// a grouping label, the earliest contributing timestamp, a
-    /// comma-separated list of event ids, and a numeric magnitude.
+    /// comma-separated list of event ids, a numeric magnitude, and the host.
+    ///
+    /// Every primitive is partitioned by host as well as its own grouping: in
+    /// a multi-host case a burst, sequence or sum never mixes events from two
+    /// machines (a logon on one host and a tool drop on another are not a
+    /// sequence). On a single-host case this changes nothing.
     pub(crate) fn to_sql(&self) -> String {
         match self {
             Correlation::ThresholdWindow {
@@ -98,11 +103,7 @@ impl Correlation {
                 // The window runs in the `windowed` CTE over `matched`, where
                 // the group column is already aliased to `grp` — so partition
                 // by `grp`, never the original column/expression.
-                let partition = if grp.is_some() {
-                    "PARTITION BY grp ".to_string()
-                } else {
-                    String::new()
-                };
+                let partition = "PARTITION BY h, grp ".to_string();
                 // Evidence-id cap. A real mass-rename burst (the exact thing
                 // this rule exists to catch) can be hundreds of thousands of
                 // events in ONE host group. STRING_AGG over all of them builds a
@@ -117,13 +118,13 @@ impl Correlation {
                 const ID_SAMPLE_CAP: usize = 500;
                 format!(
                     "WITH matched AS (
-                        SELECT id, ts, {grp_expr} AS grp,
+                        SELECT id, ts, COALESCE(host, '') AS h, {grp_expr} AS grp,
                                epoch(ts)::BIGINT AS es
                         FROM events
                         WHERE action LIKE '{prefix}%' {art}
                      ),
                      windowed AS (
-                        SELECT id, ts, grp,
+                        SELECT id, ts, h, grp,
                                COUNT(*) OVER (
                                  {partition}ORDER BY es
                                  RANGE BETWEEN CURRENT ROW AND {window} FOLLOWING
@@ -131,18 +132,19 @@ impl Correlation {
                         FROM matched
                      ),
                      qualifying AS (
-                        SELECT grp, id, ts,
-                               MAX(burst) OVER (PARTITION BY grp) AS grp_peak,
-                               ROW_NUMBER() OVER (PARTITION BY grp ORDER BY ts) AS rn
+                        SELECT h, grp, id, ts,
+                               MAX(burst) OVER (PARTITION BY h, grp) AS grp_peak,
+                               ROW_NUMBER() OVER (PARTITION BY h, grp ORDER BY ts) AS rn
                         FROM windowed
                         WHERE burst >= {threshold}
                      )
                      SELECT grp,
                             strftime(MIN(ts), '%Y-%m-%dT%H:%M:%S') AS first_ts,
                             STRING_AGG(CASE WHEN rn <= {cap} THEN id END, ',') AS ids,
-                            MAX(grp_peak) AS magnitude
+                            MAX(grp_peak) AS magnitude,
+                            h
                      FROM qualifying
-                     GROUP BY grp",
+                     GROUP BY h, grp",
                     grp_expr = grp_expr,
                     prefix = esc(action_prefix),
                     art = art,
@@ -169,21 +171,23 @@ impl Correlation {
                 // matching second-event per first-event (MIN(b.id)) so one logon
                 // can't fan out into thousands of pairs.
                 "WITH first_ev AS (
-                     SELECT id, {key} AS k, ts FROM events WHERE action LIKE '{first}%'
+                     SELECT id, COALESCE(host, '') AS h, {key} AS k, ts FROM events WHERE action LIKE '{first}%'
                  ),
                  second_ev AS (
-                     SELECT id, {key} AS k, ts FROM events WHERE action LIKE '{second}%'
+                     SELECT id, COALESCE(host, '') AS h, {key} AS k, ts FROM events WHERE action LIKE '{second}%'
                  )
                  SELECT
                      a.k AS grp,
                      strftime(a.ts, '%Y-%m-%dT%H:%M:%S') AS first_ts,
                      a.id || ',' || MIN(b.id) AS ids,
-                     1 AS magnitude
+                     1 AS magnitude,
+                     a.h
                  FROM first_ev a
                  JOIN second_ev b
-                   ON a.k = b.k
+                   ON a.h = b.h
+                  AND a.k = b.k
                   AND b.ts BETWEEN a.ts AND a.ts + INTERVAL '{within} seconds'
-                 GROUP BY a.k, a.ts, a.id",
+                 GROUP BY a.h, a.k, a.ts, a.id",
                 key = ident(join_key),
                 first = esc(first_action_prefix),
                 second = esc(second_action_prefix),
@@ -204,22 +208,23 @@ impl Correlation {
                 const ID_SAMPLE_CAP: usize = 500;
                 format!(
                     "WITH matched AS (
-                        SELECT id, ts, {grp} AS grp,
+                        SELECT id, ts, COALESCE(host, '') AS h, {grp} AS grp,
                                CAST(json_extract(raw, '$.{field}') AS BIGINT) AS val
                         FROM events
                         WHERE action LIKE '{prefix}%'
                      ),
                      ranked AS (
-                        SELECT grp, id, ts, val,
-                               ROW_NUMBER() OVER (PARTITION BY grp ORDER BY ts) AS rn
+                        SELECT h, grp, id, ts, val,
+                               ROW_NUMBER() OVER (PARTITION BY h, grp ORDER BY ts) AS rn
                         FROM matched
                      )
                      SELECT grp,
                             strftime(MIN(ts), '%Y-%m-%dT%H:%M:%S') AS first_ts,
                             STRING_AGG(CASE WHEN rn <= {cap} THEN id END, ',') AS ids,
-                            SUM(val) AS magnitude
+                            SUM(val) AS magnitude,
+                            h
                      FROM ranked
-                     GROUP BY grp
+                     GROUP BY h, grp
                      HAVING SUM(val) >= {min}",
                     grp = grouping_expr(group_by),
                     field = esc(json_field),
@@ -240,6 +245,7 @@ pub(crate) fn detection_from_row(
     first_ts: time::OffsetDateTime,
     event_ids: Vec<uuid::Uuid>,
     magnitude: i64,
+    host: &str,
 ) -> Detection {
     let summary = match &rule.correlation {
         Correlation::ThresholdWindow { .. } => {
@@ -261,7 +267,13 @@ pub(crate) fn detection_from_row(
         summary: format!("{}: {}", rule.title, summary),
         event_ids,
         timestamp: first_ts,
-        host: if grp == "*" { None } else { Some(grp.to_string()) },
+        host: if !host.is_empty() {
+            Some(host.to_string())
+        } else if grp == "*" {
+            None
+        } else {
+            Some(grp.to_string())
+        },
         engine: DetectionEngine::Correlation,
     }
 }
@@ -294,7 +306,12 @@ fn grouping_expr(col: &str) -> String {
 /// arbitrary SQL through a group_by/join_key.
 fn ident(s: &str) -> String {
     const ALLOWED: &[&str] = &[
-        "host", "user_name", "user_sid", "artefact", "action", "process_name",
+        "host",
+        "user_name",
+        "user_sid",
+        "artefact",
+        "action",
+        "process_name",
         "target_path",
     ];
     if ALLOWED.contains(&s) {
