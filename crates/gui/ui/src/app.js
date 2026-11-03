@@ -54,6 +54,7 @@ async function init() {
   if (ov) ov.addEventListener("click", (e) => { if (e.target === ov && !prog.on) hideOverlay(); });
   backend.onProgress((snap) => renderProgress(snap));
   wireRailTips();
+  wireColumnResize();
   const cb = el("ovpCancel");
   if (cb) cb.addEventListener("click", async () => {
     cb.disabled = true; cb.textContent = "Cancelling…";
@@ -256,6 +257,67 @@ function renderProgress(s) {
     if (stats[i][2]) d.children[1].classList.add("warn");
   });
 }
+// Resizable timeline columns: drag a header's right edge; double-click it to
+// reset. Widths are CSS variables on .main (shared by header and rows) and
+// saved per analyst in fx.colW.
+const COL_MIN = { tri: 36, ts: 110, host: 60, art: 60, eid: 44, act: 70, user: 60 };
+function applyColWidths() {
+  const main = document.querySelector(".main");
+  if (!main) return;
+  const w = loadPref("fx.colW", {}) || {};
+  for (const k of Object.keys(COL_MIN)) {
+    if (w[k]) main.style.setProperty(`--w-${k}`, w[k] + "px");
+    else main.style.removeProperty(`--w-${k}`);
+  }
+}
+function wireColumnResize() {
+  applyColWidths();
+  const head = document.querySelector(".grid-head");
+  if (!head) return;
+  let drag = null;
+  let swallowClick = false;
+  head.addEventListener("pointerdown", (ev) => {
+    const handle = ev.target.closest(".rsz");
+    if (!handle) return;
+    const cell = handle.closest(".hc");
+    const k = cell && cell.dataset.k;
+    if (!k) return;
+    ev.preventDefault(); ev.stopPropagation();
+    drag = { k, x0: ev.clientX, w0: cell.getBoundingClientRect().width, handle };
+    handle.classList.add("drag");
+    handle.setPointerCapture(ev.pointerId);
+    document.body.classList.add("col-resizing");
+  });
+  head.addEventListener("pointermove", (ev) => {
+    if (!drag) return;
+    const w = Math.round(Math.max(COL_MIN[drag.k] || 40, Math.min(900, drag.w0 + ev.clientX - drag.x0)));
+    document.querySelector(".main").style.setProperty(`--w-${drag.k}`, w + "px");
+    drag.w = w;
+  });
+  const end = () => {
+    if (!drag) return;
+    if (drag.w) { const saved = loadPref("fx.colW", {}) || {}; saved[drag.k] = drag.w; savePref("fx.colW", saved); }
+    drag.handle.classList.remove("drag");
+    document.body.classList.remove("col-resizing");
+    swallowClick = true; setTimeout(() => { swallowClick = false; }, 0);
+    drag = null;
+  };
+  head.addEventListener("pointerup", end);
+  head.addEventListener("pointercancel", end);
+  // A resize must not also open the column's filter menu.
+  head.addEventListener("click", (ev) => {
+    if (swallowClick || ev.target.closest(".rsz")) { ev.stopPropagation(); ev.preventDefault(); }
+  }, true);
+  head.addEventListener("dblclick", (ev) => {
+    const handle = ev.target.closest(".rsz");
+    if (!handle) return;
+    const k = handle.closest(".hc").dataset.k;
+    const saved = loadPref("fx.colW", {}) || {};
+    delete saved[k]; savePref("fx.colW", saved);
+    applyColWidths();
+  });
+}
+
 // Hover tips for rail entries carrying data-tip. A fixed-position bubble so the
 // rail's scroll container never clips it.
 function wireRailTips() {
@@ -476,6 +538,10 @@ async function renderActivityGraph() {
   days = days
     .filter((d) => d && /^\d{4}-\d{2}-\d{2}$/.test(d.day))
     .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+  // Share with the rail's Activity card (and the mini timeline), which
+  // otherwise waited for a return to the timeline to load its own copy.
+  state.days = days;
+  refreshActivityCard();
 
   if (!days.length) {
     el("resultCount").textContent = "";
@@ -1336,9 +1402,9 @@ async function copyRowsAsTable() {
   const rows = state.rows || [];
   if (!rows.length) { toast("Nothing to copy"); return; }
   const clean = (v) => String(v == null ? "" : v).replace(/[\t\r\n]+/g, " ").trim();
-  const head = ["Time (UTC)", "Host", "Kind", "Artefact", "User", "Event", "Triage", "Tags", "Note"];
+  const head = ["Time (UTC)", "Host", "Kind", "Artefact", "Event ID", "Action", "User", "Event", "Triage", "Tags", "Note"];
   const lines = [head.join("\t")].concat(rows.map((e) => [
-    e.ts ? time(e.ts) : "no timestamp", e.host, kindLabel(e.ts_kind), e.artefact, e.user, e.message,
+    e.ts ? time(e.ts) : "no timestamp", e.host, kindLabel(e.ts_kind), e.artefact, e.event_id || "", e.action || "", e.user, e.message,
     TRI_NAME[triageStateFor(e.id)] || "", labelsFor(e.id).join(", "), triageNoteFor(e.id),
   ].map(clean).join("\t")));
   try {
@@ -1805,8 +1871,11 @@ async function renderMiniTimeline() {
     hov.setAttribute("x", (i * bw).toFixed(2)); hov.setAttribute("width", bw.toFixed(2));
     const r = svg.getBoundingClientRect();
     tip.hidden = false;
-    tip.style.left = (12 + ((x / W) * r.width)) + "px";
     tip.textContent = `${dmy(bs)}${binMs > DAY * 1.01 ? " – " + dmy(be) : ""} · ${fmt(b.total)} event${b.total === 1 ? "" : "s"}${b.flagged ? ` · ${fmt(b.flagged)} flagged` : ""}`;
+    // Keep the label inside the strip: near either end it would be cut off.
+    // (The label is centred on its left position: translate(-50%).)
+    const want = 12 + ((x / W) * r.width), half = tip.offsetWidth / 2;
+    tip.style.left = Math.max(half + 4, Math.min(want, box.clientWidth - half - 4)) + "px";
     if (dragFrom != null) {
       const a = Math.min(dragFrom, x), c = Math.max(dragFrom, x);
       sel.setAttribute("visibility", "visible"); sel.setAttribute("x", a.toFixed(1)); sel.setAttribute("width", (c - a).toFixed(1));
@@ -2261,7 +2330,18 @@ function renderIocBar() {
 
 // Result-count + paging indicator. Shows the window position within the full
 // matching set and Prev/Next when there's more than one page.
+function renderSearchCount() {
+  const n0 = el("searchCount");
+  if (!n0) return;
+  const q = (state.filter.text || "").trim();
+  if (!q || state.total == null || state.view !== "timeline") { n0.hidden = true; return; }
+  n0.hidden = false;
+  n0.classList.toggle("none", state.total === 0);
+  n0.textContent = state.total === 0 ? "no matches" : `${fmt(state.total)} match${state.total === 1 ? "" : "es"}`;
+}
+
 function renderResultCount(triageActive) {
+  renderSearchCount();
   const el0 = el("resultCount");
   if (!el0) return;
   const shown = state.rows.length;
@@ -2840,10 +2920,11 @@ function rowHtml(e) {
   return `<div class="evrow ${sel} ${flagged}" data-id="${e.id}" title="${escapeHtml(tip)}">
     <span class="cat-tick" style="background:${color}"></span>
     <span class="c tri">${triTag}</span>
-    <span class="c ts">${time(e.ts)}</span>
+    <span class="c ts" title="${escapeHtml([kindLabel(e.ts_kind), KIND_TIP[String(e.ts_kind || "").toLowerCase()] || ""].filter(Boolean).join(": "))}">${time(e.ts)}</span>
     ${hostCol() ? `<span class="c host"><span class="hdot ${hostClass(e.host)}"></span>${escapeHtml(e.host || "—")}</span>` : ""}
-    <span class="c kind" title="${escapeHtml(KIND_TIP[String(e.ts_kind || "").toLowerCase()] || "")}">${escapeHtml(kindLabel(e.ts_kind))}</span>
     <span class="c art" style="color:${color}">${e.artefact}</span>
+    <span class="c eid">${e.event_id ? escapeHtml(e.event_id) : ""}</span>
+    <span class="c act" title="${escapeHtml(e.action || "")}">${escapeHtml(e.action || "")}</span>
     <span class="c user">${e.user ? escapeHtml(e.user) : "—"}</span>
     <span class="c msg">${labelChips(e.id)}${pill}${escapeHtml(e.message)}</span>
   </div>`;

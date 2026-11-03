@@ -236,6 +236,9 @@
   }
   .search input:focus { outline: 2px solid var(--focus); outline-offset: -1px; border-color: transparent; }
   .search svg { position: absolute; left: 9px; top: 8px; width: 14px; height: 14px; color: var(--ink-faint); }
+  .search:has(.search-n:not([hidden])) input { padding-right: 96px; }
+  .search-n { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); font: 600 11px var(--sans); color: var(--ink-dim); background: var(--surface); border: 1px solid var(--line-soft); border-radius: 10px; padding: 1px 8px; pointer-events: none; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .search-n.none { color: var(--alert); }
 
   /* top-bar dropdown menu (Export) */
   .menuwrap { position: relative; display: inline-flex; }
@@ -264,7 +267,7 @@
   .hdot.hc0 { background: #4c8dd6; } .hdot.hc1 { background: #d9822b; } .hdot.hc2 { background: #3aa57a; } .hdot.hc3 { background: #b05cc8; }
   .hdot.hc4 { background: #d4b23a; } .hdot.hc5 { background: #2fb3c0; } .hdot.hc6 { background: #d0566c; } .hdot.hc7 { background: #8a9a3a; }
   .hostchip .hdot { margin-right: 1px; }
-  .app.multihost .grid-head, .app.multihost .evrow { grid-template-columns: 54px 168px 118px 88px 108px 150px 1fr; }
+  .app.multihost .grid-head, .app.multihost .evrow { grid-template-columns: var(--w-tri) var(--w-ts) var(--w-host) var(--w-art) var(--w-eid) var(--w-act) var(--w-user) minmax(120px, 1fr); }
   .grid-head .hcol { display: none; }
   .app.multihost .grid-head .hcol { display: block; }
   .evrow .host { font-family: var(--sans); font-size: 11px; color: var(--ink-dim); display: flex; align-items: center; gap: 6px; }
@@ -786,9 +789,12 @@
   .pg-btn[disabled] { opacity: .4; cursor: default; }
 
   /* header row of the grid */
+  /* One column layout for the header and every row. Widths are variables so
+     the analyst can drag them (set inline on .main, saved per user). */
+  .main { --w-tri: 54px; --w-ts: 168px; --w-host: 118px; --w-art: 108px; --w-eid: 70px; --w-act: 150px; --w-user: 150px; }
   .grid-head {
     display: grid;
-    grid-template-columns: 54px 168px 88px 108px 150px 1fr;
+    grid-template-columns: var(--w-tri) var(--w-ts) var(--w-art) var(--w-eid) var(--w-act) var(--w-user) minmax(120px, 1fr);
     gap: 0;
     padding: 0 12px;
     height: 26px; align-items: center;
@@ -799,7 +805,17 @@
     flex: none;
   }
   .grid-head span { padding-right: 10px; }
-  /* Filterable column headers (Host / Kind / Artefact / User). */
+  .grid-head .hc { position: relative; display: flex; align-items: center; min-width: 0; height: 100%; }
+  .grid-head .hc > .colf, .grid-head .hc > .hl, .grid-head .hc > #colTime { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .grid-head .hc-host { display: none; }
+  .app.multihost .grid-head .hc-host { display: flex; }
+  .grid-head .rsz { position: absolute; right: 0; top: 5px; bottom: 5px; width: 8px; padding: 0; cursor: col-resize; touch-action: none; }
+  .grid-head .rsz::after { content: ""; position: absolute; right: 3px; top: 0; bottom: 0; width: 1px; background: var(--line); }
+  .grid-head .rsz:hover::after, .grid-head .rsz.drag::after { background: var(--focus); width: 2px; right: 2px; }
+  body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-select: none !important; }
+  .evrow .eid { font-family: var(--sans); font-size: 11.5px; color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+  .evrow .act { font-family: var(--sans); font-size: 11px; color: var(--ink-dim); }
+  /* Filterable column headers (Host / Artefact / User). */
   .grid-head .colf { all: unset; box-sizing: border-box; padding-right: 10px; cursor: pointer; color: inherit; font: inherit; letter-spacing: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .grid-head .colf::after { content: " ▾"; opacity: 0; font-size: 9px; }
   .grid-head .colf:hover, .grid-head .colf:focus-visible { color: var(--ink); }
@@ -829,7 +845,7 @@
 
   .evrow {
     display: grid;
-    grid-template-columns: 54px 168px 88px 108px 150px 1fr;
+    grid-template-columns: var(--w-tri) var(--w-ts) var(--w-art) var(--w-eid) var(--w-act) var(--w-user) minmax(120px, 1fr);
     padding: 0 12px;
     height: var(--row-h); align-items: center;
     border-bottom: 1px solid var(--line-soft);
@@ -929,13 +945,13 @@
   .lbl-dot { background: var(--focus); border-radius: 50% !important; }
   .tri-sum.lbl-sum .lbl { text-transform: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .toolbar button, .toolbar .topbtn, .toolbar .chip, .toolbar .result-count { white-space: nowrap; }
-  /* When the detail panel is wide, drop the Kind and User columns so the
-     event text keeps room instead of being squeezed to nothing. */
+  /* When the detail panel is wide, drop the Event ID, Action and User columns
+     so the event text keeps room instead of being squeezed to nothing. */
   .main { container-type: inline-size; }
   @container (max-width: 820px) {
-    .grid-head, .evrow { grid-template-columns: 50px 150px 96px 1fr !important; }
-    .app.multihost .grid-head, .app.multihost .evrow { grid-template-columns: 50px 150px 96px 96px 1fr !important; }
-    .grid-head .kcol, .grid-head .ucol, .evrow .c.kind, .evrow .c.user { display: none !important; }
+    .grid-head, .evrow { --w-eid: 0px; --w-act: 0px; --w-user: 0px; }
+    .grid-head .hc[data-k="eid"], .grid-head .hc[data-k="act"], .grid-head .hc[data-k="user"],
+    .evrow .c.eid, .evrow .c.act, .evrow .c.user { visibility: hidden; padding: 0 !important; }
     .time-range .tr-label { display: none; }
     .time-range input[type="datetime-local"] { max-width: 150px; }
   }
@@ -1195,6 +1211,7 @@
       <div class="search">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
         <input id="search" type="text" placeholder="Filter path, user, message…  (⌘K)" spellcheck="false" />
+        <span class="search-n" id="searchCount" aria-live="polite" hidden></span>
       </div>
       <button class="topbtn has-tip" id="iocBtn" aria-describedby="iocTip">IOC hunt
         <span class="tip" id="iocTip" role="tooltip"><b>Search for many values at once.</b> Paste or drop a list of IOCs (hashes, IPs, domains, URLs, file names, paths) and hunt the whole case in one pass. Defanged values work.<br><br><b>Sigma rules tab:</b> run community SigmaHQ rules against the case, on top of fx's built-in rules.</span>
@@ -1284,7 +1301,7 @@
     <div class="idf-bar" id="idfBar" hidden></div>
     <div class="minitl" id="miniTl" hidden></div>
     <div class="grid-head">
-      <button class="colf tcol" data-col="triage" title="Filter by triage state">Triage</button><span id="colTime">Time (UTC)</span><button class="colf hcol" data-col="host" title="Filter by host">Host</button><button class="colf kcol" data-col="kind" title="Filter by timestamp kind">Kind</button><button class="colf acol" data-col="artefact" title="Filter by artefact">Artefact</button><button class="colf ucol" data-col="user" title="Filter by user">User</button><span class="ecol">Event</span>
+      <div class="hc" data-k="tri"><button class="colf tcol" data-col="triage" title="Filter by triage state">Triage</button><span class="rsz" title="Drag to resize, double-click to reset"></span></div><div class="hc" data-k="ts"><span id="colTime">Time (UTC)</span><span class="rsz" title="Drag to resize, double-click to reset"></span></div><div class="hc hc-host" data-k="host"><button class="colf hcol" data-col="host" title="Filter by host">Host</button><span class="rsz" title="Drag to resize, double-click to reset"></span></div><div class="hc" data-k="art"><button class="colf acol" data-col="artefact" title="Filter by artefact">Artefact</button><span class="rsz" title="Drag to resize, double-click to reset"></span></div><div class="hc" data-k="eid"><span class="hl" title="Windows event log Event ID">Event ID</span><span class="rsz" title="Drag to resize, double-click to reset"></span></div><div class="hc" data-k="act"><span class="hl" title="What happened, in fx's terms (for example logon.success or service.install)">Action</span><span class="rsz" title="Drag to resize, double-click to reset"></span></div><div class="hc" data-k="user"><button class="colf ucol" data-col="user" title="Filter by user">User</button><span class="rsz" title="Drag to resize, double-click to reset"></span></div><div class="hc"><span class="ecol hl">Event</span></div>
     </div>
     <div class="viewport" id="viewport">
       <div class="spacer-top" id="spTop"></div>

@@ -205,11 +205,13 @@ SEED[SEED.length - 1]._raw = { EventID: 4688, NewProcessName: "C:\\Windows\\Syst
   SEED.sort((x, y) => ((x.ts || "~") < (y.ts || "~") ? -1 : (x.ts || "~") > (y.ts || "~") ? 1 : 0)); // undated last
 })();
 
+// Demo: EVTX rows carry the Event ID their action would have.
 function ev(ts, category, action, artefact, user, message, flagged, tag) {
   return {
     id: "e" + Math.random().toString(36).slice(2, 10),
     ts, ts_kind: kindFor(action), artefact, category, action,
     host: HOST, user, target: null, message, flagged: !!flagged, _tag: tag || null,
+    event_id: artefact === "Evtx" ? ({ "logon.success": "4624", "logon.failure": "4625", "process.create": "4688", "service.install": "7045", "log.cleared": "1102", "task.created": "4698" })[action] || null : null,
   };
 }
 function kindFor(a) {

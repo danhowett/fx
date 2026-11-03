@@ -22,6 +22,9 @@ pub struct TimelineRow {
     /// Lets the analyst tell apart events that look identical (e.g. the same
     /// log-cleared record collected from two copies of a log).
     pub source_ref: Option<String>,
+    /// EVTX EventID (e.g. "4624"); None for other artefacts. Read from the
+    /// stored record for the rows returned only, so it works on older cases.
+    pub event_id: Option<String>,
 }
 
 /// A filter for the timeline. All fields optional; `None` means unconstrained.
@@ -412,10 +415,52 @@ impl CaseStore {
                     target_path: r.get(7)?,
                     message: r.get(8)?,
                     source_ref: r.get(9)?,
+                    event_id: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let mut rows = rows;
+        self.fill_event_ids(&mut rows)?;
         Ok(rows)
+    }
+
+    /// Set `event_id` on the EVTX rows given, from their stored records.
+    fn fill_event_ids(&self, rows: &mut [TimelineRow]) -> Result<(), StoreError> {
+        let ids: Vec<String> = rows
+            .iter()
+            .filter(|r| r.artefact == "Evtx")
+            .map(|r| r.id.clone())
+            .collect();
+        let mut found: std::collections::HashMap<String, String> = Default::default();
+        for chunk in ids.chunks(500) {
+            let marks = vec!["CAST(? AS UUID)"; chunk.len()].join(",");
+            // EventID is a bare number, or an object whose "#text" holds it.
+            let sql = format!(
+                "SELECT CAST(id AS VARCHAR),
+                        COALESCE(json_extract_string(raw, '/Event/System/EventID/#text'),
+                                 json_extract_string(raw, '/Event/System/EventID'))
+                 FROM events WHERE id IN ({marks})"
+            );
+            let params: Vec<&dyn duckdb::ToSql> =
+                chunk.iter().map(|s| s as &dyn duckdb::ToSql).collect();
+            let mut stmt = self.connection().prepare(&sql)?;
+            let pairs = stmt
+                .query_map(params.as_slice(), |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            for (id, eid) in pairs {
+                if let Some(e) = eid.filter(|e| !e.is_empty() && !e.starts_with('{')) {
+                    found.insert(id, e);
+                }
+            }
+        }
+        for r in rows.iter_mut() {
+            if let Some(e) = found.remove(&r.id) {
+                r.event_id = Some(e);
+            }
+        }
+        Ok(())
     }
 
     /// Fetch specific events by id, in time order — the "show every event that
@@ -444,12 +489,14 @@ impl CaseStore {
                         target_path: r.get(7)?,
                         message: r.get(8)?,
                         source_ref: r.get(9)?,
+                        event_id: None,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             out.extend(rows);
         }
         out.sort_by(|a, b| a.ts.cmp(&b.ts));
+        self.fill_event_ids(&mut out)?;
         Ok(out)
     }
 

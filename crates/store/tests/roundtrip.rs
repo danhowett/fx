@@ -558,3 +558,36 @@ fn rerun_clears_automatic_unconfirmed_marks_but_keeps_the_analysts() {
     assert!(left.contains(&format!("{}:unconfirmed", ids[1])));
     assert!(left.contains(&format!("{}:validated", ids[2])));
 }
+
+#[test]
+fn timeline_rows_carry_the_evtx_event_id() {
+    let dir = std::env::temp_dir().join(format!("fxcase-eid-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = CaseStore::create(&dir.join("e.fxcase"), "E", None, "UTC").unwrap();
+    let ev = Uuid::new_v4();
+    let mut plain = sample_event(ev, "logon.success", "x");
+    plain.artefact = ArtefactKind::Evtx;
+    plain.raw = serde_json::json!({"Event": {"System": {"EventID": 4624}}});
+    let mut text = sample_event(ev, "service.install", "y");
+    text.artefact = ArtefactKind::Evtx;
+    text.raw = serde_json::json!({"Event": {"System": {"EventID": {"#text": 7045, "#attributes": {"Qualifiers": 16384}}}}});
+    let other = sample_event(ev, "process.execute", "z"); // Prefetch: no EventID
+    {
+        let mut w = store.event_writer();
+        w.emit(plain);
+        w.emit(text);
+        w.emit(other);
+        w.flush().unwrap();
+    }
+    let rows = store.timeline(&TimelineFilter::default()).unwrap();
+    let by_action = |a: &str| {
+        rows.iter()
+            .find(|r| r.action == a)
+            .unwrap()
+            .event_id
+            .clone()
+    };
+    assert_eq!(by_action("logon.success").as_deref(), Some("4624"));
+    assert_eq!(by_action("service.install").as_deref(), Some("7045"));
+    assert_eq!(by_action("process.execute"), None);
+}

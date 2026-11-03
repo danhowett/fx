@@ -58,7 +58,7 @@ match on `event.id` or `message`.
 
 | Artefact | What it surfaces |
 |----------|------------------|
-| `$MFT` | file records with full paths: one timeline row per `$STANDARD_INFORMATION` time (Kind **M** modified, **A** accessed, **C** entry changed, **B** born), with the `$FILE_NAME` times alongside. Opening an `$MFT` row shows all eight times ($SI and $FN, to the sub-second) with that row's time highlighted. A file whose $SI Born is earlier than its $FN Born **and** whose $SI times are whole seconds (while its $FN times aren't) gets a **Possible timestomping** event on the timeline: search `timestomp` to review them. It is deliberately not a finding: $SI-before-$FN is common after copy, extract and install operations, so it's a lead to check, not an alert. The Windows app-package placeholder time (26/10/1985 02:15:00) is excluded |
+| `$MFT` | file records with full paths: one timeline row per `$STANDARD_INFORMATION` time (**M** modified, **A** accessed, **C** entry changed, **B** born), with the `$FILE_NAME` times alongside. Opening an `$MFT` row shows all eight times ($SI and $FN, to the sub-second) with that row's time highlighted. A file whose $SI Born is earlier than its $FN Born **and** whose $SI times are whole seconds (while its $FN times aren't) gets a **Possible timestomping** event on the timeline: search `timestomp` to review them. It is deliberately not a finding: $SI-before-$FN is common after copy, extract and install operations, so it's a lead to check, not an alert. The Windows app-package placeholder time (26/10/1985 02:15:00) is excluded |
 | `$UsnJrnl:$J` | change-journal entries — create / delete / rename / data-change, with reason flags (flags SDelete and ransomware-extension patterns) |
 
 ### Registry
@@ -455,6 +455,17 @@ host's report.
 
 ## Navigating the timeline
 
+**Columns.** Triage, Time, Host (multi-host cases), Artefact, **Event ID**
+(the Windows event log ID, e.g. 4624, for EVTX rows), **Action** (what happened
+in fx's terms, e.g. `logon.success`, `service.install`, `file.created`), User and
+Event. Drag the right edge of any column heading to resize it; double-click the
+edge to put it back. Widths are remembered. With the detail panel open on a
+narrow window, Event ID, Action and User step aside so the event text keeps
+its room.
+
+**Search** (the box at the top, `Ctrl+K`) filters the whole case as you type
+and shows how many events match inside the box.
+
 **Findings only** (toolbar) narrows the timeline to the events behind any
 finding — built-in rules, Sigma, IOC hunt — plus anything you've triaged as
 Validated or Unconfirmed: the attack in time order, with full context. It is
@@ -478,7 +489,7 @@ combined. **Copy as table** then copies those events (time, host, kind,
 artefact, user, event, triage, tags and your note) to paste into a report or
 ticket. The rail's Triage and Tags sections apply the same filters.
 
-**Column filters.** Click the **Triage**, **Host**, **Kind**, **Artefact** or **User**
+**Column filters.** Click the **Triage**, **Host**, **Artefact** or **User**
 column header for a list of that column's values with event counts (under the
 current filters); pick one to filter the timeline, or **All** to clear it.
 Active column filters show as chips in the toolbar. Time has its own range
@@ -491,17 +502,18 @@ picker; Event has too many values to list, so use the search box.
   through a long list without fighting trackpad momentum.
 - **No timestamp.** fx never invents a time. A record whose artefact gave no
   time (a shortcut with no target times, a registry value on a key with no
-  last-write, a browser visit with a zero time) shows **no timestamp** with
-  Kind **Undated**, sorts after every dated event, and is left out of date
+  last-write, a browser visit with a zero time) shows **no timestamp**, sorts
+  after every dated event (press `End` to reach them), and is left out of date
   ranges, the activity graph, the mini timeline, pivots and correlated rules.
-  It still appears in searches, IOC hunts and single-event rules. Filter to
-  them with **Kind → Undated**. Cases from earlier versions are converted when
+  It still appears in searches, IOC hunts and single-event rules. Cases from earlier versions are converted when
   opened: only fx's own 01/01/1970 00:00:00 placeholders from those parsers
   change; a genuine 1970 time in evidence (such as a timestomped $MFT value)
   is kept as recorded.
-- **Kind** says which time a row is: **M · Modified**, **A · Accessed**,
-  **C · Changed**, **B · Born** for file-system times, or Executed, Logged,
-  Logon and Recorded for other artefacts.
+- **Which time is it?** Hover a row's time, or open the row: the detail panel
+  shows the time with its kind, **M · Modified**, **A · Accessed**,
+  **C · Changed** or **B · Born** for file-system times, or Executed, Logged,
+  Logon and Recorded for other artefacts. `$MFT` rows also say it in the
+  event text (`$SI modified: …`). **Copy as table** includes it as a column.
 - **Dates** are shown throughout in UK format (`DD/MM/YYYY HH:MM:SS`), always
   **UTC**. (Raw records and CSV/STIX exports keep ISO `YYYY-MM-DD` for
   machine interchange.)

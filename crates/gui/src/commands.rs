@@ -44,6 +44,8 @@ pub struct EventDto {
     /// Provenance locator (parser/source ref) so identical-looking events are
     /// distinguishable in the detail pane.
     pub source_ref: Option<String>,
+    /// EVTX EventID, when the event came from an event log.
+    pub event_id: Option<String>,
 }
 
 impl From<TimelineRow> for EventDto {
@@ -67,6 +69,7 @@ impl From<TimelineRow> for EventDto {
             message: r.message,
             flagged,
             source_ref: r.source_ref,
+            event_id: r.event_id,
         }
     }
 }
