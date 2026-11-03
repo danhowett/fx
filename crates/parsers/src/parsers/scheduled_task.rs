@@ -99,8 +99,8 @@ impl Parser for ScheduledTaskParser {
                     .and_then(|m| m.modified())
                     .map(OffsetDateTime::from)
                     .ok()
-            })
-            .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+            });
+        let (reg_date, reg_kind) = fx_core::time_or_undated(reg_date, TimestampKind::Created);
 
         // Summarize the trigger types present (LogonTrigger, BootTrigger,
         // CalendarTrigger, etc.) — the "when does this run" that matters for
@@ -120,11 +120,17 @@ impl Parser for ScheduledTaskParser {
         let message = format!(
             "Scheduled task '{}' runs {} (as {}{}){}",
             task_name,
-            full_command.clone().unwrap_or_else(|| "<no exec action>".into()),
+            full_command
+                .clone()
+                .unwrap_or_else(|| "<no exec action>".into()),
             user_id.clone().unwrap_or_else(|| "?".into()),
             run_level
                 .as_deref()
-                .map(|r| if r.eq_ignore_ascii_case("HighestAvailable") { ", elevated" } else { "" })
+                .map(|r| if r.eq_ignore_ascii_case("HighestAvailable") {
+                    ", elevated"
+                } else {
+                    ""
+                })
                 .unwrap_or(""),
             if triggers.is_empty() {
                 String::new()
@@ -136,7 +142,7 @@ impl Parser for ScheduledTaskParser {
         sink.emit(Event {
             id: Uuid::new_v4(),
             timestamp: reg_date,
-            timestamp_kind: TimestampKind::Created,
+            timestamp_kind: reg_kind,
             artefact: ArtefactKind::ScheduledTask,
             action: "persistence.scheduled_task".into(),
             host: None,

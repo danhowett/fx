@@ -274,6 +274,7 @@ function wireCaseButtons() {
   const openBtn = el("openCaseBtn");
   if (newBtn) newBtn.addEventListener("click", onNewCase);
   if (openBtn) openBtn.addEventListener("click", onOpenCase);
+  wireColumnHeaders();
   const addHostBtn = el("addHostBtn");
   if (addHostBtn) addHostBtn.addEventListener("click", onAddHost);
   wireHostMenu();
@@ -763,9 +764,12 @@ function renderRail() {
   const artefactFacets = o.by_artefact
     .map((r) => facetRow("artefact", r.label, r.count, catColorForArtefact(r.label)))
     .join("");
+  const catCount = Object.fromEntries((o.by_category || []).map((r) => [r.label, r.count]));
   const catFacets = CATEGORIES
-    .map(([key, label, color]) => facetRow("category", label, "", color, key))
+    .map(([key, label, color]) => facetRow("category", label, catCount[key] != null ? catCount[key] : "", color, key))
     .join("");
+  const ingTotal = (o.ingest || []).reduce((a, r) => a + r.count, 0);
+  const ingFailed = ((o.ingest || []).find((r) => r.label === "failed") || {}).count || 0;
   const talkers = renderTalkers(o.srum_top_talkers);
 
   el("rail").innerHTML = `
@@ -773,32 +777,30 @@ function renderRail() {
       <div class="metric"><span class="big">${fmt(o.total_events)}</span><span class="lbl">events</span></div>
     </section>
     ${renderFindings()}
-    <section class="actlink ${state.view === "activity" ? "active" : ""}" id="activityLink">
-      <div class="facet" style="cursor:pointer"><span class="name" style="color:var(--focus)">${state.view === "activity" ? "▾ activity graph" : "▸ activity graph"}</span></div>
-      <div class="actlink-sub">events per day · spot untagged spikes</div>
-    </section>
+    ${renderActivityCard()}
     ${multiHost() ? renderHostsSection() : renderHostSection()}
     ${renderTriageSummary()}
     ${renderLabelSummary()}
     <section>
-      <h2>Category</h2>
+      <h2>Artefact</h2>
       <div class="facet allev ${allEventsActive() ? "active" : ""}" id="allEventsLink" title="Show the whole timeline with every filter cleared">
         <span class="swatch" style="background:var(--ink-faint)"></span><span class="name">All events</span><span class="count">${fmt(o.total_events)}</span>
       </div>
-      ${catFacets}
+      ${artefactFacets}
     </section>
     <section>
-      <h2>Artefact</h2>
-      ${artefactFacets}
+      <h2>Category</h2>
+      ${catFacets}
     </section>
     <section>
       <h2>Network volume · top talkers</h2>
       ${talkers}
     </section>
     <section>
-      <h2>Ingest</h2>
-      ${o.ingest.map((r) => `<div class="facet"><span class="name">${r.label}</span><span class="count">${r.count}</span></div>`).join("")}
-      <div class="facet" id="ingestLogLink" style="cursor:pointer;color:var(--focus);margin-top:6px"><span class="name" style="color:var(--focus)">▸ view ingest log</span></div>
+      <div class="facet ingest-link ${state.view === "ingestlog" ? "active" : ""}" id="ingestLogLink" title="Every file ingested: parsed, duplicate, unsupported or failed">
+        <span class="name">${state.view === "ingestlog" ? "▾" : "▸"} Ingest log</span>
+        <span class="count">${fmt(ingTotal)} file${ingTotal === 1 ? "" : "s"}${ingFailed ? ` · <b class="ing-fail">${fmt(ingFailed)} failed</b>` : ""}</span>
+      </div>
     </section>`;
 }
 
@@ -832,7 +834,7 @@ function renderLabelSummary() {
   const c = labelCounts();
   const tags = Object.keys(c).sort((a, b) => c[b] - c[a] || a.localeCompare(b));
   if (!tags.length) return "";
-  const active = state.idFilter && state.idFilter.kind === "tag" ? state.idFilter.label : null;
+  const active = state.filter.label || null;
   return `<section><h2>Tags</h2>${tags.map((t) => `<div class="tri-sum lbl-sum ${active === t ? "active" : ""}" data-label="${escapeHtml(t)}">
       <span class="dot lbl-dot"></span><span class="lbl">${escapeHtml(t)}</span><span class="cnt">${fmt(c[t])}</span></div>`).join("")}</section>`;
 }
@@ -888,6 +890,35 @@ function renderFindings() {
   </section>`;
 }
 
+// Activity card: same shape as the Findings card. Headline is the number of
+// days whose volume stands out from the baseline (the graph's spike rule).
+function renderActivityCard() {
+  const inAct = state.view === "activity";
+  const days = state.days;
+  let head = `<span class="fc-count">…</span><span class="fc-lbl">loading activity</span>`, sub = "", spikes = 0;
+  if (days && days.length) {
+    const totals = days.map((d) => d.total);
+    const thresh = anomalyThreshold(totals), med = Math.round(medianOf(totals));
+    spikes = days.filter((d) => d.total >= thresh && d.total > med).length;
+    head = `<span class="fc-count">${fmt(spikes)}</span><span class="fc-lbl">volume spike${spikes === 1 ? "" : "s"}</span>`;
+    sub = `<b>${fmt(days.length)}</b> day${days.length === 1 ? "" : "s"} with events · ~${fmt(med)}/day baseline`;
+  } else if (days) {
+    head = `<span class="fc-count">0</span><span class="fc-lbl">days with events</span>`;
+  }
+  return `<section class="findings actcard ${inAct ? "active" : ""}" id="activityLink">
+    <h2>Activity</h2>
+    <div class="findings-card ${spikes ? "spiky" : "calm"}" title="${inAct ? "Back to the timeline" : "Open the events-per-day graph"}">
+      <div>${head}</div>
+      ${sub ? `<div class="fc-tri">${sub}</div>` : ""}
+      <button class="findings-cta" type="button"><span>${inAct ? "Back to timeline" : "Activity graph"}</span><span class="arrow">${inAct ? "←" : "→"}</span></button>
+    </div>
+  </section>`;
+}
+function refreshActivityCard() {
+  const cur = el("activityLink");
+  if (cur) cur.outerHTML = renderActivityCard();
+}
+
 function renderTalkers(talkers) {
   if (!talkers || !talkers.length) return `<div class="facet"><span class="name">no SRUM data</span></div>`;
   const max = Math.max(...talkers.map((t) => t.bytes_sent), 1);
@@ -895,7 +926,7 @@ function renderTalkers(talkers) {
     .map((t) => {
       const pct = Math.max(2, Math.round((t.bytes_sent / max) * 100));
       return `<div class="talker">
-        <div class="row"><span class="app">${escapeHtml(t.app)}</span><span class="amt">${humanBytes(t.bytes_sent)}↑</span></div>
+        <div class="row"><span class="tk-app">${escapeHtml(t.app)}</span><span class="amt">${humanBytes(t.bytes_sent)}↑</span></div>
         <div class="bar"><i style="width:${pct}%"></i></div>
       </div>`;
     })
@@ -910,15 +941,16 @@ function renderToolbar() {
   // them in the finding / ingest-log / activity views.
   const inHunt = state.view !== "timeline";
   el("toolbar").innerHTML = `
-    <span class="chip ${tr.flagged_only ? "on" : ""}" id="flagChip" ${inHunt ? "style=display:none" : ""} title="Only events behind a finding (built-in rules, Sigma, IOC hunt) or triaged as validated / unconfirmed — the red in the mini timeline">⚑ Findings only</span>
-    <span class="time-range" ${inHunt ? "style=display:none" : ""}>
+    <span class="chip ${tr.flagged_only ? "on" : ""}" id="flagChip" ${inHunt ? "hidden" : ""} title="Only events behind a finding (built-in rules, Sigma, IOC hunt) or triaged as validated / unconfirmed — the red in the mini timeline">⚑ Findings only</span>
+    <span class="time-range" ${inHunt ? "hidden" : ""}>
       <span class="tr-label">from</span>
       <input type="datetime-local" id="trFrom" value="${toLocalInput(tr.after)}" step="1">
       <span class="tr-label">to</span>
       <input type="datetime-local" id="trTo" value="${toLocalInput(tr.before)}" step="1">
       ${hasRange ? `<span class="chip" id="trClear">clear range ✕</span>` : ""}
     </span>
-    ${activeFilterChips()}
+    ${inHunt ? "" : activeFilterChips()}
+    ${!inHunt && (tr.triage || tr.label) ? `<button class="tb-btn" id="copyTriBtn" title="Copy these events as a table (time, host, kind, artefact, user, event, triage, tags, note), to paste into a report or ticket">Copy as table</button>` : ""}
     ${!inHunt && !allEventsActive() ? `<button class="clear-all" id="clearAllBtn" title="Clear search, category, artefact, triage, flagged and date filters">Clear all filters</button>` : ""}
     <span class="spacer"></span>
     <span class="result-count" id="resultCount"></span>`;
@@ -927,6 +959,8 @@ function renderToolbar() {
   const from = el("trFrom"), to = el("trTo");
   if (from) from.addEventListener("change", () => { state.filter.after = fromLocalInput(from.value); state.filter.offset = 0; renderToolbar(); refresh(); });
   if (to) to.addEventListener("change", () => { state.filter.before = fromLocalInput(to.value); state.filter.offset = 0; renderToolbar(); refresh(); });
+  const cp = el("copyTriBtn");
+  if (cp) cp.addEventListener("click", copyRowsAsTable);
   const ca = el("clearAllBtn");
   if (ca) ca.addEventListener("click", clearAllFilters);
   const clr = el("trClear");
@@ -1113,6 +1147,124 @@ function osLine(os) {
 // collapsed (hostname, then OS · time zone), expandable to the key facts, with
 // a link to the full Host view. Labelled so it's clear this is the machine the
 // evidence came from.
+
+// Copy the loaded rows (e.g. the validated timeline) as tab-separated text:
+// pastes straight into Excel, Word or a ticket as a table.
+async function copyRowsAsTable() {
+  const rows = state.rows || [];
+  if (!rows.length) { toast("Nothing to copy"); return; }
+  const clean = (v) => String(v == null ? "" : v).replace(/[\t\r\n]+/g, " ").trim();
+  const head = ["Time (UTC)", "Host", "Kind", "Artefact", "User", "Event", "Triage", "Tags", "Note"];
+  const lines = [head.join("\t")].concat(rows.map((e) => [
+    e.ts ? time(e.ts) : "no timestamp", e.host, kindLabel(e.ts_kind), e.artefact, e.user, e.message,
+    TRI_NAME[triageStateFor(e.id)] || "", labelsFor(e.id).join(", "), triageNoteFor(e.id),
+  ].map(clean).join("\t")));
+  try {
+    await navigator.clipboard.writeText(lines.join("\n"));
+    toast(`Copied ${fmt(rows.length)} event${rows.length === 1 ? "" : "s"} as a table${state.total > rows.length ? ` (this page of ${fmt(state.total)})` : ""}`);
+  } catch (err) { alert("Couldn't copy to the clipboard:\n" + (err && err.message ? err.message : err)); }
+}
+
+// ── Column-header filters ────────────────────────────────────────────────────
+// Host, Kind, Artefact and User headers open a menu of that column's values
+// (with counts, under the current filter). Time and Event aren't offered:
+// one has its own range picker, the other has far too many values.
+
+const COL_FILTER = { kind: "kind", artefact: "artefact", user: "user", triage: "triage" };
+const TRI_NAME = { validated: "Validated", unconfirmed: "Unconfirmed", false_positive: "False positive", dismissed: "Dismissed" };
+function syncColumnHeaders() {
+  document.querySelectorAll(".grid-head .colf").forEach((b) => {
+    const c = b.dataset.col;
+    const on = c === "host" ? !!state.hostSel : c === "triage" ? !!(state.filter.triage || state.filter.label) : !!state.filter[COL_FILTER[c]];
+    b.classList.toggle("on", on);
+    const v = c === "host" ? state.hostSel : c === "triage" ? [TRI_NAME[state.filter.triage], state.filter.label].filter(Boolean).join(" + ") : state.filter[COL_FILTER[c]];
+    b.title = on ? `Filtered to ${v}. Click to change.` : `Filter by ${b.textContent.trim().toLowerCase()}`;
+  });
+}
+function closeColumnMenu() { const m = el("colMenu"); if (m) m.remove(); }
+// The Triage header's menu: triage states and the case's tags, each with
+// counts; one of each can be combined (e.g. Validated + "lateral-movement").
+async function openTriageMenu(btn) {
+  const m = document.createElement("div");
+  m.className = "colmenu"; m.id = "colMenu"; m.setAttribute("role", "menu");
+  const r = btn.getBoundingClientRect();
+  m.style.left = Math.min(r.left, window.innerWidth - 350) + "px";
+  m.style.top = r.bottom + 4 + "px";
+  m.innerHTML = `<div class="cm-note">Loading…</div>`;
+  document.body.appendChild(m);
+  const f = { ...state.filter }; delete f.limit; delete f.offset;
+  let tri = [], lbl = [];
+  try { [tri, lbl] = await Promise.all([backend.columnValues(f, "triage"), backend.columnValues(f, "label")]); } catch (e) {}
+  tri = tri || []; lbl = lbl || [];
+  if (!el("colMenu")) return;
+  const item = (k, v, label, n) => `<button class="cm-item ${state.filter[k] === v ? "on" : ""}" data-k="${k}" data-v="${escapeHtml(v)}"><span class="cm-v" title="${escapeHtml(label)}">${escapeHtml(label)}</span><span class="cm-n">${fmt(n)}</span></button>`;
+  const order = ["validated", "unconfirmed", "false_positive", "dismissed"];
+  tri.sort((a, b) => order.indexOf(a.label) - order.indexOf(b.label));
+  m.innerHTML =
+    `<button class="cm-item ${state.filter.triage || state.filter.label ? "" : "on"}" data-k="" data-v=""><span class="cm-v">All</span></button>` +
+    `<div class="cm-sec">Triage</div>` +
+    (tri.length ? tri.map((v) => item("triage", v.label, TRI_NAME[v.label] || v.label, v.count)).join("") : `<div class="cm-note">Nothing triaged${state.filter.label ? " with this tag" : ""} yet.</div>`) +
+    `<div class="cm-sec">Tags</div>` +
+    (lbl.length ? lbl.map((v) => item("label", v.label, v.label, v.count)).join("") : `<div class="cm-note">No tags yet. Right-click an event to add one.</div>`);
+  m.onclick = (e) => {
+    const it = e.target.closest(".cm-item"); if (!it) return;
+    const k = it.dataset.k, v = it.dataset.v || null;
+    closeColumnMenu();
+    if (!k) { state.filter.triage = null; state.filter.label = null; }
+    else state.filter[k] = state.filter[k] === v ? null : v;
+    state.idFilter = null; state.filter.offset = 0;
+    closeDetail(); renderRail(); renderToolbar(); refresh();
+  };
+}
+
+async function openColumnMenu(btn) {
+  closeColumnMenu();
+  const col = btn.dataset.col;
+  if (col === "triage") { await openTriageMenu(btn); return; }
+  const cur = col === "host" ? state.hostSel : state.filter[COL_FILTER[col]];
+  const m = document.createElement("div");
+  m.className = "colmenu"; m.id = "colMenu"; m.setAttribute("role", "menu");
+  const r = btn.getBoundingClientRect();
+  m.style.left = Math.min(r.left, window.innerWidth - 350) + "px";
+  m.style.top = r.bottom + 4 + "px";
+  m.innerHTML = `<div class="cm-note">Loading…</div>`;
+  document.body.appendChild(m);
+  let vals = [];
+  try {
+    const f = { ...state.filter }; delete f.limit; delete f.offset;
+    vals = (await backend.columnValues(f, col)) || [];
+  } catch (e) { vals = []; }
+  if (!el("colMenu")) return;
+  const draw = (q) => {
+    const shown = q ? vals.filter((v) => v.label.toLowerCase().includes(q)) : vals;
+    m.querySelector(".cm-list").innerHTML =
+      `<button class="cm-item ${cur ? "" : "on"}" data-v=""><span class="cm-v">All</span></button>` +
+      shown.slice(0, 200).map((v) => `<button class="cm-item ${cur === v.label ? "on" : ""}" data-v="${escapeHtml(v.label)}"><span class="cm-v" title="${escapeHtml(v.label)}">${escapeHtml(col === "kind" ? kindLabel(v.label) : col === "triage" ? TRI_NAME[v.label] || v.label : v.label)}</span><span class="cm-n">${fmt(v.count)}</span></button>`).join("") +
+      (shown.length > 200 ? `<div class="cm-note">${fmt(shown.length - 200)} more: type to narrow</div>` : "") +
+      (!shown.length ? `<div class="cm-note">No values${q ? " match" : " for the current filter"}.</div>` : "");
+  };
+  m.innerHTML = `${vals.length > 10 ? `<input id="cmSearch" placeholder="Find a value…" spellcheck="false">` : ""}<div class="cm-list"></div>`;
+  draw("");
+  const s = el("cmSearch");
+  if (s) { s.oninput = () => draw(s.value.trim().toLowerCase()); s.focus(); }
+  m.onclick = async (e) => {
+    const it = e.target.closest(".cm-item"); if (!it) return;
+    const v = it.dataset.v || null;
+    closeColumnMenu();
+    if (col === "host") { await selectHost(v); return; }
+    state.filter[COL_FILTER[col]] = v;
+    state.filter.offset = 0;
+    closeDetail(); renderRail(); renderToolbar(); refresh();
+  };
+}
+function wireColumnHeaders() {
+  document.querySelectorAll(".grid-head .colf").forEach((b) => {
+    b.addEventListener("click", (e) => { e.stopPropagation(); if (el("colMenu")) { closeColumnMenu(); return; } openColumnMenu(b); });
+  });
+  document.addEventListener("click", (e) => { if (el("colMenu") && !e.target.closest("#colMenu")) closeColumnMenu(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeColumnMenu(); });
+  window.addEventListener("resize", closeColumnMenu);
+}
 
 // ── Multi-host ───────────────────────────────────────────────────────────────
 // A case can hold several collections (machines). state.hosts lists them;
@@ -1392,7 +1544,7 @@ function clearAllFilters() {
 }
 function allEventsActive() {
   const f = state.filter || {};
-  return state.view === "timeline" && !state.idFilter && !f.ioc && !f.text && !f.category && !f.artefact && !f.triage && !f.flagged_only && !f.after && !f.before;
+  return state.view === "timeline" && !state.idFilter && !f.ioc && !f.text && !f.category && !f.artefact && !f.kind && !f.user && !f.label && !f.triage && !f.flagged_only && !f.after && !f.before;
 }
 
 // A narrow, time-proportional histogram of the whole case above the event
@@ -1408,6 +1560,7 @@ async function renderMiniTimeline() {
         .filter((d) => d && /^\d{4}-\d{2}-\d{2}$/.test(d.day))
         .sort((a, b) => (a.day < b.day ? -1 : 1));
     } catch (e) { state.days = []; }
+    refreshActivityCard();
   }
   if (state.view !== "timeline") return;
   const days = state.days;
@@ -1689,11 +1842,9 @@ function showIocEvents(det, shownAs) {
 
 // Show every event carrying an analyst tag.
 function showTagEvents(tag) {
-  const ids = (state.labels || []).filter((l) => l.tag === tag).map((l) => l.event_id);
-  if (!ids.length) return;
-  state.view = "timeline"; state.huntOnly = null;
-  state.filter = { text: "", category: null, artefact: null, triage: null, flagged_only: false, limit: 5000, offset: 0 };
-  state.idFilter = { kind: "tag", label: tag, ids, key: JSON.stringify(state.filter) };
+  state.view = "timeline"; state.huntOnly = null; state.idFilter = null;
+  const on = state.filter.label === tag;
+  state.filter = { text: "", category: null, artefact: null, triage: null, flagged_only: false, limit: 5000, offset: 0, label: on ? null : tag };
   closeDetail(); renderRail(); renderToolbar(); refresh();
 }
 
@@ -1824,6 +1975,9 @@ function activeFilterChips() {
   if (state.filter.category) chips.push(clearChip("category", state.filter.category));
   if (state.filter.artefact) chips.push(clearChip("artefact", state.filter.artefact));
   if (state.filter.triage) chips.push(`<span class="chip" data-clear="triage">${state.filter.triage.replace("_"," ")} ✕</span>`);
+  if (state.filter.kind) chips.push(`<span class="chip" data-clear="kind">kind: ${escapeHtml(kindLabel(state.filter.kind))} ✕</span>`);
+  if (state.filter.label) chips.push(`<span class="chip" data-clear="label">tag: ${escapeHtml(state.filter.label)} ✕</span>`);
+  if (state.filter.user) chips.push(`<span class="chip" data-clear="user">user: ${escapeHtml(state.filter.user)} ✕</span>`);
   return chips.join("");
 }
 function clearChip(kind, value) {
@@ -1833,6 +1987,7 @@ function clearChip(kind, value) {
 // ── Timeline (virtualized) ───────────────────────────────────────────────────
 async function refresh() {
   el("app").dataset.view = state.view;
+  syncColumnHeaders();
   renderHostChip();
   const ib = el("iocBtn"); if (ib) ib.classList.toggle("active", state.view === "ioc");
   const db = el("decodeBtn"); if (db) db.classList.toggle("active", state.view === "decode");
@@ -1889,23 +2044,15 @@ async function refresh() {
     requestAnimationFrame(() => requestAnimationFrame(calibrateRowHeight));
     return;
   }
+  // The triage filter runs in SQL over the whole case (like every other
+  // filter), so a validated event millions of rows in is still found.
   state.rows = await backend.queryTimeline({ ...state.filter });
-  // Client-side triage filter (the triage state lives in state.triage). Triage
-  // sets are small, so this stays a page-local filter and paging is suppressed
-  // while a triage filter is active.
-  const triageActive = !!state.filter.triage;
-  if (triageActive) {
-    const ids = new Set((state.triage || []).filter((t) => t.triage_state === state.filter.triage).map((t) => t.event_id));
-    state.rows = state.rows.filter((r) => ids.has(r.id));
-  }
 
   // Total matches across the whole case (SQL COUNT), for the "N–M of TOTAL"
-  // indicator and Next/Prev. Skipped under a triage filter (page-local).
+  // indicator and Next/Prev.
   state.total = null;
-  if (!triageActive) {
-    try { state.total = await backend.countTimeline({ ...state.filter }); } catch (e) { state.total = null; }
-  }
-  renderResultCount(triageActive);
+  try { state.total = await backend.countTimeline({ ...state.filter }); } catch (e) { state.total = null; }
+  renderResultCount(false);
   renderIocBar();
   renderStatus();
   renderWindow();
@@ -2298,6 +2445,7 @@ function attackTactics(id) { const a = ATTACK[id]; return a ? a[1] : ""; }
 
 function renderDecodeView() {
   const d = state.decode || { input: "", source: null, result: null };
+  if (el("flagChip") && !el("flagChip").hidden) renderToolbar();
   el("resultCount").innerHTML = `Decode · offline PowerShell / command-line analysis${d.source ? ` <button class="linkbtn" id="decBack">Back to event</button>` : ""}`;
   el("spTop").style.height = "0px"; el("spBot").style.height = "0px";
   const r = d.result;
@@ -2313,7 +2461,7 @@ function renderDecodeView() {
       <p class="iocv-sub">Paste a PowerShell command, script block or command line. fx peels obfuscation (Base64 / UTF-16, Gzip / Deflate, backticks, reversed strings, -f format strings, char codes), explains each part and flags known techniques. Nothing leaves this machine and nothing is executed.</p>
       ${d.source ? `<div class="dec-src">From event <b>${esc(d.source.label)}</b>${d.source.action ? ` · <span class="mono">${esc(d.source.action)}</span>` : ""}</div>` : ""}
       <textarea id="decInput" class="dec-input" spellcheck="false" placeholder="powershell -nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkA...">${esc(d.input || "")}</textarea>
-      <div class="iocv-actions"><span class="iocv-drop">${r && r.truncated ? "Input over 200,000 characters was truncated." : ""}</span><button class="btn-primary" id="decGo">${d.busy ? "Analysing…" : "Analyse"}</button></div>
+      <div class="iocv-actions"><span class="iocv-drop">${r && r.truncated ? "Input over 200,000 characters was truncated." : ""}</span><button class="topbtn" id="decClear" title="Clear the text and the result"${d.input || r ? "" : " disabled"}>Clear</button><button class="btn-primary" id="decGo">${d.busy ? "Analysing…" : "Analyse"}</button></div>
     </div>
     <div class="decv-right">${d.error ? `<div class="iocv-empty"><h3>Couldn't analyse that</h3><p>${esc(d.error)}</p></div>` : !r ? `<div class="iocv-empty"><h3>${d.busy ? "Analysing…" : "Nothing analysed yet"}</h3><p>Paste text on the left, or use <b>Decode command</b> on any event (detail panel or right-click).</p></div>` : `
       <div class="dec-verdict sev-border-${esc(r.vsev === "ok" ? "low" : r.vsev)}">
@@ -2342,6 +2490,12 @@ function renderDecodeView() {
     `}</div>
   </div>`;
   el("decGo").onclick = runDecode;
+  el("decClear").onclick = () => {
+    state.decode = { input: "", source: null, sourceText: "", result: null, busy: false };
+    renderDecodeView();
+    if (el("decInput")) el("decInput").focus();
+  };
+  el("decInput").oninput = () => { const c = el("decClear"); if (c) c.disabled = !el("decInput").value && !d.result; };
   el("decInput").onkeydown = (ev) => { if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") runDecode(); };
   if (el("decBack")) el("decBack").onclick = () => { const id = d.source && d.source.id; state.view = "timeline"; renderRail(); renderToolbar(); refresh().then(() => { if (id && state.rows.find((x) => x.id === id)) select(id); }); };
   if (el("decCopy")) el("decCopy").onclick = () => navigator.clipboard.writeText(r.final).then(() => toast("Decoded command copied")).catch(() => {});
@@ -2495,18 +2649,20 @@ function rowHtml(e) {
   const flagged = e.flagged ? "flagged" : "";
   const pill = e.flagged ? `<span class="flag-pill">${tagLabel(e)}</span>` : "";
   const tri = triageStateFor(e.id);
-  const triBadge = tri ? `<span class="tri-badge ${tri}">${tri.replace("_"," ").slice(0,4)}</span>` : "";
+  const TRI_SHORT = { validated: "VAL", unconfirmed: "UNC", false_positive: "FP", dismissed: "DIS" };
+  const triTag = tri ? `<span class="tri-tag ${tri}" title="${escapeHtml(tri.replace("_", " "))}">${TRI_SHORT[tri] || ""}</span>` : "";
   // Full message + full UK timestamp on hover, so a truncated row is readable
   // without opening the detail pane.
   const tip = `${time(e.ts)} · ${multiHost() && e.host ? e.host + " · " : ""}${e.artefact}${e.user ? " · " + e.user : ""}\n${e.message || ""}`;
   return `<div class="evrow ${sel} ${flagged}" data-id="${e.id}" title="${escapeHtml(tip)}">
     <span class="cat-tick" style="background:${color}"></span>
+    <span class="c tri">${triTag}</span>
     <span class="c ts">${time(e.ts)}</span>
     ${hostCol() ? `<span class="c host"><span class="hdot ${hostClass(e.host)}"></span>${escapeHtml(e.host || "—")}</span>` : ""}
-    <span class="c kind">${e.ts_kind}</span>
+    <span class="c kind" title="${escapeHtml(KIND_TIP[String(e.ts_kind || "").toLowerCase()] || "")}">${escapeHtml(kindLabel(e.ts_kind))}</span>
     <span class="c art" style="color:${color}">${e.artefact}</span>
     <span class="c user">${e.user ? escapeHtml(e.user) : "—"}</span>
-    <span class="c msg">${triBadge}${labelChips(e.id)}${pill}${escapeHtml(e.message)}</span>
+    <span class="c msg">${labelChips(e.id)}${pill}${escapeHtml(e.message)}</span>
   </div>`;
 }
 
@@ -2542,7 +2698,7 @@ async function select(id) {
       <div class="dh-top">
         <div class="dh-title">
           <div class="action">${escapeHtml(e.action)}</div>
-          <div class="when">${time(e.ts)} · ${escapeHtml(e.ts_kind)}</div>
+          <div class="when">${time(e.ts)} · ${escapeHtml(kindLabel(e.ts_kind))}</div>
         </div>
         ${state.view === "hunt" && state.detailFinding ? (() => { const f = state.detailFinding, n = (f.event_ids || []).length;
           const lbl = f.engine === "ioc" ? "Show all matches" : n > 1 ? `Show all ${fmt(n)} events` : "Show in timeline";
@@ -2562,17 +2718,18 @@ async function select(id) {
         </div>
         <div class="seg pivot" role="group" aria-label="Pivot">
           <span class="seg-lbl">Pivot</span>
-          <button class="pv-btn" data-pivot="60">±1m</button><button class="pv-btn" data-pivot="300">±5m</button><button class="pv-btn" data-pivot="1800">±30m</button><button class="pv-btn" data-pivot="3600">±1h</button>
+          ${["60:±1m", "300:±5m", "1800:±30m", "3600:±1h"].map((x) => { const [s, l] = x.split(":"); return `<button class="pv-btn" data-pivot="${s}"${e.ts ? "" : ` disabled title="No timestamp to pivot around"`}>${l}</button>`; }).join("")}
+        </div>
+        <div class="seg dtags" role="group" aria-label="Tags and note">
+          ${labelsFor(id).map((t) => `<span class="lbl-chip big">${escapeHtml(t)}<button class="x" data-untag="${escapeHtml(t)}" title="Remove tag">×</button></span>`).join("")}
+          <button class="add-tag" id="detAddTag" title="Add one of your tags, or type a new one">+ Tag</button>
+          <button class="add-tag" id="detNoteBtn"${note ? " hidden" : ""} title="Add an analyst note (saved with the triage state)">+ Note</button>
         </div>
       </div>
-      <div class="dtags">
-        ${labelsFor(id).map((t) => `<span class="lbl-chip big">${escapeHtml(t)}<button class="x" data-untag="${escapeHtml(t)}" title="Remove tag">×</button></span>`).join("")}
-        <button class="add-tag" id="detAddTag">+ Tag</button>
-        <button class="add-tag" id="detNoteBtn"${note ? " hidden" : ""}>+ Note</button>
-      </div>
-      <textarea id="triNote" class="tri-note"${note ? "" : " hidden"} placeholder="Analyst note — saved with the triage state">${escapeHtml(note)}</textarea>
+      <textarea id="triNote" class="tri-note" rows="1"${note ? "" : " hidden"} placeholder="Analyst note — saved with the triage state">${escapeHtml(note)}</textarea>
     </div>
     <div class="dmsg" id="detMsg">${escapeHtml(e.message)}</div>
+    ${macbBlock(e, raw)}
     <div class="draw">
       <div class="draw-bar">
         <span class="draw-h">Raw record</span>
@@ -2819,6 +2976,8 @@ function flagReason(e) {
     return "A Windows system-binary name recorded at a non-System32 path — classic masquerading (T1036.005).";
   if (m.includes("STAGING") || tag === "STAGING")
     return "File in a common staging directory (Temp / Downloads / Public / ProgramData) — a favoured drop location for tooling before use (T1204).";
+  if (e.action === "file.timestomp_suspected")
+    return "The $SI creation time predates the $FN creation time: $SI times are easy to set, $FN times are written by the file system, so the file may have been backdated (T1070.006). Compare both sets of times below.";
   if (m.includes("ANTI-FORENSIC") || tag === "ANTI-FORENSIC")
     return "Rename/delete pattern consistent with ransomware encryption or secure-deletion tooling — an anti-forensic signal worth correlating across the surrounding minutes.";
   if (tag === "LEAKSITE")
@@ -3085,7 +3244,7 @@ function wireEvents() {
 // UTC value ("YYYY-MM-DDTHH:MM:SS" or "...Z"); storage/sorting/filtering all
 // stay ISO — only the display changes. All times are UTC.
 function time(iso) {
-  if (!iso) return "";
+  if (!iso) return "no timestamp"; // the artefact gave no time: never invent one
   const s = displayIso(iso);
   const [datePart, timePart = ""] = s.split("T");
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(datePart);
@@ -3101,6 +3260,42 @@ function ukDateTime(ts) {
   const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/.exec(displayIso(ts));
   return m ? `${m[3]}/${m[2]}/${m[1]} ${m[4]}:${m[5]}` : String(ts || "");
 }
+// $MFT entries: all eight times ($SI and $FN M / A / C / B) side by side,
+// with this row's time highlighted, so a file's MACB story (and any $SI / $FN
+// mismatch) reads without opening the JSON. Times are UTC as recorded.
+function macbBlock(e, raw) {
+  if (!e || e.artefact !== "Mft" || !raw) return "";
+  let r; try { r = typeof raw === "string" ? JSON.parse(raw) : raw; } catch (err) { return ""; }
+  if (!r || !r.si) return "";
+  const f = r.fn || {};
+  const fmtT = (s) => {
+    if (!s) return "—";
+    const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{1,2}):(\d{2}):(\d{2})(\.\d+)?/.exec(String(s));
+    if (!m) return escapeHtml(String(s));
+    const frac = m[7] && !/^\.0+$/.test(m[7]) ? `<span class="macb-frac">${m[7].slice(0, 8)}</span>` : "";
+    return `${m[3]}/${m[2]}/${m[1]} ${m[4].padStart(2, "0")}:${m[5]}:${m[6]}${frac}`;
+  };
+  const cur = { modified: "modified", accessed: "accessed", metadatachanged: "changed", created: "born" }[String(e.ts_kind || "").toLowerCase()];
+  const rows = [["M", "Modified", "modified"], ["A", "Accessed", "accessed"], ["C", "Entry changed", "changed"], ["B", "Born", "born"]]
+    .map(([l, name, k]) => `<tr class="${k === cur && e.action !== "file.timestomp_suspected" ? "on" : ""}"><th title="${name}">${l}</th><td>${fmtT(r.si[k])}</td><td>${fmtT(f[k])}</td></tr>`).join("");
+  const bornMismatch = r.si.born && f.born && String(r.si.born) < String(f.born) && !/^1985-10-26 2:15:00/.test(String(r.si.born));
+  return `<div class="macb">
+    <table><thead><tr><th></th><th title="$STANDARD_INFORMATION: what Explorer shows; easy for tools to change">$SI</th><th title="$FILE_NAME: written by the file system; hard to change">$FN</th></tr></thead><tbody>${rows}</tbody></table>
+    ${r.fn ? "" : `<div class="macb-note">$FN times aren't in this case: re-ingest with this version to add them.</div>`}
+    ${bornMismatch ? `<div class="macb-note warn">$SI Born is earlier than $FN Born: possible timestomping.</div>` : ""}
+  </div>`;
+}
+
+// Timestamp kinds as analysts say them: MACB letters for the file-system four.
+const KIND_LABEL = {
+  modified: "M · Modified", accessed: "A · Accessed", metadatachanged: "C · Changed", created: "B · Born",
+  executed: "Executed", logged: "Logged", logon: "Logon", recorded: "Recorded", undated: "Undated",
+};
+const KIND_TIP = {
+  modified: "M: content last modified", accessed: "A: last accessed", metadatachanged: "C: file-system entry ($MFT record) last changed",
+  created: "B: born (created)", undated: "The artefact recorded no time for this event",
+};
+function kindLabel(k) { const v = KIND_LABEL[String(k || "").toLowerCase()]; return v || String(k || ""); }
 function short(id) { return (id || "").slice(0, 8); }
 function fmt(n) { return (n ?? 0).toLocaleString("en-GB"); }
 function humanBytes(n) {
@@ -3109,9 +3304,12 @@ function humanBytes(n) {
   return i === 0 ? `${n} B` : `${v.toFixed(1)} ${u[i]}`;
 }
 function catColorForArtefact(art) {
+  // Same buckets as the Category filter; anything else is "other" (grey).
   const map = { Prefetch:"execution", UserAssist:"execution", Amcache:"execution", BamDam:"execution", Pca:"execution",
-    RegistryRun:"persistence", RegistryService:"persistence",
-    Mft:"filesystem", UsnJrnl:"filesystem", Srum:"network", RegistryGeneric:"network", Evtx:"logon" };
+    PsHistory:"execution", WindowsTimeline:"execution",
+    RegistryRun:"persistence", RegistryService:"persistence", ScheduledTask:"persistence",
+    Mft:"filesystem", UsnJrnl:"filesystem", Lnk:"filesystem", JumpList:"filesystem", ShellBags:"filesystem", Recycle:"filesystem",
+    Srum:"network", RegistryGeneric:"network", BrowserHistory:"network", RemoteAccess:"network", Evtx:"logon" };
   return CAT_COLOR[map[art]] || "var(--cat-other)";
 }
 function escapeHtml(s) {

@@ -454,7 +454,7 @@ impl CaseStore {
         let tags = self.triage_map()?; // (event_id, state, note)
         let mut out = Vec::with_capacity(tags.len());
         let mut stmt = self.conn.prepare(
-            "SELECT strftime(ts, '%Y-%m-%dT%H:%M:%S'), host, action, artefact, message
+            "SELECT COALESCE(strftime(ts, '%Y-%m-%dT%H:%M:%S'), ''), host, action, artefact, message
              FROM events WHERE id = ?",
         )?;
         for (event_id, state, note) in tags {
@@ -583,7 +583,9 @@ impl EventWriter<'_> {
             let net = ev.network.unwrap_or_default();
             appender.append_row(params![
                 ev.id.to_string(),
-                fmt_ts(ev.timestamp),
+                // An undated event stores no time at all (never a placeholder).
+                (ev.timestamp_kind != fx_core::TimestampKind::Undated)
+                    .then(|| fmt_ts(ev.timestamp)),
                 format!("{:?}", ev.timestamp_kind),
                 format!("{:?}", ev.artefact),
                 ev.action,

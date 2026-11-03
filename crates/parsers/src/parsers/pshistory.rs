@@ -55,10 +55,13 @@ impl Parser for PsHistoryParser {
         })?;
 
         // The file has no per-line timestamps; use its mtime as the event time.
-        let ts = std::fs::metadata(&artefact.path)
-            .and_then(|m| m.modified())
-            .map(OffsetDateTime::from)
-            .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+        let (ts, ts_kind) = fx_core::time_or_undated(
+            std::fs::metadata(&artefact.path)
+                .and_then(|m| m.modified())
+                .map(OffsetDateTime::from)
+                .ok(),
+            TimestampKind::Recorded, // file mtime, not exact exec time
+        );
 
         // Try to derive the owning user from the path (…\Users\<name>\AppData…).
         let user = extract_user_from_path(&artefact.source_path);
@@ -73,7 +76,7 @@ impl Parser for PsHistoryParser {
             sink.emit(Event {
                 id: Uuid::new_v4(),
                 timestamp: ts,
-                timestamp_kind: TimestampKind::Recorded, // file mtime, not exact exec time
+                timestamp_kind: ts_kind,
                 artefact: ArtefactKind::PsHistory,
                 action: "execution.powershell_history".into(),
                 host: None,

@@ -20,10 +20,7 @@ use fx_core::{
     ArtefactKind, Event, EventSink, IdentifiedArtefact, ParseError, ParseOutcome, Parser,
     Principal, Provenance, Target, TimestampKind,
 };
-use notatin::{
-    cell_key_node::CellKeyNode,
-    parser_builder::ParserBuilder,
-};
+use notatin::{cell_key_node::CellKeyNode, parser_builder::ParserBuilder};
 use serde_json::json;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -136,6 +133,12 @@ pub(crate) fn make_event(
     message: String,
     raw: serde_json::Value,
 ) -> Event {
+    // No key / value time: undated rather than a made-up 1970 date.
+    let ts_kind = if ts == fx_core::UNDATED {
+        TimestampKind::Undated
+    } else {
+        ts_kind
+    };
     Event {
         id: Uuid::new_v4(),
         timestamp: ts,
@@ -160,11 +163,11 @@ pub(crate) fn make_event(
 
 /// Extract a key's LastWrite time. In notatin 1.x this is a raw `u64` FILETIME
 /// exposed through the key's `detail` enum; we convert via the shared helper.
-/// Keys with an unset/zero time fall back to the Unix epoch (they'll sort to
-/// the start of the timeline, clearly distinguishable as "no time").
+/// Keys with an unset/zero time get the in-memory placeholder; `make_event`
+/// turns that into an undated event (never a 1970 date).
 fn key_lastwrite(key: &CellKeyNode) -> OffsetDateTime {
     let ft: u64 = key.detail.last_key_written_date_and_time();
-    fx_core::filetime_to_datetime(ft).unwrap_or(OffsetDateTime::UNIX_EPOCH)
+    fx_core::filetime_to_datetime(ft).unwrap_or(fx_core::UNDATED)
 }
 
 /// Find `<hive>.LOG1` / `.LOG2` (case-insensitive) beside the hive file.

@@ -93,6 +93,26 @@ pub enum TimestampKind {
     Logon,
     /// Time asserted by the artefact but of ambiguous kind; see `action`.
     Recorded,
+    /// The artefact gave no time for this record. The event's `timestamp`
+    /// holds [`UNDATED`] only as an in-memory placeholder: the store saves no
+    /// time at all, and nothing shows or exports one. Never a real date.
+    Undated,
+}
+
+/// In-memory placeholder for an event with no time (`TimestampKind::Undated`).
+pub const UNDATED: time::OffsetDateTime = time::OffsetDateTime::UNIX_EPOCH;
+
+/// For parsers whose source can lack a time and that used to fall back to the
+/// Unix epoch: a missing time (`None`) becomes an undated event instead of a
+/// made-up 1970 date. Returns the (placeholder) timestamp and the kind to use.
+pub fn time_or_undated(
+    ts: Option<time::OffsetDateTime>,
+    kind: TimestampKind,
+) -> (time::OffsetDateTime, TimestampKind) {
+    match ts {
+        Some(t) => (t, kind),
+        None => (UNDATED, TimestampKind::Undated),
+    }
 }
 
 /// The artefact family an event originated from. Drives GUI grouping and lets

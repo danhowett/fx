@@ -51,8 +51,7 @@ impl Parser for BrowserHistoryParser {
         let uri = format!("file:{}?immutable=1&mode=ro", artefact.path.display());
         let conn = rusqlite::Connection::open_with_flags(
             &uri,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
         )
         .map_err(|e| ParseError::Malformed(format!("open sqlite: {e}")))?;
 
@@ -129,7 +128,14 @@ fn parse_chromium(
                     let (url, title, ts_raw) = row;
                     let ts = chromium_time(ts_raw);
                     emit_browser(
-                        sink, artefact, outcome, "browser.visit", "visit", &url, &title, ts,
+                        sink,
+                        artefact,
+                        outcome,
+                        "browser.visit",
+                        "visit",
+                        &url,
+                        &title,
+                        ts,
                     );
                 }
             }
@@ -160,8 +166,14 @@ fn parse_chromium(
                 // For a download the "domain" the rules care about is the source
                 // URL's host; the saved file path is the target.
                 emit_browser(
-                    sink, artefact, outcome, "browser.download", "download",
-                    &source_url, &file_path, ts,
+                    sink,
+                    artefact,
+                    outcome,
+                    "browser.download",
+                    "download",
+                    &source_url,
+                    &file_path,
+                    ts,
                 );
             }
         }
@@ -171,11 +183,11 @@ fn parse_chromium(
 /// Chromium time: microseconds since 1601-01-01 UTC. 0 => unknown.
 fn chromium_time(us_since_1601: i64) -> OffsetDateTime {
     if us_since_1601 <= 0 {
-        return OffsetDateTime::UNIX_EPOCH;
+        return fx_core::UNDATED;
     }
     // Convert to 100ns since 1601 then reuse the shared FILETIME helper.
     let filetime_100ns = (us_since_1601 as u64).saturating_mul(10);
-    fx_core::filetime_to_datetime(filetime_100ns).unwrap_or(OffsetDateTime::UNIX_EPOCH)
+    fx_core::filetime_to_datetime(filetime_100ns).unwrap_or(fx_core::UNDATED)
 }
 
 // ── Firefox ─────────────────────────────────────────────────────────────────
@@ -202,7 +214,14 @@ fn parse_firefox(
                     let (url, title, ts_raw) = row;
                     let ts = firefox_time(ts_raw);
                     emit_browser(
-                        sink, artefact, outcome, "browser.visit", "visit", &url, &title, ts,
+                        sink,
+                        artefact,
+                        outcome,
+                        "browser.visit",
+                        "visit",
+                        &url,
+                        &title,
+                        ts,
                     );
                 }
             }
@@ -233,8 +252,14 @@ fn parse_firefox(
                 let (source_url, file_uri, ts_raw) = row;
                 let ts = firefox_time(ts_raw);
                 emit_browser(
-                    sink, artefact, outcome, "browser.download", "download",
-                    &source_url, &file_uri, ts,
+                    sink,
+                    artefact,
+                    outcome,
+                    "browser.download",
+                    "download",
+                    &source_url,
+                    &file_uri,
+                    ts,
                 );
             }
         }
@@ -244,10 +269,10 @@ fn parse_firefox(
 /// Firefox time: microseconds since 1970-01-01 UTC. 0 => unknown.
 fn firefox_time(us_since_1970: i64) -> OffsetDateTime {
     if us_since_1970 <= 0 {
-        return OffsetDateTime::UNIX_EPOCH;
+        return fx_core::UNDATED;
     }
     OffsetDateTime::from_unix_timestamp_nanos((us_since_1970 as i128) * 1000)
-        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .unwrap_or(fx_core::UNDATED)
 }
 
 // ── shared emit ─────────────────────────────────────────────────────────────
@@ -277,7 +302,12 @@ fn emit_browser(
     sink.emit(Event {
         id: Uuid::new_v4(),
         timestamp: ts,
-        timestamp_kind: TimestampKind::Accessed,
+        // A zero / missing visit time is undated, not 1970.
+        timestamp_kind: if ts == fx_core::UNDATED {
+            TimestampKind::Undated
+        } else {
+            TimestampKind::Accessed
+        },
         artefact: ArtefactKind::BrowserHistory,
         action: action.to_string(),
         host: None,
@@ -329,9 +359,15 @@ mod tests {
 
     #[test]
     fn extracts_host() {
-        assert_eq!(url_host("https://cdn.discordapp.com/attachments/x/y.exe"), "cdn.discordapp.com");
+        assert_eq!(
+            url_host("https://cdn.discordapp.com/attachments/x/y.exe"),
+            "cdn.discordapp.com"
+        );
         assert_eq!(url_host("http://user:pass@mega.nz:443/file"), "mega.nz");
-        assert_eq!(url_host("https://console.aws.amazon.com/"), "console.aws.amazon.com");
+        assert_eq!(
+            url_host("https://console.aws.amazon.com/"),
+            "console.aws.amazon.com"
+        );
         assert_eq!(url_host("notaurl"), "notaurl");
     }
 

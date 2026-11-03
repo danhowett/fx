@@ -641,6 +641,17 @@ async function analyze(cmd){
   const hay=norm+"\n"+final;
   const findings=matchRules(hay).concat(correlate(hay)).concat(obfFindings(norm,final)).concat(installerNote(hay));
   const iocs=extractIOCs(hay);
+  // An encoded command whose decoded content matches nothing else is still
+  // worth a look (why encode it?) but shouldn't score like a real attack:
+  // drop the encoding finding to medium and say why.
+  const enc=findings.find(f=>f.id==="ENC-B64CMD");
+  if(enc && layers>0){
+    const other=findings.filter(f=>f!==enc && !/^ENC-|^EXE-NOPROFILE$/.test(f.id) && SEV_WEIGHT[f.sev]>=SEV_WEIGHT.medium);
+    if(!other.length){
+      enc.sev="medium";
+      enc.desc=(enc.desc||"")+" The decoded content matched no other rule, so this is shown as medium: still check why the command was encoded.";
+    }
+  }
   const mitre=[...new Set(findings.flatMap(f=>f.mitre))].sort();
   const score=findings.reduce((a,f)=>a+SEV_WEIGHT[f.sev],0);
   const [vtext,vsev]=verdict(score);

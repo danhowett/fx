@@ -714,7 +714,7 @@ D.findings.forEach(f=>{ const k=gkey(f); let g=GBYKEY[k];
   if(!g){ g=GBYKEY[k]={id:'g'+GROUPS.length,key:k,title:f.title,rule_id:f.rule_id,tactic:f.tactic,techniques:f.techniques,engine:f.engine,items:[]}; GROUPS.push(g); }
   g.items.push(f); });
 GROUPS.forEach(g=>{
-  g.items.sort((a,b)=>(a.ts<b.ts?-1:a.ts>b.ts?1:0));
+  g.items.sort((a,b)=>{const x=a.ts||'~',y=b.ts||'~';return x<y?-1:x>y?1:0;}); // undated last
   g.sev_rank=Math.max(...g.items.map(f=>f.sev_rank));
   g.severity=g.items.find(f=>f.sev_rank===g.sev_rank).severity;
 });
@@ -733,7 +733,7 @@ const triSummary = items => { const c={}; items.forEach(f=>c[f.triage]=(c[f.tria
       h+=`<div class="navgrp" data-jump="${g.id}"><span class="tg"${multi?' data-toggle="1"':''}>${multi?'▸':''}</span>`+
          `<span class="sev-dot" style="background:${SEVVAR[g.severity]||'var(--info)'}"></span><span class="t">${esc(g.title)}</span>`+
          (multi?`<span class="c">${g.items.length}</span>`:'')+`</div>`;
-      if(multi) h+=`<div class="navsub">`+g.items.map((f,i)=>`<div class="navinst" data-jump="${g.id}" data-inst="${i}" title="${esc(f.summary)}">${esc(f.ts||'—')} · ${esc(f.host)}</div>`).join('')+`</div>`;
+      if(multi) h+=`<div class="navsub">`+g.items.map((f,i)=>`<div class="navinst" data-jump="${g.id}" data-inst="${i}" title="${esc(f.summary)}">${esc(f.ts||'no timestamp')} · ${esc(f.host)}</div>`).join('')+`</div>`;
     });
   });
   document.getElementById('nav').innerHTML=h;
@@ -802,7 +802,7 @@ function renderFindings(){
       const f=items[0];
       body=`<div class="f-summary">${esc(f.summary)}</div>
         <div class="kv-row"><span class="k">Rule</span><span class="v">${esc(f.rule_id)}</span></div>
-        <div class="kv-row"><span class="k">When</span><span class="v">${esc(f.ts)}</span></div>
+        <div class="kv-row"><span class="k">When</span><span class="v">${esc(f.ts||'no timestamp')}</span></div>
         <div class="kv-row"><span class="k">Host</span><span class="v">${esc(f.host)}</span></div>
         <div class="kv-row"><span class="k">Engine</span><span class="v">${esc(f.engine)}</span></div>
         <div class="kv-row"><span class="k">Triage</span><span class="v">${esc(TRI_LABEL[f.triage]||f.triage)}</span></div>
@@ -813,7 +813,7 @@ function renderFindings(){
         <div class="kv-row"><span class="k">ATT&CK</span><span class="v">${g.techniques.map(t=>esc(t.id)+' ('+esc(t.name)+')').join(', ')||'—'}</span></div>
         <table class="inst"><thead><tr><th>When</th><th>Host</th><th>Detail</th><th>Triage</th></tr></thead><tbody>`+
         items.map(f=>{ const i=g.items.indexOf(f); const m=(f.triage==='false_positive'||f.triage==='dismissed')?' muted':'';
-          return `<tr class="${m}" id="${g.id}-i${i}"><td class="when">${esc(f.ts||'—')}</td><td class="host">${esc(f.host)}</td>`+
+          return `<tr class="${m}" id="${g.id}-i${i}"><td class="when">${esc(f.ts||'no timestamp')}</td><td class="host">${esc(f.host)}</td>`+
                  `<td class="sum">${esc(f.summary)}${f.note?`<span class="note">Note: ${esc(f.note)}</span>`:''}</td>`+
                  `<td><span class="tri tri-${esc(f.triage)}">${esc(TRI_LABEL[f.triage]||f.triage)}</span></td></tr>`; }).join('')+
         `</tbody></table>`;

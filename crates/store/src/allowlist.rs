@@ -44,7 +44,8 @@ pub(crate) const SUPPRESS_DDL: &str = "CREATE TABLE IF NOT EXISTS suppressed_det
     id UUID, rule_id TEXT, title TEXT, severity TEXT, attack TEXT, summary TEXT,
     event_ids TEXT, ts TIMESTAMP, host TEXT, engine TEXT, detected_utc TIMESTAMP, allow_id TEXT);";
 
-const COLS: &str = "id, rule_id, title, severity, attack, summary, event_ids, ts, host, engine, detected_utc";
+const COLS: &str =
+    "id, rule_id, title, severity, attack, summary, event_ids, ts, host, engine, detected_utc";
 
 /// Event ids referenced by a detections-shaped table, as VARCHAR.
 fn ids_of(table: &str) -> String {
@@ -62,13 +63,18 @@ impl CaseStore {
     /// Clear suppressed rows for engines about to be rewritten.
     pub(crate) fn clear_suppressed_where(&self, engine_sql: &str) -> Result<(), StoreError> {
         self.ensure_suppress_table()?;
-        self.connection().execute_batch(&format!("DELETE FROM suppressed_detections WHERE {engine_sql}"))?;
+        self.connection().execute_batch(&format!(
+            "DELETE FROM suppressed_detections WHERE {engine_sql}"
+        ))?;
         Ok(())
     }
 
     /// Restore everything, then suppress whatever `entries` match. Returns the
     /// number of findings now suppressed per entry id.
-    pub fn apply_allowlist(&self, entries: &[AllowEntry]) -> Result<Vec<(String, u64)>, StoreError> {
+    pub fn apply_allowlist(
+        &self,
+        entries: &[AllowEntry],
+    ) -> Result<Vec<(String, u64)>, StoreError> {
         self.ensure_suppress_table()?;
         let c = self.connection();
         c.execute_batch("BEGIN TRANSACTION")?;
@@ -89,7 +95,10 @@ impl CaseStore {
                     &format!("INSERT INTO suppressed_detections SELECT {COLS}, ? FROM detections WHERE {pred}"),
                     params![e.id, e.rule_id, e.rule_id, needle],
                 )?;
-                c.execute(&format!("DELETE FROM detections WHERE {pred}"), params![e.rule_id, e.rule_id, needle])?;
+                c.execute(
+                    &format!("DELETE FROM detections WHERE {pred}"),
+                    params![e.rule_id, e.rule_id, needle],
+                )?;
                 counts.push((e.id.clone(), n as u64));
             }
             // Auto-set "unconfirmed" triage follows the findings: drop it (when no
@@ -123,8 +132,8 @@ impl CaseStore {
     pub fn suppressed(&self) -> Result<Vec<SuppressedRow>, StoreError> {
         self.ensure_suppress_table()?;
         let mut stmt = self.connection().prepare(
-            "SELECT allow_id, rule_id, title, severity, summary, strftime(ts, '%Y-%m-%dT%H:%M:%S'), engine
-             FROM suppressed_detections ORDER BY allow_id, ts",
+            "SELECT allow_id, rule_id, title, severity, summary, COALESCE(strftime(ts, '%Y-%m-%dT%H:%M:%S'), ''), engine
+             FROM suppressed_detections ORDER BY allow_id, suppressed_detections.ts NULLS LAST",
         )?;
         let rows = stmt
             .query_map([], |r| {
@@ -147,8 +156,14 @@ impl CaseStore {
     pub fn delete_rule_findings(&self, engine: &str, rule_id: &str) -> Result<u64, StoreError> {
         self.ensure_suppress_table()?;
         let c = self.connection();
-        let n = c.execute("DELETE FROM detections WHERE engine = ? AND rule_id = ?", params![engine, rule_id])?;
-        c.execute("DELETE FROM suppressed_detections WHERE engine = ? AND rule_id = ?", params![engine, rule_id])?;
+        let n = c.execute(
+            "DELETE FROM detections WHERE engine = ? AND rule_id = ?",
+            params![engine, rule_id],
+        )?;
+        c.execute(
+            "DELETE FROM suppressed_detections WHERE engine = ? AND rule_id = ?",
+            params![engine, rule_id],
+        )?;
         c.execute_batch(&format!(
             "DELETE FROM tags WHERE tag = 'triage:unconfirmed' AND (note IS NULL OR note = '')
                AND CAST(event_id AS VARCHAR) NOT IN ({d})
@@ -182,7 +197,11 @@ mod tests {
     }
 
     fn has_triage(store: &CaseStore, id: &Uuid) -> bool {
-        store.triage_map().unwrap().iter().any(|t| t.0 == id.to_string())
+        store
+            .triage_map()
+            .unwrap()
+            .iter()
+            .any(|t| t.0 == id.to_string())
     }
 
     #[test]
@@ -193,13 +212,32 @@ mod tests {
         let (a, b, c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         store
             .write_detections(&[
-                det("evtx_odd_place", "Created C:\\Collect\\Logs\\Security.evtx", a, DetectionEngine::SingleEvent),
-                det("evtx_odd_place", "Created C:\\Temp\\x.evtx", b, DetectionEngine::SingleEvent),
+                det(
+                    "evtx_odd_place",
+                    "Created C:\\Collect\\Logs\\Security.evtx",
+                    a,
+                    DetectionEngine::SingleEvent,
+                ),
+                det(
+                    "evtx_odd_place",
+                    "Created C:\\Temp\\x.evtx",
+                    b,
+                    DetectionEngine::SingleEvent,
+                ),
             ])
             .unwrap();
-        store.replace_sigma_detections(&[det("sigma:whoami", "whoami.exe", c, DetectionEngine::Sigma)]).unwrap();
+        store
+            .replace_sigma_detections(&[det(
+                "sigma:whoami",
+                "whoami.exe",
+                c,
+                DetectionEngine::Sigma,
+            )])
+            .unwrap();
         for id in [a, b, c] {
-            store.set_triage_if_absent(&id.to_string(), "unconfirmed", None).unwrap();
+            store
+                .set_triage_if_absent(&id.to_string(), "unconfirmed", None)
+                .unwrap();
         }
         let entry = AllowEntry {
             id: "a1".into(),
@@ -210,7 +248,7 @@ mod tests {
             scope: "case".into(),
             created: String::new(),
         };
-        let counts = store.apply_allowlist(&[entry.clone()]).unwrap();
+        let counts = store.apply_allowlist(std::slice::from_ref(&entry)).unwrap();
         assert_eq!(counts, vec![("a1".to_string(), 1)]);
         assert_eq!(store.detections().unwrap().len(), 2);
         assert_eq!(store.suppressed().unwrap().len(), 1);
@@ -222,11 +260,19 @@ mod tests {
         assert_eq!(store.detections().unwrap().len(), 3);
         assert!(has_triage(&store, &a));
         // A '*' entry with no text never hides everything.
-        let all = AllowEntry { id: "x".into(), rule_id: "*".into(), contains: " ".into(), ..Default::default() };
+        let all = AllowEntry {
+            id: "x".into(),
+            rule_id: "*".into(),
+            contains: " ".into(),
+            ..Default::default()
+        };
         store.apply_allowlist(&[all]).unwrap();
         assert_eq!(store.detections().unwrap().len(), 3);
         // Disabling a Sigma rule removes its findings and their auto-triage.
-        assert_eq!(store.delete_rule_findings("sigma", "sigma:whoami").unwrap(), 1);
+        assert_eq!(
+            store.delete_rule_findings("sigma", "sigma:whoami").unwrap(),
+            1
+        );
         assert_eq!(store.detections().unwrap().len(), 2);
         assert!(!has_triage(&store, &c));
     }

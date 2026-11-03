@@ -20,7 +20,6 @@ use fx_core::{
     Provenance, Target, TimestampKind,
 };
 use serde_json::json;
-use time::OffsetDateTime;
 use uuid::Uuid;
 
 #[derive(Default)]
@@ -59,13 +58,15 @@ impl Parser for RecycleBinParser {
             }
         };
 
-        let ts = fx_core::filetime_to_datetime(info.deleted_filetime)
-            .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+        let (ts, ts_kind) = fx_core::time_or_undated(
+            fx_core::filetime_to_datetime(info.deleted_filetime),
+            TimestampKind::Recorded, // deletion time
+        );
 
         sink.emit(Event {
             id: Uuid::new_v4(),
             timestamp: ts,
-            timestamp_kind: TimestampKind::Recorded, // deletion time
+            timestamp_kind: ts_kind,
             artefact: ArtefactKind::Recycle,
             action: "file.recycled".into(),
             host: None,

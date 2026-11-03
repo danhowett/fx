@@ -502,6 +502,10 @@ static EMBEDDED_RULES: &[(&str, &str)] = &[
         include_str!("../rules/office_macros_enabled.yml"),
     ),
     (
+        "mft_timestomp.yml",
+        include_str!("../rules/mft_timestomp.yml"),
+    ),
+    (
         "user_search_sensitive_terms.yml",
         include_str!("../rules/user_search_sensitive_terms.yml"),
     ),

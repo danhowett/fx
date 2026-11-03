@@ -16,11 +16,11 @@ pub mod tz;
 
 pub use detection::{Detection, DetectionEngine, Severity};
 pub use event::{
-    ArtefactKind, Event, NetworkInfo, Principal, ProcessInfo, Provenance, Target, TimestampKind,
+    time_or_undated, ArtefactKind, Event, NetworkInfo, Principal, ProcessInfo, Provenance, Target,
+    TimestampKind, UNDATED,
 };
 pub use identify::{
-    CollectionProfile, ContainerFormat, IdMethod, IdentifiedArtefact, ProfileHint,
-    UnclassifiedFile,
+    CollectionProfile, ContainerFormat, IdMethod, IdentifiedArtefact, ProfileHint, UnclassifiedFile,
 };
 pub use parser::{EventSink, ParseError, ParseOutcome, Parser, RecordWarning};
 pub use time_util::filetime_to_datetime;

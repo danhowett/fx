@@ -58,7 +58,7 @@ match on `event.id` or `message`.
 
 | Artefact | What it surfaces |
 |----------|------------------|
-| `$MFT` | file records with `$STANDARD_INFORMATION` MACB timestamps and full paths |
+| `$MFT` | file records with full paths: one timeline row per `$STANDARD_INFORMATION` time (Kind **M** modified, **A** accessed, **C** entry changed, **B** born), with the `$FILE_NAME` times alongside. Opening an `$MFT` row shows all eight times ($SI and $FN, to the sub-second) with that row's time highlighted. A file whose $SI Born is earlier than its $FN Born gets a **Possible timestomping** event and finding (T1070.006); the Windows app-package placeholder time (26/10/1985 02:15:00) is excluded |
 | `$UsnJrnl:$J` | change-journal entries — create / delete / rename / data-change, with reason flags (flags SDelete and ransomware-extension patterns) |
 
 ### Registry
@@ -271,6 +271,7 @@ executed and nothing leaves the machine.
   anywhere else), then click **Decode** in the top bar.
 - **Anything else:** click **Decode** in the top bar with nothing selected,
   paste a command, script block or command line, then **Analyse** (Ctrl+Enter).
+  **Clear** empties the box and the result.
 
 The result shows:
 - a **verdict** (Malicious / Suspicious / Benign) with a score;
@@ -288,6 +289,10 @@ list (review, then **Run hunt**). **Add as note** saves the verdict, findings
 and decoded command as the event's analyst note (marking it Unconfirmed if it
 wasn't triaged). Edited or pasted text isn't tied to an event, so it can't be
 saved as a note.
+
+An encoded command is always reported. If its decoded content matches no
+other rule, the encoding finding is shown as medium rather than high: still
+worth checking why it was encoded, but not scored like a known attack.
 
 Decode is a reading aid, not a sandbox. A Benign verdict means no known-bad
 pattern matched, not that the command is safe; confirm against the
@@ -439,13 +444,43 @@ left edge to resize it (double-click the edge to reset), or use **⇤** to widen
 it in one click; the width is remembered. The raw record fills the remaining
 height, pretty-printed and colour-coded, with **A− / A+** for text size,
 **Wrap** for long lines and **Copy**.
-**+ Note** adds an analyst note, saved with the triage state.
+**+ Tag** and **+ Note** sit on the Pivot line; the note box starts as one line
+and grows as you type. A note is saved with the triage state.
+
+**Triage column.** The first column shows each event's triage state: **VAL**
+(validated), **UNC** (unconfirmed), **FP** (false positive) or **DIS**
+(dismissed). Click the **Triage** header for its menu: the triage states
+and every tag in the case, each with a count. Pick **Validated** for the
+timeline of only the events you've confirmed, in time order across the whole
+case, or a tag for every event carrying it; one state and one tag can be
+combined. **Copy as table** then copies those events (time, host, kind,
+artefact, user, event, triage, tags and your note) to paste into a report or
+ticket. The rail's Triage and Tags sections apply the same filters.
+
+**Column filters.** Click the **Triage**, **Host**, **Kind**, **Artefact** or **User**
+column header for a list of that column's values with event counts (under the
+current filters); pick one to filter the timeline, or **All** to clear it.
+Active column filters show as chips in the toolbar. Time has its own range
+picker; Event has too many values to list, so use the search box.
 
 - **Scroll** or use the mouse wheel; a floating readout shows your position
   (row *N* of total, and the UTC timestamp there) so you never lose your place.
 - **Keyboard:** `PageUp` / `PageDown` move a screen at a time, `Home` / `End`
   jump to the first / last event, `↑` / `↓` nudge one row. Precise movement
   through a long list without fighting trackpad momentum.
+- **No timestamp.** fx never invents a time. A record whose artefact gave no
+  time (a shortcut with no target times, a registry value on a key with no
+  last-write, a browser visit with a zero time) shows **no timestamp** with
+  Kind **Undated**, sorts after every dated event, and is left out of date
+  ranges, the activity graph, the mini timeline, pivots and correlated rules.
+  It still appears in searches, IOC hunts and single-event rules. Filter to
+  them with **Kind → Undated**. Cases from earlier versions are converted when
+  opened: only fx's own 01/01/1970 00:00:00 placeholders from those parsers
+  change; a genuine 1970 time in evidence (such as a timestomped $MFT value)
+  is kept as recorded.
+- **Kind** says which time a row is: **M · Modified**, **A · Accessed**,
+  **C · Changed**, **B · Born** for file-system times, or Executed, Logged,
+  Logon and Recorded for other artefacts.
 - **Dates** are shown throughout in UK format (`DD/MM/YYYY HH:MM:SS`), always
   **UTC**. (Raw records and CSV/STIX exports keep ISO `YYYY-MM-DD` for
   machine interchange.)

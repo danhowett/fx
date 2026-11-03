@@ -93,7 +93,12 @@ fn categorize(artefact: &str, action: &str) -> String {
     if action.starts_with("execution") || artefact == "Prefetch" || artefact == "UserAssist" {
         return "execution".into();
     }
-    if action.starts_with("file") || artefact == "Mft" || artefact == "UsnJrnl" {
+    if action.starts_with("file")
+        || matches!(
+            artefact,
+            "Mft" | "UsnJrnl" | "Lnk" | "JumpList" | "ShellBags" | "Recycle"
+        )
+    {
         return "filesystem".into();
     }
     "other".into()
@@ -108,6 +113,15 @@ pub struct FilterInput {
     pub category: Option<String>,
     pub host: Option<String>,
     pub user: Option<String>,
+    /// Timestamp kind (the grid's Kind column).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Triage state (the grid's Triage column).
+    #[serde(default)]
+    pub triage: Option<String>,
+    /// An analyst tag.
+    #[serde(default)]
+    pub label: Option<String>,
     pub text: Option<String>,
     pub flagged_only: Option<bool>,
     /// An IOC value: show every event matching it (same search as the sweep).
@@ -124,6 +138,8 @@ pub struct CaseOverview {
     pub case_id: String,
     pub total_events: u64,
     pub by_artefact: Vec<CountRow>,
+    /// Events per derived category, for the rail's Category counts.
+    pub by_category: Vec<CountRow>,
     pub ingest: Vec<CountRow>,
     pub srum_top_talkers: Vec<SrumRow>,
 }
@@ -370,6 +386,9 @@ pub async fn query_timeline(
         action_prefix: None,
         host: filter.host,
         user: filter.user,
+        ts_kind: filter.kind,
+        triage: filter.triage,
+        label: filter.label,
         text: filter.text,
         // Category and flagged-only are now applied in SQL (whole-case), so a
         // page is a true slice and paging via limit/offset is correct.
@@ -389,6 +408,45 @@ pub async fn query_timeline(
     Ok(out)
 }
 
+/// Values of one grid column (host / kind / artefact / user) with counts,
+/// under the current filter, for the column-header filter menus.
+#[tauri::command]
+pub async fn column_values(
+    state: tauri::State<'_, AppState>,
+    filter: FilterInput,
+    field: String,
+) -> Result<Vec<CountRow>, String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    let tf = TimelineFilter {
+        after: filter.after.as_deref().and_then(parse_rfc3339),
+        before: filter.before.as_deref().and_then(parse_rfc3339),
+        artefact: filter.artefact,
+        action_prefix: None,
+        host: filter.host,
+        user: filter.user,
+        ts_kind: filter.kind,
+        triage: filter.triage,
+        label: filter.label,
+        text: filter.text,
+        category: filter.category,
+        flagged_only: filter.flagged_only.unwrap_or(false),
+        any_text: filter
+            .ioc
+            .as_deref()
+            .map(fx_hunt::ioc::search_forms)
+            .unwrap_or_default(),
+        limit: 0,
+        offset: 0,
+    };
+    Ok(store
+        .column_values(&field, &tf, 300)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(label, count)| CountRow { label, count })
+        .collect())
+}
+
 /// Count all events matching a filter (ignoring paging) — for the "N of M"
 /// indicator and Next/Prev paging. Runs over the whole case in SQL.
 #[tauri::command]
@@ -405,6 +463,9 @@ pub async fn count_timeline(
         action_prefix: None,
         host: filter.host,
         user: filter.user,
+        ts_kind: filter.kind,
+        triage: filter.triage,
+        label: filter.label,
         text: filter.text,
         category: filter.category,
         flagged_only: filter.flagged_only.unwrap_or(false),
@@ -924,6 +985,11 @@ fn build_overview(store: &CaseStore) -> Result<CaseOverview, fx_store::StoreErro
         total_events: store.event_count()?,
         by_artefact: store
             .counts_by_artefact()?
+            .into_iter()
+            .map(|(label, count)| CountRow { label, count })
+            .collect(),
+        by_category: store
+            .counts_by_category()?
             .into_iter()
             .map(|(label, count)| CountRow { label, count })
             .collect(),

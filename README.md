@@ -145,6 +145,11 @@ and can be cancelled without losing the work already done.
 - **Memory remnants** — command lines, URLs, IPs, domains, hashes and tool
   names carved from `pagefile.sys` / `swapfile.sys` (the rules and IOC hunt
   run on them), plus `hiberfil.sys` state.
+- **$MFT MACB, both sets** — one row per $SI time (M / A / C / B), with the
+  $FILE_NAME times beside them in the detail panel, and a **timestomping**
+  check when a file's $SI creation time predates its $FN creation time.
+- **No invented times** — a record with no time shows "no timestamp", never
+  01/01/1970, and stays out of date ranges, graphs and time-window rules.
 - **PCA and setupapi** — Windows 11 Program Compatibility Assistant launch
   records (execution evidence where Prefetch is off) and the first time each
   USB device was connected.

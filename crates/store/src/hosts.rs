@@ -68,7 +68,60 @@ pub(crate) fn sql_lit(s: &str) -> String {
 impl CaseStore {
     pub(crate) fn ensure_hosts_schema(&self) -> Result<(), StoreError> {
         self.connection().execute_batch(HOSTS_DDL)?;
+        self.ensure_undated()?;
         Ok(())
+    }
+
+    /// Cases made before v0.1.10 store "no time" as a 1970-01-01 00:00:00
+    /// placeholder. Allow NULL times, and turn exactly those placeholders,
+    /// from the parsers that used them, into undated events. Real times are
+    /// never touched: the MFT and event logs never used the placeholder, so a
+    /// genuine (e.g. timestomped) 1970 value there is kept as recorded.
+    fn ensure_undated(&self) -> Result<(), StoreError> {
+        let c = self.connection();
+        let not_null: bool = c
+            .query_row(
+                "SELECT COUNT(*) FROM duckdb_columns()
+                 WHERE table_name = 'events' AND column_name = 'ts' AND NOT is_nullable",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false);
+        if !not_null {
+            return Ok(());
+        }
+        // DuckDB won't alter a table that has indexes on it: drop every index
+        // on the two tables first (build_indexes() recreates fx's own below).
+        let mut stmt = c.prepare(
+            "SELECT index_name FROM duckdb_indexes()
+             WHERE table_name IN ('events', 'detections')",
+        )?;
+        let indexes: Vec<String> = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        for ix in indexes {
+            c.execute_batch(&format!(
+                "DROP INDEX IF EXISTS \"{}\";",
+                ix.replace('"', "")
+            ))?;
+        }
+        c.execute_batch(
+            "ALTER TABLE events ALTER COLUMN ts DROP NOT NULL;
+             ALTER TABLE detections ALTER COLUMN ts DROP NOT NULL;",
+        )?;
+        c.execute_batch(
+            "UPDATE events SET ts = NULL, ts_kind = 'Undated'
+             WHERE ts = TIMESTAMP '1970-01-01 00:00:00'
+               AND parser IN ('lnk', 'recyclebin', 'usnjrnl', 'scheduled_task', 'defender_log',
+                              'registry', 'memory_files', 'pshistory', 'browser_history');
+             UPDATE detections SET ts = NULL
+             FROM events e
+             WHERE detections.event_ids <> ''
+               AND e.id = TRY_CAST(trim(split_part(detections.event_ids, ',', 1)) AS UUID)
+               AND e.ts IS NULL;",
+        )?;
+        self.build_indexes()
     }
 
     // ── Scope ───────────────────────────────────────────────────────────────

@@ -121,7 +121,7 @@ impl Correlation {
                         SELECT id, ts, COALESCE(host, '') AS h, {grp_expr} AS grp,
                                epoch(ts)::BIGINT AS es
                         FROM events
-                        WHERE action LIKE '{prefix}%' {art}
+                        WHERE ts IS NOT NULL AND action LIKE '{prefix}%' {art}
                      ),
                      windowed AS (
                         SELECT id, ts, h, grp,
@@ -171,10 +171,10 @@ impl Correlation {
                 // matching second-event per first-event (MIN(b.id)) so one logon
                 // can't fan out into thousands of pairs.
                 "WITH first_ev AS (
-                     SELECT id, COALESCE(host, '') AS h, {key} AS k, ts FROM events WHERE action LIKE '{first}%'
+                     SELECT id, COALESCE(host, '') AS h, {key} AS k, ts FROM events WHERE ts IS NOT NULL AND action LIKE '{first}%'
                  ),
                  second_ev AS (
-                     SELECT id, COALESCE(host, '') AS h, {key} AS k, ts FROM events WHERE action LIKE '{second}%'
+                     SELECT id, COALESCE(host, '') AS h, {key} AS k, ts FROM events WHERE ts IS NOT NULL AND action LIKE '{second}%'
                  )
                  SELECT
                      a.k AS grp,

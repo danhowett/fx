@@ -80,10 +80,7 @@ fn parse_jumplist(
         .to_ascii_lowercase()
         .ends_with(".automaticdestinations-ms");
 
-    let filename = artefact
-        .path
-        .file_name()
-        .and_then(|s| s.to_str());
+    let filename = artefact.path.file_name().and_then(|s| s.to_str());
 
     let jumplist = if is_automatic {
         lnk_core::parse_automatic_destinations(bytes, filename)
@@ -160,8 +157,7 @@ fn emit_link(
     // Removable-media and network flags — the "why this matters" for triage.
     // drive_type is the numeric [MS-SHLLINK] DriveType (2 = REMOVABLE, 4 = REMOTE).
     let removable = drive_type_num == Some(lnk_core::drive_type::REMOVABLE);
-    let is_network =
-        net_name.is_some() || drive_type_num == Some(lnk_core::drive_type::REMOTE);
+    let is_network = net_name.is_some() || drive_type_num == Some(lnk_core::drive_type::REMOTE);
 
     // Human-readable drive type for display / raw.
     let drive_type = drive_type_num.map(|n| match n {
@@ -182,14 +178,14 @@ fn emit_link(
         tags.push("NETWORK-SHARE");
     }
 
-    // Target creation time (already Unix seconds from lnk-core; 0 when unset)
-    // anchors the event; fall back to epoch when absent.
-    let ts = if link.header.creation_time > 0 {
-        OffsetDateTime::from_unix_timestamp(link.header.creation_time)
-            .unwrap_or(OffsetDateTime::UNIX_EPOCH)
-    } else {
-        OffsetDateTime::UNIX_EPOCH
-    };
+    // The target's creation time (Unix seconds from lnk-core; 0 when unset)
+    // anchors the event. A link with no target times is undated, not 1970.
+    let (ts, ts_kind) = fx_core::time_or_undated(
+        (link.header.creation_time > 0)
+            .then(|| OffsetDateTime::from_unix_timestamp(link.header.creation_time).ok())
+            .flatten(),
+        TimestampKind::Created,
+    );
 
     let mut message = format!("Shell link -> {display_path}");
     if let Some(s) = &serial {
@@ -215,7 +211,7 @@ fn emit_link(
     sink.emit(Event {
         id: Uuid::new_v4(),
         timestamp: ts,
-        timestamp_kind: TimestampKind::Accessed,
+        timestamp_kind: ts_kind,
         artefact: artefact.artefact,
         action: action.to_string(),
         host: None,

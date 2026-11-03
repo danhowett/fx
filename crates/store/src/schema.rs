@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS evidence (
 -- lifted into columns for fast filtering; `raw` holds the complete original.
 CREATE TABLE IF NOT EXISTS events (
     id               UUID      PRIMARY KEY,
-    ts               TIMESTAMP NOT NULL,   -- always UTC
+    ts               TIMESTAMP,            -- always UTC; NULL = the artefact gave no time
     ts_kind          TEXT      NOT NULL,   -- created/executed/logged/...
     artefact         TEXT      NOT NULL,
     action           TEXT      NOT NULL,
@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS detections (
     attack        TEXT NOT NULL,     -- comma-separated ATT&CK ids
     summary       TEXT NOT NULL,
     event_ids     TEXT NOT NULL,     -- comma-separated event UUIDs
-    ts            TIMESTAMP NOT NULL,
+    ts            TIMESTAMP,         -- NULL when the finding's event has no time
     host          TEXT,
     engine        TEXT NOT NULL,
     detected_utc  TIMESTAMP NOT NULL
@@ -129,7 +129,8 @@ CREATE TABLE IF NOT EXISTS detections (
 
 /// Per-case UI state (saved IOC hunt list, last results). Idempotent; run on
 /// create and on open so older case files pick it up.
-pub const CASE_KV_DDL: &str = "CREATE TABLE IF NOT EXISTS case_kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);";
+pub const CASE_KV_DDL: &str =
+    "CREATE TABLE IF NOT EXISTS case_kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);";
 
 /// Indexes created after bulk load (cheaper to build once data is in). Called
 /// separately from DDL so ingest can defer them until after the first load.

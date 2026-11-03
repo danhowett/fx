@@ -45,7 +45,7 @@ impl CaseStore {
         // `raw` stays column index 25 either way (a constant '' when skipped),
         // so row_to_event's positional reads are unchanged.
         let sql = if needs_raw {
-            "SELECT id, strftime(ts, '%Y-%m-%dT%H:%M:%S') AS ts, ts_kind, artefact, action, host,
+            "SELECT id, COALESCE(strftime(ts, '%Y-%m-%dT%H:%M:%S'), '') AS ts, ts_kind, artefact, action, host,
                     user_name, user_sid, user_domain,
                     process_name, process_path, process_pid, command_line, process_sha1, parent_name,
                     target_path, target_value, src_ip, dst_ip, logon_type,
@@ -53,7 +53,7 @@ impl CaseStore {
                     CASE WHEN artefact IN ('Evtx', 'BrowserHistory') THEN CAST(raw AS VARCHAR) ELSE '' END AS raw
              FROM events"
         } else {
-            "SELECT id, strftime(ts, '%Y-%m-%dT%H:%M:%S') AS ts, ts_kind, artefact, action, host,
+            "SELECT id, COALESCE(strftime(ts, '%Y-%m-%dT%H:%M:%S'), '') AS ts, ts_kind, artefact, action, host,
                     user_name, user_sid, user_domain,
                     process_name, process_path, process_pid, command_line, process_sha1, parent_name,
                     target_path, target_value, src_ip, dst_ip, logon_type,
@@ -164,6 +164,14 @@ impl CaseStore {
             }
         }
         self.connection().execute_batch("COMMIT")?;
+        // A finding whose event has no time has no time either.
+        self.connection().execute_batch(
+            "UPDATE detections SET ts = NULL
+             FROM events e
+             WHERE detections.ts IS NOT NULL AND detections.event_ids <> ''
+               AND e.id = TRY_CAST(trim(split_part(detections.event_ids, ',', 1)) AS UUID)
+               AND e.ts IS NULL;",
+        )?;
         Ok(())
     }
 
@@ -178,7 +186,7 @@ impl CaseStore {
         // `host` is passed separately (the machine the event came from) and is
         // not part of the searched text: every event of a host carries its name.
         let mut stmt = self.connection().prepare(
-            "SELECT id, strftime(ts, '%Y-%m-%dT%H:%M:%S'), artefact, COALESCE(host, ''),
+            "SELECT id, COALESCE(strftime(ts, '%Y-%m-%dT%H:%M:%S'), ''), artefact, COALESCE(host, ''),
                     concat_ws(chr(10), message, command_line, process_path, process_name,
                               target_path, target_value, src_ip, dst_ip, process_sha1,
                               user_name, CAST(raw AS VARCHAR))
@@ -200,12 +208,12 @@ impl CaseStore {
     pub fn detections(&self) -> Result<Vec<DetectionRow>, StoreError> {
         let mut stmt = self.connection().prepare(&format!(
             "SELECT rule_id, title, severity, attack, summary, event_ids,
-                    strftime(ts, '%Y-%m-%dT%H:%M:%S') AS ts, host, engine
+                    COALESCE(strftime(ts, '%Y-%m-%dT%H:%M:%S'), '') AS ts, host, engine
              FROM detections
              WHERE 1=1{}
              ORDER BY CASE severity
                 WHEN 'critical' THEN 5 WHEN 'high' THEN 4 WHEN 'medium' THEN 3
-                WHEN 'low' THEN 2 ELSE 1 END DESC, ts",
+                WHEN 'low' THEN 2 ELSE 1 END DESC, detections.ts NULLS LAST",
             self.scope_host_sql("host")
         ))?;
         let rows = stmt
@@ -264,6 +272,9 @@ pub struct DetectionRow {
 }
 
 fn parse_ts(s: &str) -> OffsetDateTime {
+    if s.is_empty() {
+        return fx_core::UNDATED; // no time (undated event or finding)
+    }
     OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
         .or_else(|_| {
             // DuckDB may hand back a space-separated naive timestamp; try that.
@@ -337,6 +348,7 @@ fn parse_kind(s: &str) -> TimestampKind {
         "Executed" => TimestampKind::Executed,
         "Logged" => TimestampKind::Logged,
         "Logon" => TimestampKind::Logon,
+        "Undated" => TimestampKind::Undated,
         _ => TimestampKind::Recorded,
     }
 }
@@ -436,7 +448,7 @@ impl CaseStore {
         let mut stmt = c.prepare(&format!(
             "SELECT CAST(id AS VARCHAR), strftime(ts, '%Y-%m-%dT%H:%M:%S.%f'), CAST(raw AS VARCHAR), message
              FROM events
-             WHERE json_extract_string(raw, '$.time_basis') = 'host local time (as logged)'{}",
+             WHERE ts IS NOT NULL AND json_extract_string(raw, '$.time_basis') = 'host local time (as logged)'{}",
             in_collection(collection)
         ))?;
         let rows: Vec<(String, String, String, String)> = stmt

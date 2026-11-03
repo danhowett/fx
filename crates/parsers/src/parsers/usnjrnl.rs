@@ -46,9 +46,8 @@ impl Parser for UsnJrnlParser {
     ) -> Result<ParseOutcome, ParseError> {
         let mut outcome = ParseOutcome::default();
 
-        let reader = usnjrnl::UsnJrnlReader::from(&artefact.path).map_err(|e| {
-            ParseError::Malformed(format!("usnjrnl open: {e:?}"))
-        })?;
+        let reader = usnjrnl::UsnJrnlReader::from(&artefact.path)
+            .map_err(|e| ParseError::Malformed(format!("usnjrnl open: {e:?}")))?;
 
         for entry in reader.into_iter() {
             outcome.records_read += 1;
@@ -67,8 +66,10 @@ impl Parser for UsnJrnlParser {
             // filename() -> &str, reason() -> &UsnReason (Display).
             let filename = record.data.filename().to_string();
             let reasons = record.data.reason().to_string();
-            let ts = OffsetDateTime::from_unix_timestamp(record.data.timestamp().timestamp())
-                .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+            let (ts, ts_kind) = fx_core::time_or_undated(
+                OffsetDateTime::from_unix_timestamp(record.data.timestamp().timestamp()).ok(),
+                TimestampKind::Recorded,
+            );
 
             let action = classify_reason(&reasons);
             let anti_forensic = is_anti_forensic(&reasons, &filename);
@@ -81,7 +82,7 @@ impl Parser for UsnJrnlParser {
             sink.emit(Event {
                 id: Uuid::new_v4(),
                 timestamp: ts,
-                timestamp_kind: TimestampKind::Recorded,
+                timestamp_kind: ts_kind,
                 artefact: ArtefactKind::UsnJrnl,
                 action: action.to_string(),
                 host: None,
@@ -126,7 +127,10 @@ fn classify_reason(reasons: &str) -> &'static str {
         "file.rename_from"
     } else if r.contains("FILE_CREATE") {
         "file.create"
-    } else if r.contains("DATA_OVERWRITE") || r.contains("DATA_EXTEND") || r.contains("DATA_TRUNCATION") {
+    } else if r.contains("DATA_OVERWRITE")
+        || r.contains("DATA_EXTEND")
+        || r.contains("DATA_TRUNCATION")
+    {
         "file.data_change"
     } else if r.contains("SECURITY_CHANGE") {
         "file.security_change"
@@ -154,8 +158,16 @@ fn is_anti_forensic(reasons: &str, filename: &str) -> bool {
 
     // Ransomware-adjacent: creation of files with common ransom extensions.
     const RANSOM_EXT: &[&str] = &[
-        ".lockbit", ".conti", ".ryk", ".ryuk", ".locky", ".crypt", ".encrypted",
-        ".enc", ".readme", ".onion",
+        ".lockbit",
+        ".conti",
+        ".ryk",
+        ".ryuk",
+        ".locky",
+        ".crypt",
+        ".encrypted",
+        ".enc",
+        ".readme",
+        ".onion",
     ];
     let ransom_ext = RANSOM_EXT.iter().any(|e| f.ends_with(e));
 

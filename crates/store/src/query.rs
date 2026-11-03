@@ -33,6 +33,13 @@ pub struct TimelineFilter {
     pub action_prefix: Option<String>,
     pub host: Option<String>,
     pub user: Option<String>,
+    /// Timestamp kind (created / executed / logon / ...), the grid's Kind column.
+    pub ts_kind: Option<String>,
+    /// Analyst triage state (validated / unconfirmed / false_positive /
+    /// dismissed): whole-case, so e.g. "validated" is the confirmed timeline.
+    pub triage: Option<String>,
+    /// An analyst tag (label): only events carrying it, whole-case.
+    pub label: Option<String>,
     /// Substring match against message, target_path, command_line, process and
     /// parent names (case-insensitive).
     pub text: Option<String>,
@@ -62,9 +69,9 @@ fn category_sql(cat: &str) -> &'static str {
         "network" => " AND (action LIKE 'network%' OR action LIKE 'browser%' OR action LIKE '%rdp%' OR action LIKE 'remote_access%' OR artefact = 'BrowserHistory' OR artefact = 'RemoteAccess')",
         "persistence" => " AND (action LIKE 'persistence%' OR action LIKE 'service%')",
         "execution" => " AND (action LIKE 'execution%' OR artefact = 'Prefetch' OR artefact = 'UserAssist')",
-        "filesystem" => " AND (action LIKE 'file%' OR artefact = 'Mft' OR artefact = 'UsnJrnl')",
+        "filesystem" => " AND (action LIKE 'file%' OR artefact IN ('Mft', 'UsnJrnl', 'Lnk', 'JumpList', 'ShellBags', 'Recycle'))",
         // "other" = none of the above. Negate all the known buckets.
-        "other" => " AND NOT (action LIKE 'logon%' OR action LIKE 'network%' OR action LIKE 'browser%' OR action LIKE '%rdp%' OR action LIKE 'remote_access%' OR artefact = 'BrowserHistory' OR artefact = 'RemoteAccess' OR action LIKE 'persistence%' OR action LIKE 'service%' OR action LIKE 'execution%' OR artefact = 'Prefetch' OR artefact = 'UserAssist' OR action LIKE 'file%' OR artefact = 'Mft' OR artefact = 'UsnJrnl')",
+        "other" => " AND NOT (action LIKE 'logon%' OR action LIKE 'network%' OR action LIKE 'browser%' OR action LIKE '%rdp%' OR action LIKE 'remote_access%' OR artefact = 'BrowserHistory' OR artefact = 'RemoteAccess' OR action LIKE 'persistence%' OR action LIKE 'service%' OR action LIKE 'execution%' OR artefact = 'Prefetch' OR artefact = 'UserAssist' OR action LIKE 'file%' OR artefact IN ('Mft', 'UsnJrnl', 'Lnk', 'JumpList', 'ShellBags', 'Recycle'))",
         _ => "",
     }
 }
@@ -110,6 +117,33 @@ impl CaseStore {
         Ok(rows)
     }
 
+    /// Event counts per derived category (execution, persistence, ...), using
+    /// exactly the category filter's SQL, so a count matches what clicking the
+    /// category shows. One pass over the events.
+    pub fn counts_by_category(&self) -> Result<Vec<(String, u64)>, StoreError> {
+        const CATS: [&str; 5] = ["execution", "persistence", "filesystem", "network", "logon"];
+        let cols: Vec<String> = CATS
+            .iter()
+            .map(|c| {
+                let frag = category_sql(c).trim_start().trim_start_matches("AND ");
+                format!("COUNT(*) FILTER (WHERE {frag})")
+            })
+            .collect();
+        let sql = format!(
+            "SELECT {} FROM events WHERE 1=1{}",
+            cols.join(", "),
+            self.scope_host_sql("host")
+        );
+        let row: Vec<i64> = self.connection().query_row(&sql, [], |r| {
+            (0..CATS.len()).map(|i| r.get::<_, i64>(i)).collect()
+        })?;
+        Ok(CATS
+            .iter()
+            .zip(row)
+            .map(|(c, n)| (c.to_string(), n as u64))
+            .collect())
+    }
+
     /// Per-day event counts for the activity graph. Returns one row per calendar
     /// day (UTC) that has at least one event, with the total count and how many
     /// of those events tripped a hunt rule ("flagged"). The graph uses the gap
@@ -143,7 +177,7 @@ impl CaseStore {
                 COUNT(CASE WHEN f.eid IS NOT NULL THEN 1 END)   AS flagged
             FROM events e
             LEFT JOIN flagged_ids f ON CAST(e.id AS VARCHAR) = f.eid
-            WHERE 1=1{}
+            WHERE e.ts IS NOT NULL{}
             GROUP BY day
             ORDER BY day",
             self.scope_host_sql("e.host")
@@ -206,6 +240,18 @@ impl CaseStore {
             sql.push_str(" AND host = ?");
             binds.push(Box::new(h.clone()));
         }
+        if let Some(k) = &f.ts_kind {
+            sql.push_str(" AND ts_kind = ?");
+            binds.push(Box::new(k.clone()));
+        }
+        if let Some(t) = &f.triage {
+            sql.push_str(" AND id IN (SELECT event_id FROM tags WHERE tag = ?)");
+            binds.push(Box::new(format!("triage:{t}")));
+        }
+        if let Some(l) = &f.label {
+            sql.push_str(" AND id IN (SELECT event_id FROM tags WHERE tag = ?)");
+            binds.push(Box::new(format!("label:{l}")));
+        }
         if let Some(u) = &f.user {
             sql.push_str(" AND user_name = ?");
             binds.push(Box::new(u.clone()));
@@ -255,6 +301,78 @@ impl CaseStore {
 
     /// Count the events matching a filter (ignoring limit/offset) — for paging
     /// and the "N of M shown" indicator. Runs over the whole case in SQL.
+    /// Distinct values of one grid column (host / kind / artefact / user) with
+    /// their event counts, under the current filter minus that column's own
+    /// filter, most common first. Powers the column-header filter menus.
+    pub fn column_values(
+        &self,
+        field: &str,
+        f: &TimelineFilter,
+        limit: usize,
+    ) -> Result<Vec<(String, u64)>, StoreError> {
+        let mut f = f.clone();
+        if field == "triage" || field == "label" {
+            // Events per triage state / per tag, under the current filter
+            // minus that filter.
+            let prefix = if field == "triage" {
+                f.triage = None;
+                "triage:"
+            } else {
+                f.label = None;
+                "label:"
+            };
+            let (where_sql, binds) = Self::build_where(&f);
+            let sql = format!(
+                "SELECT replace(t.tag, '{prefix}', ''), COUNT(*)
+                 FROM tags t JOIN events ON events.id = t.event_id
+                 WHERE t.tag LIKE '{prefix}%'{where_sql}
+                 GROUP BY 1 ORDER BY 2 DESC, 1"
+            );
+            let param_refs: Vec<&dyn duckdb::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+            let mut stmt = self.connection().prepare(&sql)?;
+            let rows = stmt
+                .query_map(param_refs.as_slice(), |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(rows);
+        }
+        let col = match field {
+            "host" => {
+                f.host = None;
+                "host"
+            }
+            "kind" => {
+                f.ts_kind = None;
+                "ts_kind"
+            }
+            "artefact" => {
+                f.artefact = None;
+                "artefact"
+            }
+            "user" => {
+                f.user = None;
+                "user_name"
+            }
+            _ => return Ok(Vec::new()),
+        };
+        let (where_sql, binds) = Self::build_where(&f);
+        let sql = format!(
+            "SELECT {col}, COUNT(*) FROM events
+             WHERE {col} IS NOT NULL AND {col} <> ''{where_sql}
+             GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT {}",
+            limit.clamp(1, 1000)
+        );
+        let param_refs: Vec<&dyn duckdb::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+        let mut stmt = self.connection().prepare(&sql)?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn count_timeline(&self, f: &TimelineFilter) -> Result<u64, StoreError> {
         let (where_sql, binds) = Self::build_where(f);
         let sql = format!("SELECT COUNT(*) FROM events WHERE 1=1{where_sql}");
@@ -272,8 +390,8 @@ impl CaseStore {
     pub fn timeline(&self, f: &TimelineFilter) -> Result<Vec<TimelineRow>, StoreError> {
         let (where_sql, binds) = Self::build_where(f);
         let mut sql = format!(
-            "SELECT id, strftime(ts, '%Y-%m-%dT%H:%M:%S') AS ts, ts_kind, artefact, action, host, user_name, target_path, message, source_ref
-             FROM events WHERE 1=1{where_sql} ORDER BY ts"
+            "SELECT id, COALESCE(strftime(ts, '%Y-%m-%dT%H:%M:%S'), '') AS ts, ts_kind, artefact, action, host, user_name, target_path, message, source_ref
+             FROM events WHERE 1=1{where_sql} ORDER BY events.ts NULLS LAST"
         );
         let limit = if f.limit == 0 { 1000 } else { f.limit };
         sql.push_str(&format!(" LIMIT {} OFFSET {}", limit, f.offset));
@@ -307,7 +425,7 @@ impl CaseStore {
         for chunk in ids.chunks(500) {
             let marks = vec!["?"; chunk.len()].join(",");
             let sql = format!(
-                "SELECT id, strftime(ts, '%Y-%m-%dT%H:%M:%S') AS ts, ts_kind, artefact, action, host, user_name, target_path, message, source_ref
+                "SELECT id, COALESCE(strftime(ts, '%Y-%m-%dT%H:%M:%S'), '') AS ts, ts_kind, artefact, action, host, user_name, target_path, message, source_ref
                  FROM events WHERE CAST(id AS VARCHAR) IN ({marks})"
             );
             let params: Vec<&dyn duckdb::ToSql> =

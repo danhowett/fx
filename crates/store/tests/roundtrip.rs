@@ -346,3 +346,150 @@ fn older_case_gets_a_legacy_collection_before_another_is_added() {
         1
     );
 }
+
+#[test]
+fn undated_events_store_no_time() {
+    let dir = std::env::temp_dir().join(format!("fxcase-undated-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = CaseStore::create(&dir.join("u.fxcase"), "U", None, "UTC").unwrap();
+    let evid = Uuid::new_v4();
+    let mut undated = sample_event(evid, "file.shortcut", "E:/stage.zip");
+    undated.timestamp = fx_core::UNDATED;
+    undated.timestamp_kind = TimestampKind::Undated;
+    let dated = sample_event(evid, "process.execute", "C:/x.exe");
+    {
+        let mut w = store.event_writer();
+        w.emit(undated);
+        w.emit(dated);
+        w.flush().unwrap();
+    }
+    let rows = store
+        .timeline(&TimelineFilter {
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    // Dated first, the undated one last, with no time at all.
+    assert!(!rows[0].ts.is_empty());
+    assert_eq!(rows[1].ts, "");
+    assert_eq!(rows[1].ts_kind, "Undated");
+    // Not on any day of the activity graph.
+    let days: u64 = store
+        .daily_activity()
+        .unwrap()
+        .iter()
+        .map(|d| d.total)
+        .sum();
+    assert_eq!(days, 1);
+}
+
+#[test]
+fn older_case_placeholders_become_undated_but_real_1970_times_stay() {
+    let dir = std::env::temp_dir().join(format!("fxcase-mig-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("old.fxcase");
+    {
+        let store = CaseStore::create(&path, "Old", None, "UTC").unwrap();
+        let evid = Uuid::new_v4();
+        let mut lnk = sample_event(evid, "file.shortcut", "E:/stage.zip");
+        lnk.timestamp = OffsetDateTime::UNIX_EPOCH;
+        lnk.timestamp_kind = TimestampKind::Accessed;
+        lnk.provenance.parser = "lnk".into();
+        let mut mft = sample_event(evid, "file.modified", "C:/svc.exe");
+        mft.timestamp = OffsetDateTime::UNIX_EPOCH; // a real (e.g. timestomped) value
+        mft.timestamp_kind = TimestampKind::Modified;
+        mft.provenance.parser = "mft".into();
+        let mut w = store.event_writer();
+        w.emit(lnk);
+        w.emit(mft);
+        w.flush().unwrap();
+        drop(w);
+        store.build_indexes().unwrap();
+    }
+    // Make it look like a case from before undated events existed: NOT NULL
+    // timestamps, with all of fx's indexes in place (as in a real case).
+    {
+        let c = duckdb::Connection::open(&path).unwrap();
+        c.execute_batch(
+            "DROP INDEX IF EXISTS idx_events_ts; DROP INDEX IF EXISTS idx_events_artefact;
+             DROP INDEX IF EXISTS idx_events_action; DROP INDEX IF EXISTS idx_events_host;
+             DROP INDEX IF EXISTS idx_events_user; DROP INDEX IF EXISTS idx_events_target;
+             DROP INDEX IF EXISTS idx_events_evidence;
+             ALTER TABLE events ALTER COLUMN ts SET NOT NULL;
+             ALTER TABLE detections ALTER COLUMN ts SET NOT NULL;",
+        )
+        .unwrap();
+        c.execute_batch(fx_store::schema::INDEXES).unwrap();
+    }
+    let store = CaseStore::open(&path).unwrap();
+    let rows = store
+        .timeline(&TimelineFilter {
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+    let lnk = rows.iter().find(|r| r.action == "file.shortcut").unwrap();
+    let mft = rows.iter().find(|r| r.action == "file.modified").unwrap();
+    assert_eq!(lnk.ts, "", "placeholder became undated");
+    assert_eq!(lnk.ts_kind, "Undated");
+    assert!(mft.ts.starts_with("1970-01-01"), "real 1970 time kept");
+}
+
+#[test]
+fn triage_filter_finds_validated_events_across_the_case() {
+    let dir = std::env::temp_dir().join(format!("fxcase-tri-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = CaseStore::create(&dir.join("t.fxcase"), "T", None, "UTC").unwrap();
+    let evid = Uuid::new_v4();
+    let mut ids = Vec::new();
+    {
+        let mut w = store.event_writer();
+        for i in 0..3000 {
+            let e = sample_event(evid, "process.execute", &format!("C:/t{i}.exe"));
+            ids.push(e.id.to_string());
+            w.emit(e);
+        }
+        w.flush().unwrap();
+    }
+    // One validated far down the case, one unconfirmed.
+    store
+        .set_triage(&ids[2900], "validated", Some("confirmed"))
+        .unwrap();
+    store.set_triage(&ids[10], "unconfirmed", None).unwrap();
+    let f = TimelineFilter {
+        triage: Some("validated".into()),
+        limit: 100,
+        ..Default::default()
+    };
+    assert_eq!(store.count_timeline(&f).unwrap(), 1);
+    assert_eq!(store.timeline(&f).unwrap()[0].id, ids[2900]);
+    let mut counts = store
+        .column_values("triage", &TimelineFilter::default(), 10)
+        .unwrap();
+    counts.sort();
+    assert_eq!(
+        counts,
+        vec![("unconfirmed".to_string(), 1), ("validated".to_string(), 1)]
+    );
+    // Tags filter the same way, and combine with a triage state.
+    store.add_label(&ids[2900], "lateral-movement").unwrap();
+    store.add_label(&ids[5], "lateral-movement").unwrap();
+    let tagged = TimelineFilter {
+        label: Some("lateral-movement".into()),
+        limit: 100,
+        ..Default::default()
+    };
+    assert_eq!(store.count_timeline(&tagged).unwrap(), 2);
+    let both = TimelineFilter {
+        triage: Some("validated".into()),
+        ..tagged.clone()
+    };
+    assert_eq!(store.count_timeline(&both).unwrap(), 1);
+    assert_eq!(
+        store
+            .column_values("label", &TimelineFilter::default(), 10)
+            .unwrap(),
+        vec![("lateral-movement".to_string(), 2)]
+    );
+}

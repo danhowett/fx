@@ -25,6 +25,7 @@ fn main() {
             commands::progress_snapshot,
             commands::query_timeline,
             commands::count_timeline,
+            commands::column_values,
             commands::event_raw,
             commands::run_hunt,
             commands::hunt_results,

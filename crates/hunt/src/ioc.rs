@@ -263,10 +263,11 @@ struct Acc {
 
 fn record_hit(a: &mut Acc, id: &str, ts: &str, art: &str) {
     a.events += 1;
-    if a.first.as_deref().is_none_or(|f| ts < f) {
+    // Undated hits ("" time) count, but don't set first / last seen.
+    if !ts.is_empty() && a.first.as_deref().is_none_or(|f| ts < f) {
         a.first = Some(ts.to_string());
     }
-    if a.last.as_deref().is_none_or(|l| ts > l) {
+    if !ts.is_empty() && a.last.as_deref().is_none_or(|l| ts > l) {
         a.last = Some(ts.to_string());
     }
     if a.ids.len() < EVENT_ID_CAP {
@@ -419,7 +420,7 @@ pub fn sweep(store: &CaseStore, parsed: &ParsedIocs) -> Result<SweepReport, Stor
                 .ok()
             })
             .map(|p| p.assume_utc())
-            .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+            .unwrap_or(fx_core::UNDATED);
         dets.push(Detection {
             id: Uuid::new_v4(),
             rule_id: format!(

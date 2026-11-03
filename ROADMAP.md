@@ -24,6 +24,8 @@ collection tool produced it, and what looked wrong.
 - [x] Convert local-time sources (setupapi, TeamViewer) to UTC using the
       analysed host's own time-zone rule, keeping the original value
 - [x] Optional display time zone (UTC / host local)
+- [x] No invented times: records without a time are "no timestamp" (Undated), never 01/01/1970
+- [x] $MFT $FN times alongside $SI, and a $SI-before-$FN timestomping check
 
 ### Compatibility
 - [ ] Versioned case-file schema with an upgrade path, and a test that opens
