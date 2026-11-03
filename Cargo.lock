@@ -1753,7 +1753,7 @@ dependencies = [
 
 [[package]]
 name = "fx-cli"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "fx-core",
@@ -1769,7 +1769,7 @@ dependencies = [
 
 [[package]]
 name = "fx-core"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "serde",
@@ -1781,7 +1781,7 @@ dependencies = [
 
 [[package]]
 name = "fx-gui"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "fx-core",
  "fx-hunt",
@@ -1799,7 +1799,7 @@ dependencies = [
 
 [[package]]
 name = "fx-hunt"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "fx-core",
@@ -1816,7 +1816,7 @@ dependencies = [
 
 [[package]]
 name = "fx-identify"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "fx-core",
@@ -1830,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "fx-ingest"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "fx-core",
@@ -1846,7 +1846,7 @@ dependencies = [
 
 [[package]]
 name = "fx-parsers"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1874,7 +1874,7 @@ dependencies = [
 
 [[package]]
 name = "fx-store"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "duckdb",

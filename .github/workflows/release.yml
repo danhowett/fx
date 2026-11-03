@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag to build and upload to (e.g. v0.1.11)"
+        description: "Existing release tag to build and upload to (e.g. v0.1.12)"
         required: true
 
 permissions:

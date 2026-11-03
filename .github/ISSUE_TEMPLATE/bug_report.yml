@@ -11,7 +11,7 @@ body:
     attributes:
       label: fx version
       description: The release you downloaded (from the GitHub Releases page).
-      placeholder: v0.1.11
+      placeholder: v0.1.12
     validations:
       required: true
   - type: dropdown

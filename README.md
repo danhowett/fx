@@ -2,7 +2,7 @@
 
 <p align="center"><b>Windows artefact analysis &amp; threat hunting — local, offline, hunting-first.</b></p>
 
-<p align="center"><i>Early developer preview · v0.1.11</i></p>
+<p align="center"><i>Early developer preview · v0.1.12</i></p>
 
 ---
 

@@ -26,7 +26,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.11"
+version = "0.1.12"
 edition = "2021"
 rust-version = "1.77"
 license = "LicenseRef-fx-Source-Available-1.0"
