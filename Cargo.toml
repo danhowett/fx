@@ -26,7 +26,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.11"
 edition = "2021"
 rust-version = "1.77"
 license = "LicenseRef-fx-Source-Available-1.0"
@@ -71,3 +71,14 @@ roxmltree = "0.20"
 rusqlite = { version = "0.31", features = ["bundled"] }
 # Shell Link (.lnk) + Jump List reader — panic-free, bounds-checked.
 lnk-core = "0.3"
+
+# Style lints the code base deliberately doesn't follow (parsers mirror on-disk
+# record layouts, so wide constructors and complex tuples are normal here).
+# Everything else clippy reports is treated as an error in CI.
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+unnecessary_sort_by = "allow"
+doc_lazy_continuation = "allow"
+doc_overindented_list_items = "allow"
+field_reassign_with_default = "allow"

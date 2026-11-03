@@ -2,7 +2,7 @@
 
 <p align="center"><b>Windows artefact analysis &amp; threat hunting — local, offline, hunting-first.</b></p>
 
-<p align="center"><i>Early developer preview · v0.1.9</i></p>
+<p align="center"><i>Early developer preview · v0.1.11</i></p>
 
 ---
 
@@ -122,6 +122,13 @@ click a day to pivot the timeline to it.
 
 ![Activity graph](docs/screenshot-graph.png)
 
+### New case
+Pick the collection folder and fx shows what it recognises inside (artefact
+types, file counts, sizes, the host and collection tool) before anything is
+ingested, so a wrong folder is obvious before you start.
+
+<p align="center"><img src="docs/screenshot-newcase.png" alt="New case window" width="560"></p>
+
 ### Live progress
 Ingest, detections and Sigma runs show what's happening and how long is left —
 and can be cancelled without losing the work already done.
@@ -134,7 +141,7 @@ and can be cancelled without losing the work already done.
 
 ### Artefacts
 - **Broad coverage** — EVTX, `$MFT`, registry hives, Prefetch, AmCache, SRUM,
-  `$UsnJrnl`, scheduled tasks, browser history (Chromium / Edge / Firefox),
+  `$UsnJrnl`, scheduled tasks, browser history and cookies (Chromium / Edge / Firefox),
   LNK / jump-lists, PowerShell console history, Windows Timeline, Recycle Bin,
   USB / device, network-profile & autostart registry keys, Run-dialog (RunMRU),
   outbound-RDP history, and **remote-access tool logs** (AnyDesk, TeamViewer,
@@ -146,8 +153,10 @@ and can be cancelled without losing the work already done.
   names carved from `pagefile.sys` / `swapfile.sys` (the rules and IOC hunt
   run on them), plus `hiberfil.sys` state.
 - **$MFT MACB, both sets** — one row per $SI time (M / A / C / B), with the
-  $FILE_NAME times beside them in the detail panel, and a **timestomping**
-  check when a file's $SI creation time predates its $FN creation time.
+  $FILE_NAME times beside them in the detail panel. A file whose $SI creation
+  time predates its $FN creation time, with whole-second $SI times, gets a
+  **Possible timestomping** event on the timeline (not a finding: search
+  `timestomp` to review them).
 - **No invented times** — a record with no time shows "no timestamp", never
   01/01/1970, and stays out of date ranges, graphs and time-window rules.
 - **PCA and setupapi** — Windows 11 Program Compatibility Assistant launch
@@ -284,9 +293,9 @@ fx report host01.fxcase report.html
 fx report host01.fxcase dc01-report.html --host DC01
 ```
 
-Or launch **`fx-gui`** for the analyst workspace: **New case** → pick the
-collection folder and where to save the `.fxcase`, and fx ingests, hunts and
-opens it for you. Run in a plain browser, the UI loads representative sample
+Or launch **`fx-gui`** for the analyst workspace: **New case** → browse to the
+collection folder, check what fx found in it, name the case and choose where to
+save the `.fxcase`, and fx ingests, hunts and opens it for you. Run in a plain browser, the UI loads representative sample
 data so you can explore it before loading real evidence.
 
 ---

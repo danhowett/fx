@@ -276,6 +276,28 @@ pub async fn ingest_collection(
     Ok(overview)
 }
 
+/// What fx would ingest from a folder (New case / Add host window). Header
+/// reads only: nothing is hashed, parsed or written.
+#[tauri::command]
+pub async fn preview_collection(
+    collection_dir: String,
+) -> Result<fx_ingest::CollectionPreview, String> {
+    let dir = PathBuf::from(collection_dir);
+    if !dir.is_dir() {
+        return Err(format!("not a folder: {}", dir.display()));
+    }
+    tauri::async_runtime::spawn_blocking(move || fx_ingest::preview_collection(&dir))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// True if a file or folder already exists at `path` (so the New case window
+/// can warn before ingest refuses to overwrite a case).
+#[tauri::command]
+pub fn path_exists(path: String) -> bool {
+    std::path::Path::new(&path).exists()
+}
+
 /// What adding a collection produced.
 #[derive(Debug, Serialize)]
 pub struct AddCollectionResult {

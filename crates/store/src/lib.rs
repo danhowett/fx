@@ -124,6 +124,10 @@ impl CaseStore {
         if hosts > 1 {
             store.sync_detection_hosts()?;
         }
+        // Cases from v0.1.10 can carry hundreds of thousands of automatic
+        // "unconfirmed" marks left by retired findings (the old timestomp rule):
+        // clear them so triage loads quickly.
+        store.prune_auto_unconfirmed()?;
         Ok(store)
     }
 
@@ -417,14 +421,24 @@ impl CaseStore {
     /// the GUI's "Ingest log" view so analysts can see coverage and failures.
     pub fn ingest_log(&self) -> Result<Vec<IngestLogRow>, StoreError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT source_path, artefact_kind, status, detail,
-                    records_read, events_emitted, warning_count,
-                    COALESCE((SELECT host FROM collections c WHERE c.collection_id = ingest_report.collection_id), '')
-             FROM ingest_report
-             WHERE 1=1{}
+            // Files fx couldn't identify at all are hashed into `unclassified`
+            // rather than ingest_report; list them too, as unsupported, so
+            // every file in the collection is accounted for here.
+            "SELECT * FROM (
+               SELECT source_path, artefact_kind, status, detail,
+                      records_read, events_emitted, warning_count,
+                      COALESCE((SELECT host FROM collections c WHERE c.collection_id = ingest_report.collection_id), '') AS host
+               FROM ingest_report
+               WHERE 1=1{scope}
+               UNION ALL
+               SELECT source_path, 'Unclassified', 'unsupported', reason, 0, 0, 0,
+                      COALESCE((SELECT host FROM collections c WHERE c.collection_id = unclassified.collection_id), '')
+               FROM unclassified
+               WHERE 1=1{scope}
+             )
              ORDER BY CASE status WHEN 'failed' THEN 0 WHEN 'unsupported' THEN 1 ELSE 2 END,
                       source_path",
-            self.scope_collection_sql("collection_id")
+            scope = self.scope_collection_sql("collection_id")
         ))?;
         let rows = stmt
             .query_map([], |r| {
@@ -448,30 +462,31 @@ impl CaseStore {
     /// just rule detections. Returns (event_id, state, note, ts, host, action,
     /// artefact, message).
     pub fn triaged_events(&self) -> Result<Vec<TriagedEvent>, StoreError> {
-        // Reuse the proven per-id lookup (string bind against the UUID column,
-        // same path as raw_json which is known to match) rather than a
-        // column-to-column JOIN, which can behave differently for UUID types.
-        let tags = self.triage_map()?; // (event_id, state, note)
-        let mut out = Vec::with_capacity(tags.len());
+        // One join, both ids compared as text (a direct UUID-to-UUID join has
+        // behaved differently before). This was one lookup per triaged event,
+        // which took minutes with hundreds of thousands of them.
         let mut stmt = self.conn.prepare(
-            "SELECT COALESCE(strftime(ts, '%Y-%m-%dT%H:%M:%S'), ''), host, action, artefact, message
-             FROM events WHERE id = ?",
+            "SELECT CAST(t.event_id AS VARCHAR), substr(t.tag, 8), t.note,
+                    COALESCE(strftime(e.ts, '%Y-%m-%dT%H:%M:%S'), ''), e.host, e.action,
+                    CAST(e.artefact AS VARCHAR), e.message
+             FROM tags t
+             JOIN events e ON CAST(e.id AS VARCHAR) = CAST(t.event_id AS VARCHAR)
+             WHERE t.tag LIKE 'triage:%'",
         )?;
-        for (event_id, state, note) in tags {
-            let mut rows = stmt.query(params![event_id])?;
-            if let Some(r) = rows.next()? {
-                out.push(TriagedEvent {
-                    event_id,
-                    state,
-                    note,
-                    ts: r.get(0)?,
-                    host: r.get(1)?,
-                    action: r.get(2)?,
-                    artefact: r.get(3)?,
-                    message: r.get(4)?,
-                });
-            }
-        }
+        let mut out: Vec<TriagedEvent> = stmt
+            .query_map([], |r| {
+                Ok(TriagedEvent {
+                    event_id: r.get(0)?,
+                    state: r.get(1)?,
+                    note: r.get(2)?,
+                    ts: r.get(3)?,
+                    host: r.get(4)?,
+                    action: r.get(5)?,
+                    artefact: r.get(6)?,
+                    message: r.get(7)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
         if let Some(h) = self.host_scope() {
             out.retain(|t| t.host.as_deref() == Some(h.as_str()));
         }

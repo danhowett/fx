@@ -264,9 +264,13 @@ fn extract_times(entry: &mft::entry::MftEntry) -> (MacbTimes, MacbTimes) {
     (si, fname)
 }
 
-/// Timestomping signals for one entry, or None. The deciding signal is a $SI
-/// Born earlier than the $FN Born (by more than a second); whole-second $SI
-/// times beside fractional $FN times are added as supporting detail.
+/// Timestomping signals for one entry, or None. Both must hold:
+///   * $SI Born earlier than $FN Born (by more than a second), and
+///   * every $SI time is a whole second while the $FN times have fractions —
+///     the mark of a time set through an API at one-second precision.
+/// $SI-before-$FN on its own is everywhere on a real disk (Windows servicing,
+/// installers and archive tools all preserve original times), so it isn't
+/// flagged without the second signal.
 fn timestomp_signals(si: &MacbTimes, fname: &MacbTimes) -> Option<Vec<String>> {
     let (Some(sb), Some(fb)) = (si.born, fname.born) else {
         return None;
@@ -285,21 +289,19 @@ fn timestomp_signals(si: &MacbTimes, fname: &MacbTimes) -> Option<Vec<String>> {
         ))
         .unwrap_or_default()
     };
-    let mut why = vec![format!(
-        "$SI Born {} is earlier than $FN Born {}",
-        fmt(sb),
-        fmt(fb)
-    )];
     let whole = |t: &Option<OffsetDateTime>| t.is_some_and(|t| t.nanosecond() == 0);
-    if si.all().iter().filter(|t| t.is_some()).all(whole)
-        && fname
-            .all()
-            .iter()
-            .any(|t| t.is_some_and(|t| t.nanosecond() != 0))
-    {
-        why.push("$SI times have no sub-second part but $FN times do".into());
+    let si_whole = si.all().iter().filter(|t| t.is_some()).all(whole);
+    let fn_fraction = fname
+        .all()
+        .iter()
+        .any(|t| t.is_some_and(|t| t.nanosecond() != 0));
+    if !(si_whole && fn_fraction) {
+        return None;
     }
-    Some(why)
+    Some(vec![
+        format!("$SI Born {} is earlier than $FN Born {}", fmt(sb), fmt(fb)),
+        "$SI times have no sub-second part but $FN times do".into(),
+    ])
 }
 
 #[cfg(test)]
@@ -323,6 +325,15 @@ mod timestomp_tests {
         let why = timestomp_signals(&si, &fname).expect("flagged");
         assert!(why[0].contains("earlier than $FN Born"));
         assert!(why.iter().any(|w| w.contains("sub-second")));
+    }
+
+    #[test]
+    fn copied_or_installed_files_are_not_flagged() {
+        // $SI earlier than $FN but with real sub-second times: what Windows
+        // servicing, installers and archive extraction leave behind.
+        let si = t(datetime!(2019-01-01 08:14:03.4471 UTC));
+        let fname = t(datetime!(2026-10-14 11:23:42.123 UTC));
+        assert!(timestomp_signals(&si, &fname).is_none());
     }
 
     #[test]

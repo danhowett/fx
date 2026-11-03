@@ -58,13 +58,15 @@ match on `event.id` or `message`.
 
 | Artefact | What it surfaces |
 |----------|------------------|
-| `$MFT` | file records with full paths: one timeline row per `$STANDARD_INFORMATION` time (Kind **M** modified, **A** accessed, **C** entry changed, **B** born), with the `$FILE_NAME` times alongside. Opening an `$MFT` row shows all eight times ($SI and $FN, to the sub-second) with that row's time highlighted. A file whose $SI Born is earlier than its $FN Born gets a **Possible timestomping** event and finding (T1070.006); the Windows app-package placeholder time (26/10/1985 02:15:00) is excluded |
+| `$MFT` | file records with full paths: one timeline row per `$STANDARD_INFORMATION` time (Kind **M** modified, **A** accessed, **C** entry changed, **B** born), with the `$FILE_NAME` times alongside. Opening an `$MFT` row shows all eight times ($SI and $FN, to the sub-second) with that row's time highlighted. A file whose $SI Born is earlier than its $FN Born **and** whose $SI times are whole seconds (while its $FN times aren't) gets a **Possible timestomping** event on the timeline: search `timestomp` to review them. It is deliberately not a finding: $SI-before-$FN is common after copy, extract and install operations, so it's a lead to check, not an alert. The Windows app-package placeholder time (26/10/1985 02:15:00) is excluded |
 | `$UsnJrnl:$J` | change-journal entries — create / delete / rename / data-change, with reason flags (flags SDelete and ransomware-extension patterns) |
 
 ### Registry
 
 Hives are parsed with transaction-log (`.LOG1`/`.LOG2`) replay, and deleted keys
-are recovered where possible. Extractors:
+are recovered where possible. In the ingest log those logs show as **applied**
+(replayed into the hive beside them). A log whose hive isn't in the collection,
+or a legacy `.LOG`, shows as unsupported with the reason. Extractors:
 
 | Extractor | Key / data |
 |-----------|-----------|
@@ -98,6 +100,7 @@ are recovered where possible. Extractors:
 | Windows Timeline | `ActivitiesCache.db` — apps run and **files opened** (with the executable path and file/URL from the activity payload) and their timing; corroborates execution and survives when Prefetch/UserAssist were cleared |
 | Scheduled Tasks (XML) | task command, run-as principal (flags elevation), triggers, registration date |
 | Browser history | Chromium + Firefox — visits and downloads, with domain and event type |
+| Browser cookies | Chromium / Edge `Network/Cookies`, Firefox `cookies.sqlite` — the site, cookie name and path, when it was set and when it was last sent. Cookies often survive a cleared history. Cookie values are never read |
 | LNK & Jump Lists | shell-link targets; auto/custom jump lists; flags **removable-media** (USB serial) and **network-share** (UNC) origins; MRU metadata |
 | Recycle Bin (`$I`) | original path, original size, and deletion time of deleted files (both format versions) |
 
@@ -228,6 +231,11 @@ Detections come from two engines: **single-event** (one event matches a rule)
 and **correlation** (a pattern across events, e.g. mass file-rename bursts or
 bulk SRUM exfil).
 
+A single-event rule (built-in or Sigma) keeps at most **1,000 findings** per
+run. A rule matching more than that is matching normal activity: the first
+1,000 are kept as findings and the rest are still on the timeline. The CLI
+(`fx hunt`) reports any rule that hit the cap.
+
 **Hover over an artefact** in the left rail's Artefact list for a short note on
 what that evidence source shows and why it's useful.
 
@@ -340,9 +348,18 @@ host's report.
 
 ## The workflow
 
-1. **New case** — pick an artefact folder (KAPE, Magnet RESPONSE, Velociraptor,
-   CyLR, or a raw copy) and where to save the `.fxcase`. fx ingests, hunts, and
-   displays it automatically.
+1. **New case** — **Browse** to an artefact folder (KAPE, Magnet RESPONSE,
+   Velociraptor, CyLR, or a raw copy). Before anything is ingested, fx lists
+   what it recognises there: each artefact type with its file count and size
+   (hover a row for what it is and example paths), the host and collection
+   tool if it can tell, and the registry transaction logs it will replay.
+   Unsupported files are still hashed, kept as evidence and listed in the
+   ingest log. If it
+   finds nothing, you've probably picked the wrong level of folder. The case is
+   named after the host (or the folder) and saved next to the collection, or
+   wherever you saved your last case; change either before you **Start
+   ingest**. fx ingests, hunts, and displays it automatically. **+ Add host**
+   uses the same window.
    While it works, a progress panel shows the phase, a bar weighted by data
    size, the file being parsed (type, path, size), files and data done, events
    written, elapsed time and an estimate of time left. Detections
@@ -421,11 +438,15 @@ host's report.
    skipped and counted, never half-converted. CLI:
    `fx hunt case.fxcase --sigma <folder> [--sigma-level medium] [--sigma-status stable,test]`.
 7. **Ingest log** — from the rail, see every file ingested and whether it parsed,
-   was unsupported, or failed (with the failure reason).
+   was applied (a hive transaction log), was unsupported, or failed (with the
+   reason).
 8. **Activity graph** — from the rail, a per-day event-count histogram across the
    whole case. It surfaces volume that **no rule tagged**: a day whose event
    count stands well above the baseline is outlined and labelled, so a quiet
-   ~25-event baseline with one 800-event day jumps straight out. The darker base
+   ~25-event baseline with one 800-event day jumps straight out. Spikes are
+   judged on a ratio (log) scale as well as a straight count, and at most the
+   top 2% of days can be spikes, so the bursts every install or update day
+   leaves in the $MFT don't turn a quarter of a long case into "spikes". The darker base
    of each bar is the **flagged** portion — events that tripped a rule *or* that
    you've triaged as Validated / Unconfirmed; it updates live as you triage. A
    tall, mostly-light bar is unexplained activity worth a look. Height switches

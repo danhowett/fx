@@ -38,6 +38,13 @@ pub enum ArtefactStatus {
     /// hashed and recorded as evidence, but not parsed again, so its events
     /// aren't duplicated on the timeline. Holds the original's path.
     Duplicate(String),
+    /// Not parsed on its own, but its content was used by another artefact —
+    /// a registry transaction log (.LOG1/.LOG2) replayed into its hive.
+    /// Holds a short explanation.
+    Applied(String),
+    /// Unsupported, with a reason worth showing (e.g. a transaction log whose
+    /// hive isn't in the collection). Shown as "unsupported".
+    UnsupportedBecause(String),
 }
 
 impl ArtefactStatus {
@@ -47,6 +54,8 @@ impl ArtefactStatus {
             ArtefactStatus::Unsupported => "unsupported",
             ArtefactStatus::Failed(_) => "failed",
             ArtefactStatus::Duplicate(_) => "duplicate",
+            ArtefactStatus::Applied(_) => "applied",
+            ArtefactStatus::UnsupportedBecause(_) => "unsupported",
         }
     }
     fn detail(&self) -> Option<String> {
@@ -55,8 +64,129 @@ impl ArtefactStatus {
             ArtefactStatus::Duplicate(orig) => {
                 Some(format!("identical (SHA-256) to {orig}; not parsed again"))
             }
+            ArtefactStatus::Applied(why) | ArtefactStatus::UnsupportedBecause(why) => {
+                Some(why.clone())
+            }
             _ => None,
         }
+    }
+}
+
+/// One artefact kind found by [`preview_collection`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PreviewGroup {
+    /// ArtefactKind name, as the rail shows it (e.g. "Evtx").
+    pub kind: String,
+    pub files: usize,
+    pub bytes: u64,
+    /// A few of the files, collection-relative, for a quick sanity check.
+    pub examples: Vec<String>,
+}
+
+/// What fx would ingest from a folder, without ingesting it: shown in the
+/// New case window so the analyst can check they picked the right folder.
+/// Reads only file headers (the same identification ingest does); no hashing,
+/// no parsing, nothing written.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CollectionPreview {
+    pub total_files: usize,
+    pub total_bytes: u64,
+    pub groups: Vec<PreviewGroup>,
+    /// Registry .LOG1/.LOG2/.LOG files (replayed into their hive, not parsed alone).
+    pub transaction_logs: usize,
+    /// Files fx doesn't recognise: still hashed and kept as evidence.
+    pub unrecognised: usize,
+    /// Collection tool, if one was recognised (e.g. KAPE).
+    pub profile: Option<String>,
+    /// Host name the collection tool recorded, if any.
+    pub host_hint: Option<String>,
+    pub errors: Vec<String>,
+}
+
+pub fn preview_collection(root: &Path) -> CollectionPreview {
+    let scan = scan_collection(root);
+    let size = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let mut groups: std::collections::BTreeMap<String, PreviewGroup> = Default::default();
+    let (mut transaction_logs, mut unrecognised, mut total_bytes) = (0usize, 0usize, 0u64);
+    let mut host_hint = None;
+    for a in &scan.artefacts {
+        let bytes = size(&a.path);
+        total_bytes += bytes;
+        if host_hint.is_none() {
+            host_hint = a
+                .profile_hint
+                .as_ref()
+                .and_then(|h| h.asserted_host.clone())
+                .filter(|h| !h.trim().is_empty());
+        }
+        if a.artefact == fx_core::ArtefactKind::Unclassified {
+            if transaction_log_status(a).is_some() {
+                transaction_logs += 1;
+            } else {
+                unrecognised += 1;
+            }
+            continue;
+        }
+        let kind = format!("{:?}", a.artefact);
+        let g = groups.entry(kind.clone()).or_insert_with(|| PreviewGroup {
+            kind,
+            files: 0,
+            bytes: 0,
+            examples: Vec::new(),
+        });
+        g.files += 1;
+        g.bytes += bytes;
+        if g.examples.len() < 3 {
+            g.examples.push(a.source_path.clone());
+        }
+    }
+    for u in &scan.unclassified {
+        unrecognised += 1;
+        total_bytes += size(&u.path);
+    }
+    let mut groups: Vec<PreviewGroup> = groups.into_values().collect();
+    groups.sort_by(|a, b| b.files.cmp(&a.files).then(a.kind.cmp(&b.kind)));
+    CollectionPreview {
+        total_files: scan.artefacts.len() + scan.unclassified.len(),
+        total_bytes,
+        groups,
+        transaction_logs,
+        unrecognised,
+        profile: scan.profile,
+        host_hint,
+        errors: scan.errors.into_iter().take(20).collect(),
+    }
+}
+
+/// What a registry transaction log in the collection means for the case.
+/// The registry parser replays `<hive>.LOG1` / `<hive>.LOG2` from the hive's
+/// own folder, so a log whose hive sits beside it has already been used.
+/// Returns `None` for anything that isn't a registry transaction log.
+fn transaction_log_status(artefact: &IdentifiedArtefact) -> Option<ArtefactStatus> {
+    if artefact.container != fx_core::ContainerFormat::RegistryHive {
+        return None;
+    }
+    let name = artefact.path.file_name()?.to_str()?;
+    let lower = name.to_ascii_lowercase();
+    let (hive_name, ext) = lower.rsplit_once('.')?;
+    match ext {
+        "log1" | "log2" => {
+            let dir = artefact.path.parent()?;
+            let hive = std::fs::read_dir(dir).ok()?.flatten().find_map(|e| {
+                let n = e.file_name().to_str()?.to_string();
+                (n.to_ascii_lowercase() == hive_name && e.path().is_file()).then_some(n)
+            });
+            Some(match hive {
+                Some(h) => ArtefactStatus::Applied(format!("transaction log replayed into {h}")),
+                None => ArtefactStatus::UnsupportedBecause(format!(
+                    "transaction log, but its hive ({hive_name}) isn't in the collection"
+                )),
+            })
+        }
+        "log" => Some(ArtefactStatus::UnsupportedBecause(
+            "legacy transaction log (.LOG): not replayed".into(),
+        )),
+        _ => None,
     }
 }
 
@@ -315,7 +445,12 @@ fn ingest_one(
             outcome.events_emitted,
             outcome.warnings.into_iter().map(|w| w.message).collect(),
         ),
-        Ok(Ok(None)) => (ArtefactStatus::Unsupported, 0, 0, Vec::new()),
+        Ok(Ok(None)) => (
+            transaction_log_status(artefact).unwrap_or(ArtefactStatus::Unsupported),
+            0,
+            0,
+            Vec::new(),
+        ),
         Ok(Err(e)) => (ArtefactStatus::Failed(e.to_string()), 0, 0, Vec::new()),
         Err(panic) => {
             // Recover a readable message from the panic payload.
@@ -377,5 +512,49 @@ impl EventSink for CountingSink<'_> {
         self.count += 1;
         fx_core::progress::add_events(1);
         self.inner.emit(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn log_artefact(dir: &Path, name: &str) -> IdentifiedArtefact {
+        let path = dir.join(name);
+        std::fs::write(&path, b"regf").unwrap();
+        IdentifiedArtefact {
+            evidence_id: uuid::Uuid::new_v4(),
+            path,
+            source_path: name.into(),
+            container: fx_core::ContainerFormat::RegistryHive,
+            artefact: fx_core::ArtefactKind::Unclassified,
+            method: fx_core::IdMethod::Content,
+            confidence: 0.5,
+            profile_hint: None,
+        }
+    }
+
+    #[test]
+    fn transaction_logs_say_whether_their_hive_was_there() {
+        let dir = std::env::temp_dir().join(format!("fx-txlog-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SOFTWARE"), b"regf").unwrap();
+
+        let applied = transaction_log_status(&log_artefact(&dir, "SOFTWARE.LOG1"));
+        assert!(matches!(&applied, Some(ArtefactStatus::Applied(m)) if m.contains("SOFTWARE")));
+        assert_eq!(applied.unwrap().label(), "applied");
+
+        let orphan = transaction_log_status(&log_artefact(&dir, "BBI.LOG2"));
+        assert!(
+            matches!(&orphan, Some(ArtefactStatus::UnsupportedBecause(m)) if m.contains("bbi"))
+        );
+        assert_eq!(orphan.unwrap().label(), "unsupported");
+
+        let legacy = transaction_log_status(&log_artefact(&dir, "SOFTWARE.LOG"));
+        assert!(matches!(
+            legacy,
+            Some(ArtefactStatus::UnsupportedBecause(_))
+        ));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

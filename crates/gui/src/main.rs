@@ -14,6 +14,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::open_case,
             commands::ingest_collection,
+            commands::preview_collection,
+            commands::path_exists,
             commands::add_collection,
             commands::list_hosts,
             commands::rename_host,

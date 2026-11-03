@@ -121,6 +121,8 @@ export const backend = {
 
   // Native pickers (Tauri dialog plugin). Return null if the user cancels or
   // if we're running outside Tauri (plain browser demo mode).
+  previewCollection: (collection_dir) => call("preview_collection", { collectionDir: collection_dir }),
+  pathExists: (path) => call("path_exists", { path }),
   pickFolder: async (title) => {
     if (!hasTauri) return window.__fxDemoPick ? "C:\\cases\\demo-collection" : null;
     return window.__TAURI__.dialog.open({ directory: true, multiple: false, title });
@@ -289,6 +291,24 @@ const scopeRows = (h) => (h ? SEED.filter((e) => e.host === h) : SEED);
 function sample(cmd, args) {
   if (cmd === "cancel_job") { demoCancel = true; return Promise.resolve(null); }
   if (cmd === "list_hosts") { return Promise.resolve(demoHosts()); }
+  if (cmd === "preview_collection") {
+    const g = (kind, files, mb, ex) => ({ kind, files, bytes: Math.round(mb * 1048576), examples: ex });
+    return new Promise((res) => setTimeout(() => res({
+      total_files: 1284, total_bytes: 2147483648 * 1.6, profile: "KAPE", host_hint: "WS-FIN-042",
+      groups: [
+        g("Lnk", 412, 3.1, ["C/Users/jsmith/AppData/Roaming/Microsoft/Windows/Recent/invoice.lnk"]),
+        g("Evtx", 148, 690, ["C/Windows/System32/winevt/Logs/Security.evtx", "C/Windows/System32/winevt/Logs/System.evtx"]),
+        g("Prefetch", 212, 9.4, ["C/Windows/prefetch/RCLONE.EXE-1A2B3C4D.pf"]),
+        g("ScheduledTask", 96, 0.8, ["C/Windows/System32/Tasks/Microsoft/Windows/Defrag/ScheduledDefrag"]),
+        g("JumpList", 44, 2.2, []), g("RegistryGeneric", 9, 180, ["C/Windows/System32/config/SYSTEM", "C/Windows/System32/config/SOFTWARE"]),
+        g("BrowserHistory", 6, 24, ["C/Users/jsmith/AppData/Local/Microsoft/Edge/User Data/Default/History"]),
+        g("Mft", 1, 512, ["C/$MFT"]), g("UsnJrnl", 1, 1024, ["C/$Extend/$UsnJrnl:$J"]), g("Srum", 1, 40, ["C/Windows/System32/sru/SRUDB.dat"]),
+        g("Amcache", 1, 6, ["C/Windows/AppCompat/Programs/Amcache.hve"]), g("PsHistory", 1, 0.01, []),
+      ],
+      transaction_logs: 26, unrecognised: 47, errors: [],
+    }), 700));
+  }
+  if (cmd === "path_exists") return Promise.resolve(/existing/i.test(args.path || ""));
   if (cmd === "add_collection") {
     if (hasDC()) return Promise.reject(new Error("this collection folder is already in this case"));
     return demoJob("ingest", 4000).then(() => {
@@ -452,6 +472,9 @@ function sample(cmd, args) {
     ...(hasDC() ? [{ source_path: "C/Windows/NTDS/ntds.dit", artefact_kind: "Unclassified", status: "unsupported", detail: "no parser for this artefact kind", records_read: 0, events_emitted: 0, warning_count: 0, host: HN.dc },
       { source_path: "C/Windows/System32/winevt/Logs/Security.evtx", artefact_kind: "Evtx", status: "parsed", detail: null, records_read: 905, events_emitted: 905, warning_count: 0, host: HN.dc }] : []),
     { source_path: "C/Windows/System32/winevt/Logs/Security.evtx", artefact_kind: "Evtx", status: "parsed", detail: null, records_read: 4217, events_emitted: 4217, warning_count: 0, host: HN.wk },
+    { source_path: "C/Windows/System32/config/SOFTWARE.LOG1", artefact_kind: "Unclassified", status: "applied", detail: "transaction log replayed into SOFTWARE", records_read: 0, events_emitted: 0, warning_count: 0, host: HN.wk },
+    { source_path: "C/Windows/System32/config/SYSTEM.LOG2", artefact_kind: "Unclassified", status: "applied", detail: "transaction log replayed into SYSTEM", records_read: 0, events_emitted: 0, warning_count: 0, host: HN.wk },
+    { source_path: "C/Windows/System32/config/BBI.LOG1", artefact_kind: "Unclassified", status: "unsupported", detail: "transaction log, but its hive (bbi) isn't in the collection", records_read: 0, events_emitted: 0, warning_count: 0, host: HN.wk },
     { source_path: "C/$MFT", artefact_kind: "Mft", status: "parsed", detail: null, records_read: 1051, events_emitted: 1051, warning_count: 3, host: HN.wk },
     { source_path: "C/Windows/Prefetch/README.txt", artefact_kind: "Unclassified", status: "unsupported", detail: "no parser for this artefact kind", records_read: 0, events_emitted: 0, warning_count: 0, host: HN.wk },
     { source_path: "C/corrupt/SOFTWARE", artefact_kind: "RegistryGeneric", status: "failed", detail: "notatin: unexpected end of hive bin at offset 0x4000", records_read: 0, events_emitted: 0, warning_count: 0, host: HN.wk },

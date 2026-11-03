@@ -151,6 +151,22 @@ impl CaseStore {
         Ok(rows)
     }
 
+    /// Drop automatic "unconfirmed" triage marks (no analyst note) from events
+    /// no finding points at any more — e.g. after a rule is retired or a re-run
+    /// finds less. Marks with a note, and every other triage state, are the
+    /// analyst's and stay.
+    pub fn prune_auto_unconfirmed(&self) -> Result<(), StoreError> {
+        self.ensure_suppress_table()?;
+        self.connection().execute_batch(&format!(
+            "DELETE FROM tags WHERE tag = 'triage:unconfirmed' AND (note IS NULL OR note = '')
+               AND CAST(event_id AS VARCHAR) NOT IN ({d})
+               AND CAST(event_id AS VARCHAR) NOT IN ({s});",
+            d = ids_of("detections"),
+            s = ids_of("suppressed_detections"),
+        ))?;
+        Ok(())
+    }
+
     /// Remove every finding (live or suppressed) a given rule produced for an
     /// engine — used when a Sigma rule is disabled. Returns how many went.
     pub fn delete_rule_findings(&self, engine: &str, rule_id: &str) -> Result<u64, StoreError> {
@@ -164,13 +180,7 @@ impl CaseStore {
             "DELETE FROM suppressed_detections WHERE engine = ? AND rule_id = ?",
             params![engine, rule_id],
         )?;
-        c.execute_batch(&format!(
-            "DELETE FROM tags WHERE tag = 'triage:unconfirmed' AND (note IS NULL OR note = '')
-               AND CAST(event_id AS VARCHAR) NOT IN ({d})
-               AND CAST(event_id AS VARCHAR) NOT IN ({s});",
-            d = ids_of("detections"),
-            s = ids_of("suppressed_detections"),
-        ))?;
+        self.prune_auto_unconfirmed()?;
         Ok(n as u64)
     }
 }

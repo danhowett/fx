@@ -182,12 +182,22 @@ pub fn run(store: &CaseStore, rules: &RuleSet) -> HuntReport {
 /// set. Rules are pre-compiled into one combined matcher per event field (see
 /// `CompiledRules`), so hundreds or thousands of rules cost about the same per
 /// event as tens.
+/// Most findings one single-event rule may produce in a run. A rule that
+/// matches more than this is matching normal activity: the first findings are
+/// kept, the rest stay on the timeline, and the run reports the cap. Without
+/// it, one noisy rule (or Sigma rule) on a multi-million-event case produced
+/// so many findings that the case couldn't be opened.
+pub const MAX_FINDINGS_PER_RULE: usize = 1_000;
+
 fn scan_events(
     store: &CaseStore,
     ev_rules: &[EventRule],
     engine: DetectionEngine,
 ) -> (Vec<Detection>, Option<String>) {
     let mut detections: Vec<Detection> = Vec::new();
+    // Findings per rule (index into ev_rules) and matches over the cap.
+    let mut per_rule: Vec<usize> = vec![0; ev_rules.len()];
+    let mut over_cap: Vec<usize> = vec![0; ev_rules.len()];
     // Parse `raw` per row only if some loaded rule reads a raw-backed field
     // (event.id / extras.* / Sigma EventData fields).
     let needs_raw = crate::event_rule::any_rule_needs_raw(ev_rules);
@@ -287,9 +297,18 @@ fn scan_events(
                         }
                         continue;
                     }
+                    if per_rule[ri] >= MAX_FINDINGS_PER_RULE {
+                        over_cap[ri] += 1;
+                        continue;
+                    }
                     mft_seen.insert(key, detections.len());
                 }
             }
+            if per_rule[ri] >= MAX_FINDINGS_PER_RULE {
+                over_cap[ri] += 1;
+                continue;
+            }
+            per_rule[ri] += 1;
             detections.push(Detection {
                 id: Uuid::new_v4(),
                 rule_id: rule.id.clone(),
@@ -317,10 +336,23 @@ fn scan_events(
             }
         }
     }
-    (
-        detections,
-        scan.err().map(|e| format!("single-event scan: {e}")),
-    )
+    let mut notes: Vec<String> = ev_rules
+        .iter()
+        .zip(&over_cap)
+        .filter(|(_, n)| **n > 0)
+        .map(|(r, n)| {
+            format!(
+                "rule `{}` matched too often: kept the first {} findings, {} more matches are on the timeline only",
+                r.id,
+                MAX_FINDINGS_PER_RULE,
+                n
+            )
+        })
+        .collect();
+    if let Err(e) = scan {
+        notes.insert(0, format!("single-event scan: {e}"));
+    }
+    (detections, (!notes.is_empty()).then(|| notes.join("\n")))
 }
 
 /// Per-rule outcome of a Sigma run.
@@ -500,10 +532,6 @@ static EMBEDDED_RULES: &[(&str, &str)] = &[
     (
         "office_macros_enabled.yml",
         include_str!("../rules/office_macros_enabled.yml"),
-    ),
-    (
-        "mft_timestomp.yml",
-        include_str!("../rules/mft_timestomp.yml"),
     ),
     (
         "user_search_sensitive_terms.yml",

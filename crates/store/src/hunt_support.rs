@@ -110,7 +110,8 @@ impl CaseStore {
         self.connection()
             .execute_batch("DELETE FROM detections WHERE engine NOT IN ('ioc', 'sigma')")?;
         self.clear_suppressed_where("engine NOT IN ('ioc', 'sigma')")?;
-        self.insert_detections(dets)
+        self.insert_detections(dets)?;
+        self.prune_auto_unconfirmed()
     }
 
     /// Replace the Sigma-run findings (and only those) with a new run's.
@@ -118,7 +119,8 @@ impl CaseStore {
         self.connection()
             .execute_batch("DELETE FROM detections WHERE engine = 'sigma'")?;
         self.clear_suppressed_where("engine = 'sigma'")?;
-        self.insert_detections(dets)
+        self.insert_detections(dets)?;
+        self.prune_auto_unconfirmed()
     }
 
     /// Replace the IOC-sweep findings (and only those) with a new sweep's.
@@ -126,7 +128,8 @@ impl CaseStore {
         self.connection()
             .execute_batch("DELETE FROM detections WHERE engine = 'ioc'")?;
         self.clear_suppressed_where("engine = 'ioc'")?;
-        self.insert_detections(dets)
+        self.insert_detections(dets)?;
+        self.prune_auto_unconfirmed()
     }
 
     fn insert_detections(&self, dets: &[Detection]) -> Result<(), StoreError> {

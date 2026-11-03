@@ -160,19 +160,22 @@ fn print_ingest(report: &IngestReport) {
         report.unclassified
     );
 
-    let (mut parsed, mut unsupported, mut failed, mut duplicate) = (0, 0, 0, 0);
+    let (mut parsed, mut unsupported, mut failed, mut duplicate, mut applied) = (0, 0, 0, 0, 0);
     for a in &report.artefacts {
         match &a.status {
             ArtefactStatus::Parsed => parsed += 1,
-            ArtefactStatus::Unsupported => unsupported += 1,
+            ArtefactStatus::Unsupported | ArtefactStatus::UnsupportedBecause(_) => unsupported += 1,
             ArtefactStatus::Failed(msg) => {
                 failed += 1;
                 eprintln!("  FAILED {}: {msg}", a.source_path);
             }
             ArtefactStatus::Duplicate(_) => duplicate += 1,
+            ArtefactStatus::Applied(_) => applied += 1,
         }
     }
-    println!("  parsed={parsed} unsupported={unsupported} failed={failed} duplicate={duplicate}");
+    println!(
+        "  parsed={parsed} applied={applied} unsupported={unsupported} failed={failed} duplicate={duplicate}"
+    );
 
     if !report.scan_errors.is_empty() {
         eprintln!("\nScan errors ({}):", report.scan_errors.len());

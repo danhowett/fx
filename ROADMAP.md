@@ -14,7 +14,7 @@ collection tool produced it, and what looked wrong.
 - [ ] Confirm the v0.1.6 / v0.1.7 parsers on real artefacts: user activity
       (NTUSER.DAT), PCA, setupapi, pagefile / swapfile carving, Defender MPLog
 - [ ] Allow-list and Sigma runs on a multi-million-event case
-- [ ] Multi-host cases (v0.1.9) on real collections: host naming, per-host time
+- [ ] Multi-host cases (v0.1.10) on real collections: host naming, per-host time
       zones, and adding a host to a case made by an earlier version
 
 ### Accuracy
@@ -25,7 +25,7 @@ collection tool produced it, and what looked wrong.
       analysed host's own time-zone rule, keeping the original value
 - [x] Optional display time zone (UTC / host local)
 - [x] No invented times: records without a time are "no timestamp" (Undated), never 01/01/1970
-- [x] $MFT $FN times alongside $SI, and a $SI-before-$FN timestomping check
+- [x] $MFT $FN times alongside $SI, and a $SI-before-$FN timestomping check (timeline event, not a finding)
 
 ### Compatibility
 - [ ] Versioned case-file schema with an upgrade path, and a test that opens

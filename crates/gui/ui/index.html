@@ -477,6 +477,7 @@
   .st-badge { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; padding: 1px 6px; border-radius: 3px; color: #fff; }
   .st-parsed { background: #2e9e5b; }
   .st-unsupported { background: #c99a2e; }
+  .st-applied { background: #4f7fb8; }
   .st-failed { background: var(--alert); }
   .ilog .detail { color: var(--ink-faint); font-size: 11px; }
   .ilog-summary { display: flex; gap: 14px; padding: 10px 16px; border-bottom: 1px solid var(--line); font-size: 12px; }
@@ -645,7 +646,7 @@
   @media (max-width: 900px) { .decv { grid-template-columns: 1fr; } .decv-left { border-right: 0; border-bottom: 1px solid var(--line); } }
   /* hover tip for rail entries (artefact descriptions) */
   .rail-tip {
-    position: fixed; z-index: 900; max-width: 340px; padding: 8px 11px; border-radius: 6px;
+    position: fixed; z-index: 1200; max-width: 340px; padding: 8px 11px; border-radius: 6px;
     background: var(--surface); color: var(--ink); border: 1px solid var(--line);
     box-shadow: 0 6px 20px rgba(0,0,0,.25); font-size: 12px; line-height: 1.45; white-space: pre-line;
     opacity: 0; pointer-events: none; transition: opacity .12s;
@@ -1104,6 +1105,37 @@
   }
   .btn-primary:disabled { opacity: .4; cursor: not-allowed; }
 
+  /* new case / add host window */
+  .nc-modal { width: 560px; max-height: calc(100vh - 48px); display: flex; flex-direction: column; }
+  .nc-field { margin-bottom: 12px; }
+  .nc-label { display: block; font-size: 11.5px; color: var(--ink-dim); margin-bottom: 4px; }
+  .nc-pick { display: flex; align-items: center; gap: 8px; }
+  .nc-path {
+    flex: 1; min-width: 0; font-family: var(--mono); font-size: 11.5px; color: var(--ink);
+    background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 6px;
+    padding: 6px 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
+  }
+  .nc-path.empty { font-family: var(--sans); color: var(--ink-faint); direction: ltr; }
+  .nc-input {
+    width: 100%; box-sizing: border-box; background: var(--surface-2); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 9px; color: var(--ink); font: 13px var(--sans);
+  }
+  .nc-input:focus, .nc-pick .topbtn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+  .nc-warn { font-size: 11.5px; color: var(--alert); margin-top: 5px; }
+  .nc-preview { margin: -2px 0 14px; overflow-y: auto; min-height: 0; flex: 1 1 auto; }
+  .nc-preview:empty { display: none; }
+  .nc-busy { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--ink-dim); padding: 10px 2px; }
+  .nc-busy .spinner { width: 14px; height: 14px; border-width: 2px; margin: 0; }
+  .nc-meta { font-size: 12px; color: var(--ink-dim); margin-bottom: 8px; }
+  .nc-meta b { color: var(--ink); font-weight: 600; }
+  .nc-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .nc-table td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
+  .nc-table td.n { text-align: right; font-family: var(--sans); color: var(--ink-dim); white-space: nowrap; width: 1%; }
+  .nc-table tr[data-tip] td:first-child { cursor: help; }
+  .nc-scroll { max-height: 240px; overflow-y: auto; border: 1px solid var(--line-soft); border-radius: 7px; padding: 2px 6px; }
+  .nc-note { font-size: 11.5px; color: var(--ink-faint); margin-top: 7px; line-height: 1.5; }
+  .nc-empty { font-size: 12.5px; color: var(--ink); background: var(--surface-2); border-left: 3px solid #c99a2e; padding: 9px 11px; border-radius: 4px; line-height: 1.5; }
+
   /* findings section — top billing */
   .findings.active { background: var(--surface-2); }
   .findings-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
@@ -1186,6 +1218,33 @@
   </div>
 
   <!-- Ingest / open progress overlay -->
+  <div class="modal-back" id="ncModal" role="dialog" aria-modal="true" aria-labelledby="ncTitle">
+    <div class="exp-modal nc-modal">
+      <h3 id="ncTitle">New case</h3>
+      <div class="exp-sub" id="ncSub">Choose your folder of collected artefacts. fx lists what it finds for you to review before ingest begins.</div>
+      <div class="nc-field">
+        <div class="nc-label">Collection folder</div>
+        <div class="nc-pick"><span class="nc-path empty" id="ncFolder">No folder chosen</span><button class="topbtn" id="ncBrowse">Browse…</button></div>
+      </div>
+      <div class="nc-preview" id="ncPreview"></div>
+      <div id="ncCaseFields">
+        <div class="nc-field">
+          <label class="nc-label" for="ncName">Case name</label>
+          <input class="nc-input" id="ncName" type="text" spellcheck="false" autocomplete="off">
+        </div>
+        <div class="nc-field">
+          <div class="nc-label">Save case as</div>
+          <div class="nc-pick"><span class="nc-path empty" id="ncSave">Chosen once you pick a folder</span><button class="topbtn" id="ncSaveBtn">Change…</button></div>
+          <div class="nc-warn" id="ncSaveWarn" hidden></div>
+        </div>
+      </div>
+      <div class="exp-foot">
+        <span class="total" id="ncTotal"></span>
+        <button class="topbtn" id="ncCancel">Cancel</button>
+        <button class="btn-primary" id="ncGo" disabled>Start ingest</button>
+      </div>
+    </div>
+  </div>
   <div class="modal-back" id="exportModal" role="dialog" aria-modal="true" aria-labelledby="expTitle">
     <div class="exp-modal">
       <h3 id="expTitle">Export findings</h3>

@@ -1,4 +1,8 @@
-//! Browser history parser — Chromium (`History`) and Firefox (`places.sqlite`).
+//! Browser history parser — Chromium (`History`) and Firefox (`places.sqlite`),
+//! plus their cookie stores (Chromium / Edge `Network/Cookies`, Firefox
+//! `cookies.sqlite`). Cookies record which sites set them and when they were
+//! last sent, and they often outlive a cleared history. Only the host, cookie
+//! name, path and times are read: cookie values are never read or stored.
 //!
 //! Both are SQLite; we detect which schema is present and read visits and
 //! downloads. This is the artefact that lights up the initial-access and
@@ -62,6 +66,12 @@ impl Parser for BrowserHistoryParser {
             BrowserSchema::Firefox => {
                 parse_firefox(&conn, artefact, sink, &mut outcome);
             }
+            BrowserSchema::ChromiumCookies => {
+                parse_cookies(&conn, artefact, sink, &mut outcome, CookieStore::Chromium);
+            }
+            BrowserSchema::FirefoxCookies => {
+                parse_cookies(&conn, artefact, sink, &mut outcome, CookieStore::Firefox);
+            }
             BrowserSchema::Unknown => {
                 outcome.warnings.push(fx_core::RecordWarning {
                     source_ref: None,
@@ -79,6 +89,8 @@ impl Parser for BrowserHistoryParser {
 enum BrowserSchema {
     Chromium,
     Firefox,
+    ChromiumCookies,
+    FirefoxCookies,
     Unknown,
 }
 
@@ -97,6 +109,10 @@ fn detect_schema(conn: &rusqlite::Connection) -> BrowserSchema {
         BrowserSchema::Firefox
     } else if has("urls") {
         BrowserSchema::Chromium
+    } else if has("moz_cookies") {
+        BrowserSchema::FirefoxCookies
+    } else if has("cookies") {
+        BrowserSchema::ChromiumCookies
     } else {
         BrowserSchema::Unknown
     }
@@ -340,6 +356,126 @@ fn emit_browser(
     outcome.events_emitted += 1;
 }
 
+// ── Cookies ─────────────────────────────────────────────────────────────────
+#[derive(Clone, Copy)]
+enum CookieStore {
+    Chromium,
+    Firefox,
+}
+
+/// One event when a cookie was set (Born) and one when it was last sent
+/// (Accessed), if that's later. Host, name and path only: never the value.
+fn parse_cookies(
+    conn: &rusqlite::Connection,
+    artefact: &IdentifiedArtefact,
+    sink: &mut dyn EventSink,
+    outcome: &mut ParseOutcome,
+    store: CookieStore,
+) {
+    let (sql, to_time): (&str, fn(i64) -> OffsetDateTime) = match store {
+        CookieStore::Chromium => (
+            "SELECT host_key, name, path, creation_utc, last_access_utc FROM cookies",
+            chromium_time,
+        ),
+        CookieStore::Firefox => (
+            "SELECT host, name, path, creationTime, lastAccessed FROM moz_cookies",
+            firefox_time,
+        ),
+    };
+    let mut stmt = match conn.prepare(sql) {
+        Ok(s) => s,
+        Err(e) => {
+            outcome.warnings.push(fx_core::RecordWarning {
+                source_ref: Some("cookies".into()),
+                message: format!("cookies query failed: {e}"),
+            });
+            return;
+        }
+    };
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+            r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+            r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+        ))
+    });
+    let Ok(rows) = rows else { return };
+    for row in rows {
+        let Ok((host, name, path, created, accessed)) = row else {
+            outcome.warnings.push(fx_core::RecordWarning {
+                source_ref: Some("cookies".into()),
+                message: "unreadable cookie row".into(),
+            });
+            continue;
+        };
+        outcome.records_read += 1;
+        let domain = host.trim_start_matches('.').to_ascii_lowercase();
+        let set_at = to_time(created);
+        let last = to_time(accessed);
+        emit_cookie(sink, artefact, outcome, &domain, &name, &path, set_at, true);
+        if last != fx_core::UNDATED && last > set_at {
+            emit_cookie(sink, artefact, outcome, &domain, &name, &path, last, false);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_cookie(
+    sink: &mut dyn EventSink,
+    artefact: &IdentifiedArtefact,
+    outcome: &mut ParseOutcome,
+    domain: &str,
+    name: &str,
+    path: &str,
+    ts: OffsetDateTime,
+    set: bool,
+) {
+    let (action, kind, verb) = if set {
+        ("browser.cookie_set", TimestampKind::Created, "set by")
+    } else {
+        (
+            "browser.cookie_used",
+            TimestampKind::Accessed,
+            "last sent to",
+        )
+    };
+    sink.emit(Event {
+        id: Uuid::new_v4(),
+        timestamp: ts,
+        timestamp_kind: if ts == fx_core::UNDATED {
+            TimestampKind::Undated
+        } else {
+            kind
+        },
+        artefact: ArtefactKind::BrowserHistory,
+        action: action.into(),
+        host: None,
+        user: Default::default(),
+        process: None,
+        target: Some(Target {
+            path: Some(domain.to_string()),
+            ..Default::default()
+        }),
+        network: None,
+        message: format!("Cookie {verb} {domain} ({name})"),
+        provenance: Provenance {
+            evidence_id: artefact.evidence_id,
+            source_path: artefact.source_path.clone(),
+            parser: "browser_history".into(),
+            parser_version: env!("CARGO_PKG_VERSION").into(),
+            source_ref: Some(format!("cookie:{domain}{path}:{name}")),
+        },
+        raw: json!({
+            "cookie": { "host": domain, "name": name, "path": path },
+            "extras": { "browser_event": "cookie", "domain": domain },
+            "note": "cookie value not read",
+        }),
+    });
+    outcome.events_emitted += 1;
+}
+
 /// Extract the host from a URL without a URL-parsing dependency: take the
 /// authority between `scheme://` and the next `/`, strip any userinfo and port.
 /// Good enough for domain-matching IOC rules; not a full RFC 3986 parser.
@@ -356,6 +492,48 @@ fn url_host(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chromium_cookies_give_set_and_last_sent_events_without_values() {
+        let dir = std::env::temp_dir().join(format!("fx-cookies-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Cookies");
+        {
+            let c = rusqlite::Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE cookies (host_key TEXT, name TEXT, path TEXT, value TEXT,
+                   encrypted_value BLOB, creation_utc INTEGER, last_access_utc INTEGER);
+                 INSERT INTO cookies VALUES ('.mega.nz', 'sid', '/', 'SECRET', x'00',
+                   13342000000000000, 13342003600000000);
+                 INSERT INTO cookies VALUES ('example.com', 'pref', '/', 'SECRET', x'00',
+                   13342000000000000, 13342000000000000);",
+            )
+            .unwrap();
+        }
+        let a = IdentifiedArtefact {
+            evidence_id: Uuid::new_v4(),
+            path: path.clone(),
+            source_path: "Network/Cookies".into(),
+            container: fx_core::ContainerFormat::Sqlite,
+            artefact: ArtefactKind::BrowserHistory,
+            method: fx_core::IdMethod::ContentAndPath,
+            confidence: 0.85,
+            profile_hint: None,
+        };
+        struct Sink(Vec<Event>);
+        impl EventSink for Sink {
+            fn emit(&mut self, e: Event) {
+                self.0.push(e);
+            }
+        }
+        let mut sink = Sink(Vec::new());
+        BrowserHistoryParser.parse(&a, &mut sink).unwrap();
+        // mega.nz: set + later last-sent; example.com: set only (same time).
+        assert_eq!(sink.0.len(), 3);
+        assert!(sink.0.iter().any(|e| e.action == "browser.cookie_used"
+            && e.target.as_ref().unwrap().path.as_deref() == Some("mega.nz")));
+        assert!(sink.0.iter().all(|e| !e.raw.to_string().contains("SECRET")));
+    }
 
     #[test]
     fn extracts_host() {

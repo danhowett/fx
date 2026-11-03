@@ -97,17 +97,26 @@ function showEmptyState() {
 /// Render the app from an already-obtained overview (returned by ingest or
 /// open_case). Pulls detections and paints rail, timeline, everything.
 async function renderCase(overview, label) {
+  // Loading a big case takes a while: keep the overlay up and name each step,
+  // so a slow (or stuck) step is visible instead of an empty window.
+  const live = backend.isLive();
+  const step = (n, what) => { if (live) showOverlay("Opening case", `Step ${n} of 8: ${what}`); };
   state.overview = overview;
   state.hostSel = null; backend.setHostScope(null);
+  step(1, "loading hosts…");
   try { state.hosts = (await backend.listHosts()) || []; } catch (e) { state.hosts = []; }
   el("caseName").textContent = label
-    || (backend.isLive() ? `case ${short(overview.case_id)}` : "sample case · demo data");
+    || (live ? `case ${short(overview.case_id)}` : "sample case · demo data");
   state.allow = null;
+  step(2, "loading the allowlist…");
   await syncAllowlist();
+  step(3, "loading findings…");
   state.detections = await backend.huntResults();
+  step(4, "loading triage and labels…");
   state.triage = (await backend.listTriage()) || [];
   try { state.labels = (await backend.listLabels()) || []; } catch (e) { state.labels = []; }
   // Host facts (and the host-local clock) only make sense for one machine.
+  step(5, "loading host details…");
   if (multiHost()) state.host = null;
   else { try { state.host = await backend.hostInfo(); } catch (e) { state.host = null; } }
   state.tzMode = loadPref("fx.tz", "utc");
@@ -117,10 +126,14 @@ async function renderCase(overview, label) {
   state.sigma = undefined;
   state.days = null;
   state.view = "timeline";
+  step(6, "drawing the case summary…");
   renderRail();
   renderToolbar();
   renderStatus();
+  step(7, "loading the timeline…");
   await refresh();
+  step(8, "done");
+  if (live) hideOverlay();
 }
 
 /// Standalone/demo path: the sample backend's openCase returns a demo overview.
@@ -250,7 +263,7 @@ function wireRailTips() {
   let timer = null;
   const hide = () => { clearTimeout(timer); tip.classList.remove("show"); };
   document.addEventListener("mouseover", (e) => {
-    const t = e.target.closest && e.target.closest("#rail [data-tip]");
+    const t = e.target.closest && e.target.closest("#rail [data-tip], #ncModal [data-tip]");
     if (!t) { hide(); return; }
     clearTimeout(timer);
     timer = setTimeout(() => {
@@ -258,7 +271,11 @@ function wireRailTips() {
       const r = t.getBoundingClientRect();
       tip.style.left = (r.right + 10) + "px";
       tip.classList.add("show");
-      const top = Math.min(r.top, window.innerHeight - tip.offsetHeight - 8);
+      // No room to the right (e.g. a row in the New case window): sit below it.
+      const below = r.right + 10 + tip.offsetWidth > window.innerWidth - 8;
+      if (below) tip.style.left = Math.max(8, Math.min(r.left, window.innerWidth - tip.offsetWidth - 8)) + "px";
+      const want = below ? r.bottom + 6 : r.top;
+      const top = Math.min(want, window.innerHeight - tip.offsetHeight - 8);
       tip.style.top = Math.max(8, top) + "px";
     }, 350);
   });
@@ -326,6 +343,7 @@ async function renderIngestLog() {
   el("resultCount").textContent = `${fmt(n)} files ingested${state.hostSel ? ` from ${state.hostSel}` : multiHost() ? ` across ${fmt(state.hosts.length)} hosts` : ""}`;
   const summary = `<div class="ilog-summary">
     <span><b style="color:#2e9e5b">${fmt(by("parsed"))}</b> parsed</span>
+    ${by("applied") ? `<span title="Registry transaction logs (.LOG1/.LOG2) replayed into their hive when it was parsed: their changes are already in the hive's events"><b style="color:#4f7fb8">${fmt(by("applied"))}</b> applied to hive</span>` : ""}
     <span><b style="color:#c99a2e">${fmt(by("unsupported"))}</b> unsupported</span>
     <span><b style="color:var(--alert)">${fmt(by("failed"))}</b> failed</span>
     ${by("duplicate") ? `<span title="Byte-identical (same SHA-256) to a file already parsed: hashed and kept as evidence, not parsed again so events aren't doubled"><b>${fmt(by("duplicate"))}</b> duplicate copies</span>` : ""}
@@ -348,9 +366,9 @@ async function renderIngestLog() {
     g.records += r.records_read || 0;
     g.warn += r.warning_count || 0;
   }
-  const statusRank = { failed: 0, unsupported: 1, duplicate: 2, parsed: 3 };
+  const statusRank = { failed: 0, unsupported: 1, duplicate: 2, applied: 3, parsed: 4 };
   const groupList = [...groups.values()].sort((a, b) =>
-    (statusRank[a.status] ?? 3) - (statusRank[b.status] ?? 3) ||
+    (statusRank[a.status] ?? 4) - (statusRank[b.status] ?? 4) ||
     b.items.length - a.items.length ||
     a.artefact.localeCompare(b.artefact));
 
@@ -359,7 +377,7 @@ async function renderIngestLog() {
     const id = `ig${gi++}`;
     // A failed/unsupported group starts expanded (you want to see those); large
     // parsed groups start collapsed.
-    const open = g.status !== "parsed" && g.items.length <= 200;
+    const open = g.status !== "parsed" && g.status !== "applied" && g.items.length <= 200;
     const children = g.items.map((r) => `
       <tr class="ilog-child ${id}" ${open ? "" : 'style="display:none"'}>
         <td class="src">${escapeHtml(r.source_path)}</td>
@@ -372,7 +390,7 @@ async function renderIngestLog() {
       <tr class="ilog-group" data-group="${id}" data-open="${open ? 1 : 0}">
         <td class="gname"><span class="caret">${open ? "▾" : "▸"}</span>
           <span class="st-badge st-${g.status}">${g.status}</span>
-          ${g.host ? `<span class="hostpill"><span class="hdot ${hostClass(g.host)}"></span>${escapeHtml(g.host)}</span>` : ""}<b>${escapeHtml(g.artefact)}</b>
+          ${g.host ? `<span class="hostpill"><span class="hdot ${hostClass(g.host)}"></span>${escapeHtml(g.host)}</span>` : ""}<b>${escapeHtml(g.status === "applied" ? "Hive transaction logs" : g.artefact)}</b>
           <span class="gcount">${fmt(g.items.length)} file${g.items.length === 1 ? "" : "s"}</span>
         </td>
         <td class="r">${fmt(g.records)}</td>
@@ -416,13 +434,26 @@ function medianOf(arr) {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
-// Robust spike test: a day is anomalous if its total is both well above the
-// median and above median + 3·MAD (median absolute deviation). MAD resists the
-// spike itself skewing the threshold the way mean+sd would.
+// Robust spike test. A day is a spike only if its total clears all three:
+//   * 2.5× the median day and median + 3·MAD (median absolute deviation);
+//   * the same test on a log scale: daily volume is heavy-tailed ($MFT bursts
+//     on every install / update day), so "far above normal" is a ratio, not a
+//     difference;
+//   * the top 2% of days: a spike is rare by definition, so on a long, bursty
+//     case it can't be a quarter of all days.
 function anomalyThreshold(totals) {
-  const med = medianOf(totals);
-  const mad = medianOf(totals.map((t) => Math.abs(t - med))) || 1;
-  return Math.max(med * 2.5, med + 3 * 1.4826 * mad);
+  const pos = totals.filter((t) => t > 0);
+  if (!pos.length) return Infinity;
+  const med = medianOf(pos);
+  const mad = medianOf(pos.map((t) => Math.abs(t - med))) || 1;
+  const linear = Math.max(med * 2.5, med + 3 * 1.4826 * mad);
+  const logs = pos.map((t) => Math.log(t));
+  const lmed = medianOf(logs);
+  const lmad = medianOf(logs.map((l) => Math.abs(l - lmed))) || 0.35;
+  const logScale = Math.exp(lmed + 3 * 1.4826 * lmad);
+  const desc = pos.slice().sort((a, b) => b - a);
+  const top = desc[Math.max(0, Math.ceil(pos.length * 0.02) - 1)];
+  return Math.max(linear, logScale, top);
 }
 
 async function renderActivityGraph() {
@@ -663,17 +694,14 @@ async function onNewCase() {
     alert("New case ingestion is only available in the desktop app (not the browser preview).");
     return;
   }
-  let started = false;
   try {
-    const folder = await backend.pickFolder("Choose a folder of extracted artefacts");
-    if (!folder) return;                       // cancelled — no overlay shown yet
-    const casePath = await backend.pickSaveFile("Save case as…", "case.fxcase");
-    if (!casePath) return;                      // cancelled
+    const pick = await chooseCollection("new");
+    if (!pick) return;                          // cancelled — nothing started
+    const { folder, casePath, caseName } = pick;
 
-    started = true;
     showOverlay("Ingesting collection", folder);
     startProgress("ingest");
-    const overview = await backend.ingest(folder, casePath, baseName(casePath), "analyst");
+    const overview = await backend.ingest(folder, casePath, caseName, "analyst");
     const ingestCancelled = await jobCancelled();
 
     showOverlay("Running detections", ingestCancelled
@@ -710,7 +738,7 @@ async function onOpenCase() {
   try {
     const casePath = await backend.pickOpenFile("Open a .fxcase file");
     if (!casePath) return;
-    showOverlay("Opening case…", casePath);
+    showOverlay("Opening case", "Reading the case file…");
     const overview = await backend.openCase(casePath);
     await renderCase(overview, `case · ${baseName(casePath)}`);
   } catch (e) {
@@ -718,6 +746,160 @@ async function onOpenCase() {
   } finally {
     hideOverlay();
   }
+}
+
+// ── New case / Add host window ───────────────────────────────────────────────
+// Shown before any native picker: Browse for the collection folder, see what
+// fx recognises in it (header reads only, nothing ingested), name the case and
+// choose where it's saved, then start. Resolves to { folder, casePath,
+// caseName } or null if cancelled. mode "host" asks for the folder only.
+function chooseCollection(mode) {
+  const isNew = mode === "new";
+  const modal = el("ncModal");
+  const go = el("ncGo");
+  const nameIn = el("ncName");
+  const st = { folder: null, preview: null, casePath: null, customSave: false, nameDirty: false, token: 0, exists: false };
+
+  el("ncTitle").textContent = isNew ? "New case" : "Add host";
+  el("ncSub").textContent = isNew
+    ? "Choose your folder of collected artefacts. fx lists what it finds for you to review before ingest begins."
+    : "Choose the next host's folder of collected artefacts. fx lists what it finds for you to review before it's added to this case.";
+  el("ncCaseFields").hidden = !isNew;
+  go.textContent = isNew ? "Start ingest" : "Add host";
+  setPath("ncFolder", null, "No folder chosen");
+  setPath("ncSave", null, "Chosen once you pick a folder");
+  el("ncSaveWarn").hidden = true;
+  el("ncPreview").innerHTML = "";
+  el("ncTotal").textContent = "";
+  nameIn.value = "";
+  go.disabled = true;
+
+  function setPath(id, path, empty) {
+    const n = el(id);
+    n.textContent = path || empty;
+    n.title = path || "";
+    n.classList.toggle("empty", !path);
+  }
+  const sepOf = (p) => (String(p).includes("\\") ? "\\" : "/");
+  const parentOf = (p) => {
+    const trimmed = String(p).replace(/[\\/]+$/, "");
+    const i = Math.max(trimmed.lastIndexOf("\\"), trimmed.lastIndexOf("/"));
+    return i > 0 ? trimmed.slice(0, i) : trimmed;
+  };
+  const safeName = (s) => (String(s).trim().replace(/[<>:"/\\|?*\x00-\x1f]+/g, "_").replace(/[. ]+$/, "") || "case");
+
+  function ready() {
+    const recognised = st.preview && st.preview.groups.length > 0;
+    go.disabled = !(st.folder && recognised && (!isNew || (st.casePath && nameIn.value.trim() && !st.exists)));
+  }
+
+  async function updateSavePath() {
+    if (!isNew || !st.folder) return;
+    if (!st.customSave) {
+      const dir = loadPref("fx.caseDir", null) || parentOf(st.folder);
+      st.casePath = dir.replace(/[\\/]+$/, "") + sepOf(dir) + safeName(nameIn.value || baseName(st.folder)) + ".fxcase";
+    }
+    setPath("ncSave", st.casePath, "Chosen once you pick a folder");
+    const path = st.casePath;
+    let exists = false;
+    try { exists = await backend.pathExists(path); } catch (e) {}
+    if (path !== st.casePath) return;            // superseded by a newer edit
+    st.exists = exists;
+    const w = el("ncSaveWarn");
+    w.hidden = !exists;
+    w.textContent = exists ? "A case file with this name already exists there. Change the case name or choose another location." : "";
+    ready();
+  }
+
+  function renderPreview(p) {
+    const box = el("ncPreview");
+    const MB = 1048576;
+    const size = (b) => b >= 1024 * MB ? (b / (1024 * MB)).toFixed(1) + " GB" : b >= MB ? Math.round(b / MB) + " MB" : b >= 1024 ? Math.round(b / 1024) + " KB" : b + " B";
+    const recognised = p.groups.reduce((a, g) => a + g.files, 0);
+    if (!p.groups.length) {
+      box.innerHTML = `<div class="nc-empty">No supported artefacts were identified in this folder${p.total_files ? ` (${fmt(p.total_files)} files)` : " (the folder is empty)"}. Select the collection's root folder, the one containing the drive folder (for example <code>C</code>).</div>`;
+      el("ncTotal").textContent = "";
+      return;
+    }
+    const meta = [];
+    if (p.host_hint) meta.push(`Host <b>${escapeHtml(p.host_hint)}</b>`);
+    if (p.profile) meta.push(`${escapeHtml(p.profile)} collection`);
+    const rows = p.groups.map((g) => {
+      const info = ARTEFACT_INFO[g.kind] || "";
+      const ex = g.examples.length ? "\n\nFor example:\n" + g.examples.join("\n") : "";
+      const tip = (info + ex).trim();
+      return `<tr${tip ? ` data-tip="${escapeHtml(tip)}"` : ""}><td>${escapeHtml(g.kind)}</td><td class="n">${fmt(g.files)} file${g.files === 1 ? "" : "s"}</td><td class="n">${size(g.bytes)}</td></tr>`;
+    }).join("");
+    const supportedBytes = p.groups.reduce((a, g) => a + g.bytes, 0);
+    const notes = [];
+    if (p.transaction_logs) notes.push(`${fmt(p.transaction_logs)} registry transaction log${p.transaction_logs === 1 ? "" : "s"} will be replayed into ${p.transaction_logs === 1 ? "its hive" : "their hives"}.`);
+    if (p.unrecognised) notes.push("Unsupported files will still be hashed, retained as evidence and listed in the ingest log.");
+    if (p.errors.length) notes.push(`${fmt(p.errors.length)} file${p.errors.length === 1 ? "" : "s"} couldn't be read: ${escapeHtml(p.errors[0])}${p.errors.length > 1 ? "…" : ""}`);
+    box.innerHTML = `${meta.length ? `<div class="nc-meta">${meta.join(", ")}</div>` : ""}
+      <div class="nc-label">Supported files</div>
+      <div class="nc-scroll"><table class="nc-table">${rows}</table></div>
+      ${notes.map((n) => `<div class="nc-note">${n}</div>`).join("")}`;
+    el("ncTotal").textContent = `${fmt(recognised)} supported file${recognised === 1 ? "" : "s"}, ${size(supportedBytes)}`;
+  }
+
+  async function browse() {
+    const folder = await backend.pickFolder(isNew ? "Choose the collection folder" : "Choose the next host's collection folder");
+    if (!folder) return;
+    st.folder = folder;
+    st.preview = null;
+    setPath("ncFolder", folder, "No folder chosen");
+    if (isNew && !st.nameDirty) nameIn.value = baseName(String(folder).replace(/[\\/]+$/, ""));
+    ready();
+    const token = ++st.token;
+    el("ncTotal").textContent = "";
+    el("ncPreview").innerHTML = `<div class="nc-busy"><div class="spinner"></div>Looking through the folder…</div>`;
+    updateSavePath();
+    try {
+      const p = await backend.previewCollection(folder);
+      if (token !== st.token) return;
+      st.preview = p;
+      if (isNew && !st.nameDirty && p.host_hint) { nameIn.value = p.host_hint; updateSavePath(); }
+      renderPreview(p);
+    } catch (e) {
+      if (token !== st.token) return;
+      el("ncPreview").innerHTML = `<div class="nc-empty">Couldn't read that folder: ${escapeHtml(e && e.message ? e.message : e)}</div>`;
+    }
+    ready();
+  }
+
+  return new Promise((resolve) => {
+    const close = (result) => {
+      modal.classList.remove("show");
+      document.removeEventListener("keydown", onKey, true);
+      el("ncBrowse").onclick = el("ncSaveBtn").onclick = el("ncCancel").onclick = go.onclick = null;
+      nameIn.oninput = nameIn.onkeydown = modal.onclick = null;
+      resolve(result);
+    };
+    const finish = () => {
+      if (go.disabled) return;
+      if (isNew) {
+        savePref("fx.caseDir", parentOf(st.casePath));
+        close({ folder: st.folder, casePath: st.casePath, caseName: nameIn.value.trim() });
+      } else close({ folder: st.folder });
+    };
+    const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(null); } };
+    document.addEventListener("keydown", onKey, true);
+    el("ncBrowse").onclick = browse;
+    el("ncCancel").onclick = () => close(null);
+    go.onclick = finish;
+    modal.onclick = (e) => { if (e.target === modal) close(null); };
+    nameIn.oninput = () => { st.nameDirty = true; updateSavePath(); ready(); };
+    nameIn.onkeydown = (e) => { if (e.key === "Enter") finish(); };
+    el("ncSaveBtn").onclick = async () => {
+      const p = await backend.pickSaveFile("Save case as…", (st.casePath && baseName(st.casePath)) || safeName(nameIn.value) + ".fxcase");
+      if (!p) return;
+      st.casePath = p;
+      st.customSave = true;
+      updateSavePath();
+    };
+    modal.classList.add("show");
+    el("ncBrowse").focus();
+  });
 }
 
 function baseName(p) {
@@ -1423,8 +1605,9 @@ async function onAddHost() {
     return;
   }
   try {
-    const folder = await backend.pickFolder("Choose the next host's collection folder");
-    if (!folder) return;
+    const pick = await chooseCollection("host");
+    if (!pick) return;
+    const { folder } = pick;
     showOverlay("Adding host", folder);
     startProgress("ingest");
     const res = await backend.addCollection(folder, null);
@@ -3282,7 +3465,7 @@ function macbBlock(e, raw) {
   return `<div class="macb">
     <table><thead><tr><th></th><th title="$STANDARD_INFORMATION: what Explorer shows; easy for tools to change">$SI</th><th title="$FILE_NAME: written by the file system; hard to change">$FN</th></tr></thead><tbody>${rows}</tbody></table>
     ${r.fn ? "" : `<div class="macb-note">$FN times aren't in this case: re-ingest with this version to add them.</div>`}
-    ${bornMismatch ? `<div class="macb-note warn">$SI Born is earlier than $FN Born: possible timestomping.</div>` : ""}
+    ${bornMismatch ? `<div class="macb-note${e.action === "file.timestomp_suspected" ? " warn" : ""}">$SI Born is earlier than $FN Born. Common after a copy, extract or install; with whole-second $SI times (as here, if flagged) it can mean the time was set by a tool.</div>` : ""}
   </div>`;
 }
 

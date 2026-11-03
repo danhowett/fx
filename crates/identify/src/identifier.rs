@@ -113,15 +113,25 @@ fn resolve_registry(name: &str) -> Option<(ArtefactKind, IdMethod, f32)> {
     }
     let known = matches!(
         name,
-        "system" | "software" | "sam" | "security" | "default"
-            | "ntuser.dat" | "usrclass.dat" | "amcache.hve"
+        "system"
+            | "software"
+            | "sam"
+            | "security"
+            | "default"
+            | "ntuser.dat"
+            | "usrclass.dat"
+            | "amcache.hve"
     );
     if name == "amcache.hve" {
         // AmCache is a hive but semantically its own artefact.
         return Some((ArtefactKind::Amcache, IdMethod::ContentAndPath, 0.98));
     }
     let confidence = if known { 0.97 } else { 0.85 };
-    let method = if known { IdMethod::ContentAndPath } else { IdMethod::Content };
+    let method = if known {
+        IdMethod::ContentAndPath
+    } else {
+        IdMethod::Content
+    };
     Some((ArtefactKind::RegistryGeneric, method, confidence))
 }
 
@@ -154,6 +164,11 @@ fn resolve_sqlite(name: &str) -> Option<(ArtefactKind, IdMethod, f32)> {
         // Windows Timeline — SQLite with a distinctive name. Checked before the
         // generic "history" rule. The parser confirms via the Activity table.
         Some((ArtefactKind::WindowsTimeline, IdMethod::ContentAndPath, 0.9))
+    } else if name == "cookies" || name == "cookies.sqlite" {
+        // Chromium / Edge `Network/Cookies` (older: `Cookies`) and Firefox
+        // `cookies.sqlite`. The browser parser confirms by table schema. Not
+        // "Safe Browsing Cookies" (the browser's own, no user activity).
+        Some((ArtefactKind::BrowserHistory, IdMethod::ContentAndPath, 0.85))
     } else if name.contains("history") || name.contains("places") {
         // Chromium "History" (incl. modern Edge, which is Chromium) and Firefox
         // "places.sqlite". NOTE: legacy IE / old-Edge history lives in
@@ -197,7 +212,9 @@ fn resolve_by_path_only(lower: &str, name: &str) -> Option<(ArtefactKind, IdMeth
         // Jump lists: automatic (OLE/CFB compound) or custom (concatenated
         // shell links). Identified by extension; the parser dispatches on which.
         Some((ArtefactKind::JumpList, IdMethod::PathOnly, 0.9))
-    } else if name.starts_with("$i") && (lower.contains("$recycle.bin") || lower.contains("recycle")) {
+    } else if name.starts_with("$i")
+        && (lower.contains("$recycle.bin") || lower.contains("recycle"))
+    {
         // Recycle Bin metadata: $I<id>.<ext> under $Recycle.Bin\<SID>\. The $I
         // prefix plus the recycle-bin path is the reliable signal (there's no
         // strong file magic). The parser validates the version byte.
@@ -217,11 +234,15 @@ fn resolve_by_path_only(lower: &str, name: &str) -> Option<(ArtefactKind, IdMeth
         // tool-specific names (plus the vendor folder where the name is
         // generic) are the signal.
         Some((ArtefactKind::RemoteAccess, IdMethod::PathOnly, 0.85))
-    } else if name == "pcaapplaunchdic.txt" || (name.starts_with("pcageneraldb") && name.ends_with(".txt")) {
+    } else if name == "pcaapplaunchdic.txt"
+        || (name.starts_with("pcageneraldb") && name.ends_with(".txt"))
+    {
         // Program Compatibility Assistant launch logs (Windows 11,
         // Windows\appcompat\pca). Plain text; the names are the signal.
         Some((ArtefactKind::Pca, IdMethod::PathOnly, 0.9))
-    } else if name == "setupapi.dev.log" || (name.starts_with("setupapi.dev.") && name.ends_with(".log")) {
+    } else if name == "setupapi.dev.log"
+        || (name.starts_with("setupapi.dev.") && name.ends_with(".log"))
+    {
         // Device installation log (Windows\INF), including archived
         // setupapi.dev.YYYYMMDD_HHMMSS.log copies.
         Some((ArtefactKind::SetupApi, IdMethod::PathOnly, 0.9))

@@ -493,3 +493,68 @@ fn triage_filter_finds_validated_events_across_the_case() {
         vec![("lateral-movement".to_string(), 2)]
     );
 }
+
+#[test]
+fn unidentified_files_are_listed_in_the_ingest_log() {
+    let dir = std::env::temp_dir().join(format!("fxcase-unc-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = CaseStore::create(&dir.join("u.fxcase"), "U", None, "UTC").unwrap();
+    let f = dir.join("notes.json");
+    std::fs::write(&f, b"{}").unwrap();
+    store
+        .register_unclassified(&fx_core::UnclassifiedFile {
+            evidence_id: Uuid::new_v4(),
+            path: f,
+            source_path: "C/Temp/notes.json".into(),
+            container: fx_core::ContainerFormat::Unknown,
+            reason: "no matching artefact rule".into(),
+        })
+        .unwrap();
+    let log = store.ingest_log().unwrap();
+    let row = log
+        .iter()
+        .find(|r| r.source_path == "C/Temp/notes.json")
+        .expect("listed");
+    assert_eq!(row.status, "unsupported");
+    assert_eq!(row.artefact_kind, "Unclassified");
+}
+
+#[test]
+fn rerun_clears_automatic_unconfirmed_marks_but_keeps_the_analysts() {
+    let dir = std::env::temp_dir().join(format!("fxcase-tri-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = CaseStore::create(&dir.join("t.fxcase"), "T", None, "UTC").unwrap();
+    let ev = Uuid::new_v4();
+    let (a, b, c) = (
+        sample_event(ev, "process.execute", "C:/a.exe"),
+        sample_event(ev, "process.execute", "C:/b.exe"),
+        sample_event(ev, "process.execute", "C:/c.exe"),
+    );
+    let ids = [a.id.to_string(), b.id.to_string(), c.id.to_string()];
+    {
+        let mut w = store.event_writer();
+        w.emit(a);
+        w.emit(b);
+        w.emit(c);
+        w.flush().unwrap();
+    }
+    // a: automatic mark from an old finding; b: unconfirmed with a note;
+    // c: validated by the analyst.
+    store.set_triage(&ids[0], "unconfirmed", None).unwrap();
+    store
+        .set_triage(&ids[1], "unconfirmed", Some("check with the client"))
+        .unwrap();
+    store.set_triage(&ids[2], "validated", None).unwrap();
+
+    store.write_detections(&[]).unwrap(); // a re-run that finds nothing
+
+    let left: Vec<String> = store
+        .triaged_events()
+        .unwrap()
+        .into_iter()
+        .map(|t| format!("{}:{}", t.event_id, t.state))
+        .collect();
+    assert_eq!(left.len(), 2, "{left:?}");
+    assert!(left.contains(&format!("{}:unconfirmed", ids[1])));
+    assert!(left.contains(&format!("{}:validated", ids[2])));
+}
