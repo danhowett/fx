@@ -591,3 +591,165 @@ fn timeline_rows_carry_the_evtx_event_id() {
     assert_eq!(by_action("service.install").as_deref(), Some("7045"));
     assert_eq!(by_action("process.execute"), None);
 }
+
+#[test]
+fn lateral_movement_ties_both_ends_to_hosts_in_the_case() {
+    let dir = std::env::temp_dir().join(format!("fxcase-lm-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = CaseStore::create(&dir.join("lm.fxcase"), "LM", None, "UTC").unwrap();
+    let mk = |host: &str,
+              action: &str,
+              user: &str,
+              ip: Option<&str>,
+              lt: Option<u8>,
+              data: serde_json::Value| {
+        let mut e = sample_event(Uuid::new_v4(), action, "x");
+        e.artefact = ArtefactKind::Evtx;
+        e.host = Some(host.into());
+        e.user = fx_core::Principal {
+            name: Some(user.into()),
+            domain: Some("HARBOUR".into()),
+            ..Default::default()
+        };
+        e.network = Some(fx_core::NetworkInfo {
+            source_ip: ip.map(str::to_string),
+            logon_type: lt,
+            ..Default::default()
+        });
+        e.raw = serde_json::json!({"Event": {"EventData": data}});
+        e
+    };
+    // Two collections: the workstation and the server.
+    for (host, evs) in [
+        (
+            "WS-FIN-118",
+            vec![
+                // Outbound RDP with other credentials.
+                mk(
+                    "WS-FIN-118",
+                    "logon.explicit_credentials",
+                    "j.rowe",
+                    Some("10.40.8.20"),
+                    None,
+                    serde_json::json!({"TargetServerName": "SRV-FS-02", "TargetUserName": "svc_backup",
+                                      "TargetDomainName": "HARBOUR", "ProcessName": "C:\\Windows\\System32\\mstsc.exe"}),
+                ),
+                // runas on itself: not lateral.
+                mk(
+                    "WS-FIN-118",
+                    "logon.explicit_credentials",
+                    "j.rowe",
+                    Some("127.0.0.1"),
+                    None,
+                    serde_json::json!({"TargetServerName": "localhost", "TargetUserName": "Administrator"}),
+                ),
+            ],
+        ),
+        (
+            "SRV-FS-02",
+            vec![
+                // Inbound RDP: the workstation by name and address.
+                mk(
+                    "SRV-FS-02",
+                    "logon.success",
+                    "svc_backup",
+                    Some("10.40.2.118"),
+                    Some(10),
+                    serde_json::json!({"WorkstationName": "WS-FIN-118"}),
+                ),
+                // Share access: address only, resolved through the logon above.
+                mk(
+                    "SRV-FS-02",
+                    "network.share_access",
+                    "svc_backup",
+                    Some("10.40.2.118"),
+                    None,
+                    serde_json::json!({}),
+                ),
+                // Machine account and an interactive logon: left out.
+                mk(
+                    "SRV-FS-02",
+                    "logon.success",
+                    "SRV-FS-02$",
+                    Some("10.40.1.5"),
+                    Some(3),
+                    serde_json::json!({}),
+                ),
+                mk(
+                    "SRV-FS-02",
+                    "logon.success",
+                    "it.admin",
+                    None,
+                    Some(2),
+                    serde_json::json!({}),
+                ),
+                // From a machine outside the case, named once and then by address only.
+                mk(
+                    "SRV-FS-02",
+                    "logon.success",
+                    "it.admin",
+                    Some("10.40.3.12"),
+                    Some(10),
+                    serde_json::json!({"WorkstationName": "ADM-JUMP-01"}),
+                ),
+                mk(
+                    "SRV-FS-02",
+                    "rdp.session_logon",
+                    "it.admin",
+                    Some("10.40.3.12"),
+                    Some(10),
+                    serde_json::json!({}),
+                ),
+            ],
+        ),
+    ] {
+        let c = store.begin_collection(&format!("D:/cases/{host}")).unwrap();
+        register(&store, &dir, &format!("{host}.evtx"));
+        {
+            let mut w = store.event_writer();
+            for e in evs {
+                w.emit(e);
+            }
+            w.flush().unwrap();
+        }
+        store.claim_unassigned(&c).unwrap();
+        store.name_collection_host(&c, Some(host)).unwrap();
+    }
+
+    let rows = store.lateral_movement().unwrap();
+    let summary: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            format!(
+                "{}>{}|{}|{}|{}|{}",
+                r.src, r.dst, r.account, r.method, r.side, r.src_in_case
+            )
+        })
+        .collect();
+    assert!(
+        summary.contains(&"WS-FIN-118>SRV-FS-02|HARBOUR\\svc_backup|RDP|source|true".to_string()),
+        "{summary:#?}"
+    );
+    assert!(
+        summary
+            .contains(&"WS-FIN-118>SRV-FS-02|HARBOUR\\svc_backup|RDP|destination|true".to_string()),
+        "{summary:#?}"
+    );
+    assert!(
+        summary.contains(
+            &"WS-FIN-118>SRV-FS-02|HARBOUR\\svc_backup|Share access|destination|true".to_string()
+        ),
+        "{summary:#?}"
+    );
+    assert_eq!(
+        summary
+            .iter()
+            .filter(
+                |s| s.starts_with("ADM-JUMP-01>SRV-FS-02|HARBOUR\\it.admin|RDP|destination|false")
+            )
+            .count(),
+        2,
+        "{summary:#?}"
+    );
+    assert_eq!(rows.len(), 5, "{summary:#?}");
+}

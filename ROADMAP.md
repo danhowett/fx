@@ -16,6 +16,8 @@ collection tool produced it, and what looked wrong.
 - [ ] Allow-list and Sigma runs on a multi-million-event case
 - [ ] Multi-host cases (v0.1.10) on real collections: host naming, per-host time
       zones, and adding a host to a case made by an earlier version
+- [ ] Lateral movement (v0.1.12) on real multi-host collections: source
+      matching by name and address, RDP / SMB / PsExec patterns, noise filtering
 
 ### Accuracy
 - [x] Duplicate findings: byte-identical files are parsed once, Sigma rules load once per id
@@ -26,6 +28,8 @@ collection tool produced it, and what looked wrong.
 - [x] Optional display time zone (UTC / host local)
 - [x] No invented times: records without a time are "no timestamp" (Undated), never 01/01/1970
 - [x] $MFT $FN times alongside $SI, and a $SI-before-$FN timestomping check (timeline event, not a finding)
+- [x] One rule can't flood a case: at most 1,000 findings per rule per run
+- [x] TerminalServices RDP session events (21 / 22 / 25) read their source address and user from UserData
 
 ### Compatibility
 - [ ] Versioned case-file schema with an upgrade path, and a test that opens

@@ -52,6 +52,7 @@ fn main() {
             commands::host_info,
             commands::ingest_log,
             commands::daily_activity,
+            commands::lateral_movement,
         ])
         .run(tauri::generate_context!())
         .expect("error while running fx-gui");

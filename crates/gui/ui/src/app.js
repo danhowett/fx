@@ -80,12 +80,14 @@ function showEmptyState() {
   syncHostUi();
   el("rail").innerHTML = `<section style="padding:24px 16px;color:var(--ink-dim);font-size:13px;line-height:1.6">
     <div style="font-size:15px;color:var(--ink);margin-bottom:10px">Welcome to fx</div>
-    <b>+ New case</b> — pick a folder of extracted Windows artefacts (KAPE / RESPONSE / Velociraptor output) and fx will ingest, hunt, and display it.<br><br>
-    <b>Open case</b> — reopen a <code>.fxcase</code> you made earlier.
+    Open the <b>case menu</b> (top left) to start.<br><br>
+    <b>New case…</b> — browse to a folder of extracted Windows artefacts (KAPE / RESPONSE / Velociraptor output), check what fx found, and it will ingest, hunt, and display it.<br><br>
+    <b>Open case…</b> — reopen a <code>.fxcase</code> you made earlier.<br><br>
+    <b>Add host…</b> — once a case is open, add another machine's collection to it.
   </section>`;
   el("rows").innerHTML = `<div class="empty"><div class="box">
     <h2>No case open</h2>
-    <p>Use <b>+ New case</b> to ingest a triage collection, or <b>Open case</b> to reopen an existing <code>.fxcase</code>.</p>
+    <p>Open the case menu (top left) and choose <b>New case…</b> to ingest a triage collection, or <b>Open case…</b> to reopen an existing <code>.fxcase</code>.</p>
   </div></div>`;
   el("spTop").style.height = "0px";
   el("spBot").style.height = "0px";
@@ -106,7 +108,8 @@ async function renderCase(overview, label) {
   state.hostSel = null; backend.setHostScope(null);
   step(1, "loading hosts…");
   try { state.hosts = (await backend.listHosts()) || []; } catch (e) { state.hosts = []; }
-  el("caseName").textContent = label
+  // The case button shows the case file's name ("case · " prefix dropped).
+  el("caseName").textContent = String(label || "").replace(/^case · /, "")
     || (live ? `case ${short(overview.case_id)}` : "sample case · demo data");
   state.allow = null;
   step(2, "loading the allowlist…");
@@ -360,20 +363,13 @@ function wireCaseButtons() {
   const expCsvTop = el("exportCsvTop"), expStixTop = el("exportStixTop");
   if (expCsvTop) expCsvTop.addEventListener("click", () => exportFindings("csv"));
   if (expStixTop) expStixTop.addEventListener("click", () => exportFindings("stix"));
-  wireExportMenu();
+  wireMenu("caseMenuWrap", "caseMenuBtn");
+  wireMenu("appMenuWrap", "appMenuBtn");
   const iocBtn = el("iocBtn");
   if (iocBtn) iocBtn.addEventListener("click", () => openIocHunt());
-  const decBtn = el("decodeBtn");
-  // Grab any selected text before the click can clear it.
-  let decSel = "";
-  if (decBtn) decBtn.addEventListener("mousedown", () => { decSel = String((window.getSelection && window.getSelection()) || "").trim(); });
-  if (decBtn) decBtn.addEventListener("click", () => {
-    if (state.view === "decode") { state.view = "timeline"; renderRail(); renderToolbar(); refresh(); return; }
-    // Text selected anywhere (raw record, message, a finding) is decoded directly.
-    const sel = decSel || String((window.getSelection && window.getSelection()) || "").trim(); decSel = "";
-    if (sel.length > 2) { openDecode(sel, null); return; }
-    const d = state.decode;
-    openDecode((d && d.input) || "", d && d.source && d.input === d.sourceText ? d.source : null);
+  // Decode (rail): grab any selected text before the click can clear it.
+  el("rail").addEventListener("mousedown", (e) => {
+    if (e.target.closest("#navDecode")) navDecodeSel = String((window.getSelection && window.getSelection()) || "").trim();
   });
   // Files dropped on the window go to the IOC list when that view is open.
   backend.onFileDrop((type, paths) => {
@@ -391,6 +387,183 @@ function wireCaseButtons() {
   if (helpClose) helpClose.addEventListener("click", () => helpModal.classList.remove("show"));
   if (helpModal) helpModal.addEventListener("click", (e) => { if (e.target === helpModal) helpModal.classList.remove("show"); });
   wireTheme();
+}
+
+// ── Lateral movement ─────────────────────────────────────────────────────────
+// Connections between machines, grouped from the store's evidence rows
+// (inbound logons / RDP / share access with a source; outbound explicit
+// credentials and RDP client history). A small map plus a table; every
+// connection opens its events in the timeline.
+const LM_METHOD = { "RDP": "lm-rdp", "Network logon": "lm-net", "Share access": "lm-share", "Explicit credentials": "lm-cred" };
+async function renderLateral() {
+  let rows = [];
+  try { rows = (await backend.lateralMovement()) || []; } catch (e) { rows = []; }
+  el("spTop").style.height = "0px";
+  el("spBot").style.height = "0px";
+  if (state.hostSel) rows = rows.filter((r) => r.src === state.hostSel || r.dst === state.hostSel);
+  const failedN = rows.filter((r) => r.failed).length;
+  const showFailed = !!state.lmFailed;
+  if (!showFailed) rows = rows.filter((r) => !r.failed);
+
+  // Group into connections: one per (from, to, account, method, failed).
+  const groups = new Map();
+  for (const r of rows) {
+    const k = [r.src, r.dst, r.account, r.method, r.failed ? 1 : 0].join("\u0000");
+    let g = groups.get(k);
+    if (!g) {
+      g = { src: r.src, dst: r.dst, srcIn: r.src_in_case, dstIn: r.dst_in_case, account: r.account, method: r.method, failed: r.failed, items: [], addrs: new Set(), sides: new Set() };
+      groups.set(k, g);
+    }
+    g.items.push(r);
+    if (r.src_addr) g.addrs.add(r.src_addr);
+    g.sides.add(r.side);
+  }
+  let list = [...groups.values()];
+  for (const g of list) { g.items.sort((a, b) => (a.ts < b.ts ? -1 : 1)); g.first = g.items[0].ts; g.last = g.items[g.items.length - 1].ts; }
+  list.sort((a, b) => (a.first < b.first ? -1 : a.first > b.first ? 1 : 0));
+
+  const machines = new Set(list.flatMap((g) => [g.src, g.dst]));
+  const accounts = new Set(list.map((g) => g.account));
+  el("resultCount").textContent = list.length
+    ? `${fmt(list.length)} connection${list.length === 1 ? "" : "s"} · ${fmt(machines.size)} machines · ${fmt(accounts.size)} account${accounts.size === 1 ? "" : "s"}`
+    : "";
+
+  const intro = `<p class="lm-intro">Connections between machines, built from inbound logons (types 3 and 10), RDP session and authentication records, admin-share access, logons with explicit credentials, and RDP client history. Sources are matched to hosts in this case by name or address; anything unmatched is shown as recorded. Machine accounts and local logons are left out.</p>`;
+  if (!list.length) {
+    el("rows").innerHTML = `<div class="lm">${intro}<div class="lm-empty">${failedN && !showFailed
+      ? `No successful connections between machines${state.hostSel ? ` involving ${escapeHtml(state.hostSel)}` : ""}. There ${failedN === 1 ? "is" : "are"} <b>${fmt(failedN)}</b> failed logon${failedN === 1 ? "" : "s"} from other machines: <a id="lmShowFailed" class="linkbtn">show them</a>.`
+      : `No connections between machines found${state.hostSel ? ` involving ${escapeHtml(state.hostSel)}` : ""}. This view needs Security event logs (logons 4624 / 4625 / 4648, share access 5140), TerminalServices logs, or RDP client history from user hives.`}</div></div>`;
+    const sf = el("lmShowFailed"); if (sf) sf.onclick = () => { state.lmFailed = true; renderLateral(); };
+    renderStatus();
+    return;
+  }
+
+  // Focus: a machine or one from→to pair, picked on the map.
+  const focus = state.lmFocus || null;
+  const inFocus = (g) => !focus || (focus.pair ? g.src === focus.src && g.dst === focus.dst : g.src === focus.node || g.dst === focus.node);
+  const shown = list.filter(inFocus);
+
+  const meth = (m) => `<span class="lm-meth ${LM_METHOD[m] || "lm-net"}">${escapeHtml(m)}</span>`;
+  const mach = (name, inCase) => inCase
+    ? `<span title="Host in this case">${escapeHtml(name)}</span>`
+    : `<span class="ext" title="Not a host in this case">${escapeHtml(name)}</span>`;
+  const ends = (g) => {
+    const d = g.sides.has("destination"), s = g.sides.has("source");
+    return `<span class="lm-ends" title="Which end's logs recorded this connection">${d && s ? "<b>both ends</b>" : d ? "destination logs" : "source logs"}</span>`;
+  };
+  const body = shown.map((g, i) => `
+      <tr class="grp${g.failed ? " fail" : ""}" data-i="${i}">
+        <td class="path">${mach(g.src, g.srcIn)}<span class="arr">→</span>${mach(g.dst, g.dstIn)}${g.addrs.size ? `<span class="addr">from ${escapeHtml([...g.addrs].slice(0, 3).join(", "))}</span>` : ""}</td>
+        <td>${escapeHtml(g.account)}</td>
+        <td>${meth(g.method)}${g.failed ? ` <span class="lm-meth lm-fail" title="Failed logons: attempts, not access">failed</span>` : ""}</td>
+        <td class="n">${fmt(g.items.length)}</td>
+        <td class="t">${time(g.first)}</td>
+        <td class="t">${g.last !== g.first ? time(g.last) : ""}</td>
+        <td>${ends(g)}</td>
+      </tr>
+      <tr class="lm-items" data-for="${i}" hidden><td colspan="7"></td></tr>`).join("");
+
+  const focusLbl = focus ? `<span class="lm-filter">Showing ${focus.pair ? `${escapeHtml(focus.src)} → ${escapeHtml(focus.dst)}` : escapeHtml(focus.node)} <button id="lmClearFocus" title="Show every connection">✕</button></span>` : "";
+  el("rows").innerHTML = `<div class="lm">${intro}
+    <div class="lm-bar">
+      ${failedN ? `<label><input type="checkbox" id="lmFailed" ${showFailed ? "checked" : ""}> Include failed logons (${fmt(failedN)})</label>` : ""}
+      ${focusLbl}
+      <span class="sp"></span>
+      <span class="lm-key lm-rdp"><i></i>RDP</span><span class="lm-key lm-net"><i></i>Network logon</span><span class="lm-key lm-share"><i></i>Share access</span><span class="lm-key lm-cred"><i></i>Explicit credentials</span>${showFailed ? `<span class="lm-key lm-fail"><i class="dash"></i>Failed</span>` : ""}
+    </div>
+    <div class="lm-map" id="lmMap"></div>
+    <table class="lm-table">
+      <thead><tr><th>From → to</th><th>Account</th><th>How</th><th class="n">Events</th><th>First seen (UTC)</th><th>Last seen</th><th>Recorded by</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table></div>`;
+  drawLateralMap(list, focus);
+
+  const f = el("lmFailed"); if (f) f.onchange = () => { state.lmFailed = f.checked; renderLateral(); };
+  const cf = el("lmClearFocus"); if (cf) cf.onclick = () => { state.lmFocus = null; renderLateral(); };
+  el("rows").querySelectorAll("tr.grp").forEach((tr) => {
+    tr.onclick = () => {
+      const g = shown[+tr.dataset.i];
+      const box = el("rows").querySelector(`tr.lm-items[data-for="${tr.dataset.i}"]`);
+      if (!box.hidden) { box.hidden = true; return; }
+      box.firstElementChild.innerHTML = `<div style="margin:2px 0 6px"><a data-all="1">Show these ${fmt(g.items.length)} event${g.items.length === 1 ? "" : "s"} in the timeline</a></div>`
+        + g.items.slice(0, 50).map((r) => `<div><span class="t">${time(r.ts)}</span> · on ${escapeHtml(r.seen_on)} · <span class="msg">${escapeHtml(r.message)}</span></div>`).join("")
+        + (g.items.length > 50 ? `<div>… and ${fmt(g.items.length - 50)} more</div>` : "");
+      box.hidden = false;
+      box.querySelector("[data-all]").onclick = (ev) => {
+        ev.stopPropagation();
+        const ids = [...new Set(g.items.map((r) => r.event_id))];
+        state.view = "timeline"; state.huntOnly = null;
+        state.filter = { text: "", category: null, artefact: null, triage: null, flagged_only: false, limit: 5000, offset: 0 };
+        state.idFilter = { kind: "lateral", label: `${g.src} → ${g.dst} · ${g.account} · ${g.method}`, ids: ids.slice(0, 5000), key: JSON.stringify(state.filter) };
+        closeDetail(); renderRail(); renderToolbar(); refresh();
+      };
+    };
+  });
+  renderStatus();
+}
+
+// The map: machines on a circle (hosts in the case filled in their host
+// colour, others dashed), one arrow per (from, to, how), thicker with more
+// events. Click a machine or an arrow to focus the table on it.
+function drawLateralMap(list, focus) {
+  const box = el("lmMap"); if (!box) return;
+  const W = Math.max(480, box.clientWidth || 900), H = 340;
+  const deg = new Map();
+  for (const g of list) for (const m of [g.src, g.dst]) deg.set(m, (deg.get(m) || 0) + g.items.length);
+  const inCase = new Map();
+  for (const g of list) { if (g.srcIn) inCase.set(g.src, true); if (g.dstIn) inCase.set(g.dst, true); }
+  // Hosts in the case first (in case order), then other machines by activity.
+  const nodes = [...deg.keys()].sort((a, b) => (inCase.get(b) ? 1 : 0) - (inCase.get(a) ? 1 : 0) || deg.get(b) - deg.get(a) || (a < b ? -1 : 1));
+  const n = nodes.length, cx = W / 2, cy = H / 2, R = n <= 1 ? 0 : Math.min(W * 0.36, H * 0.36);
+  const pos = new Map(nodes.map((m, i) => {
+    const a = n === 2 ? (i === 0 ? Math.PI : 0) : -Math.PI / 2 + (2 * Math.PI * i) / n;
+    return [m, { x: cx + R * Math.cos(a) * (n === 2 ? 1.2 : 1.25), y: cy + R * Math.sin(a) }];
+  }));
+  // Edges: one per (src, dst, method, failed).
+  const edges = new Map();
+  for (const g of list) {
+    const k = [g.src, g.dst, g.method, g.failed ? 1 : 0].join("\u0000");
+    const e = edges.get(k) || { src: g.src, dst: g.dst, method: g.method, failed: g.failed, n: 0, accts: new Set() };
+    e.n += g.items.length; e.accts.add(g.account); edges.set(k, e);
+  }
+  // Parallel arrows between the same two machines fan out.
+  const pairCount = new Map(), pairIdx = new Map();
+  for (const e of edges.values()) { const p = [e.src, e.dst].sort().join("\u0000"); pairCount.set(p, (pairCount.get(p) || 0) + 1); }
+  const maxN = Math.max(1, ...[...edges.values()].map((e) => e.n));
+  const r = 11;
+  let svg = `<defs>${["lm-rdp", "lm-net", "lm-share", "lm-cred", "lm-fail"].map((c) => `<marker id="ar-${c}" class="${c}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>`).join("")}</defs>`;
+  for (const e of edges.values()) {
+    const a = pos.get(e.src), b = pos.get(e.dst); if (!a || !b) continue;
+    const p = [e.src, e.dst].sort().join("\u0000");
+    const i = pairIdx.get(p) || 0; pairIdx.set(p, i + 1);
+    const total = pairCount.get(p);
+    const dir = e.src < e.dst ? 1 : -1;
+    const bend = ((i - (total - 1) / 2) * 48 + 18) * dir;
+    const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len, uy = dy / len;
+    const mx = (a.x + b.x) / 2 - uy * bend, my = (a.y + b.y) / 2 + ux * bend;
+    // Leave and enter each machine towards the curve's control point, so
+    // parallel arrows fan out at both ends instead of stacking.
+    const toward = (p, qx, qy, d) => { const vx = qx - p.x, vy = qy - p.y, l = Math.hypot(vx, vy) || 1; return [p.x + (vx / l) * d, p.y + (vy / l) * d]; };
+    const [sx, sy] = toward(a, mx, my, r + 3), [ex, ey] = toward(b, mx, my, r + 7);
+    const cls = e.failed ? "lm-fail" : LM_METHOD[e.method] || "lm-net";
+    const w = 1.6 + 3 * Math.sqrt(e.n / maxN);
+    const on = focus && focus.pair && focus.src === e.src && focus.dst === e.dst;
+    svg += `<path class="lm-edge ${cls}${on ? " on" : ""}" d="M${sx.toFixed(1)},${sy.toFixed(1)} Q${mx.toFixed(1)},${my.toFixed(1)} ${ex.toFixed(1)},${ey.toFixed(1)}" style="stroke-width:${w.toFixed(1)}" marker-end="url(#ar-${cls})" data-src="${escapeHtml(e.src)}" data-dst="${escapeHtml(e.dst)}"><title>${escapeHtml(`${e.src} → ${e.dst}\n${e.method}${e.failed ? " (failed)" : ""} · ${e.n} event${e.n === 1 ? "" : "s"}\n${[...e.accts].join(", ")}`)}</title></path>`;
+    const lx = 0.25 * sx + 0.5 * mx + 0.25 * ex, ly = 0.25 * sy + 0.5 * my + 0.25 * ey;
+    svg += `<text class="lm-elabel" x="${lx.toFixed(1)}" y="${(ly - 4).toFixed(1)}" text-anchor="middle">${fmt(e.n)}</text>`;
+  }
+  for (const m of nodes) {
+    const p = pos.get(m);
+    const hc = inCase.get(m) ? hostClass(m) || "in" : "ext";
+    const below = p.y >= cy - 1;
+    const on = focus && !focus.pair && focus.node === m;
+    svg += `<g class="lm-node ${hc}${on ? " on" : ""}" data-node="${escapeHtml(m)}" transform="translate(${p.x.toFixed(1)},${p.y.toFixed(1)})"><title>${escapeHtml(m)}${inCase.get(m) ? " (host in this case)" : " (not in this case)"}</title>
+      <circle r="${r}"/><text y="${below ? r + 15 : -r - 16}" text-anchor="middle">${escapeHtml(m)}</text><text class="sub" y="${below ? r + 28 : -r - 4}" text-anchor="middle">${inCase.get(m) ? "in case" : "not in case"}</text></g>`;
+  }
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Map of connections between machines">${svg}</svg>`;
+  box.querySelectorAll(".lm-node").forEach((g) => { g.onclick = () => { const m = g.dataset.node; state.lmFocus = focus && !focus.pair && focus.node === m ? null : { node: m }; renderLateral(); }; });
+  box.querySelectorAll(".lm-edge").forEach((p) => { p.onclick = () => { const s = p.dataset.src, d = p.dataset.dst; state.lmFocus = focus && focus.pair && focus.src === s && focus.dst === d ? null : { pair: true, src: s, dst: d }; renderLateral(); }; });
 }
 
 async function renderIngestLog() {
@@ -702,56 +875,85 @@ async function pivotToDay(day) {
 // In-tool help content (kept in sync with HELP.md shipped for GitHub).
 const HELP_HTML = `
   <h3>What is fx?</h3>
-  <p>fx is a Windows artefact analysis and threat-hunting tool for DFIR triage. It ingests a folder of <b>already-extracted</b> Windows artefacts (from KAPE, Magnet RESPONSE, Velociraptor, etc.), normalises them onto a single timeline, and runs detection rules focused on the tactics of financially-motivated / ransomware actors.</p>
-  <h3>How to use it</h3>
+  <p>fx is a Windows artefact analysis and threat-hunting tool for DFIR triage. It ingests folders of <b>already-extracted</b> Windows artefacts (from KAPE, Magnet RESPONSE, Velociraptor, CyLR or a raw copy), puts them on one timeline, and runs detection rules focused on financially-motivated and ransomware actors. One case can hold several hosts.</p>
+
+  <h3>Starting a case</h3>
   <ul>
-    <li><b>+ New case</b> — pick an artefact folder and where to save the <code>.fxcase</code>; fx ingests, hunts, and displays it.</li>
-    <li><b>Open case</b> — reopen a saved <code>.fxcase</code>.</li>
-    <li><b>Review findings</b> (rail) — rule detections and your analyst-validated events together. Click a finding to jump to the event, see its raw record, and triage it.</li>
-    <li><b>Triage</b> — mark any event Validated / Unconfirmed / False positive / Dismissed, with a note. Filter by state from the rail.</li>
-    <li><b>Timeline</b> — filter by activity, artefact, or time range; click an event and use <b>Pivot ±1m/5m/30m/1h</b> to see what happened around it.</li>
-    <li><b>Export report</b> — save the self-contained HTML case report (findings, ATT&CK matrix, timeline, evidence chain of custody with SHA-256s). Print it to PDF to archive.</li>
-    <li><b>Export CSV / STIX</b> — export findings (rule + analyst) for Excel or a TIP/MISP. Choose which triage states to include (validated / unconfirmed / false positive / dismissed).</li>
-    <li><b>Ingest log</b> (rail) — every file ingested and whether it parsed, was unsupported, or failed.</li>
-    <li><b>Suppress…</b> (hover a finding) — hide known-benign findings like this one, for this case or every case. Nothing is deleted: review or restore them from the <b>Allow-list</b>.</li>
-    <li><b>Sigma rules</b> (IOC hunt) — run community SigmaHQ rules; hover a matched rule and click <b>Disable</b> to stop a noisy one.</li>
-    <li><b>Artefact list</b> (rail) — hover any artefact for what that evidence source shows and why it matters.</li>
-    <li><b>Activity graph</b> (rail) — events-per-day histogram across the whole case. A day far above the baseline is outlined and labelled — the way to spot high-volume activity no rule tagged. Click a day to pivot the timeline to it.</li>
+    <li><b>New case…</b> (case menu, top left) — <b>Browse</b> to the collection folder and fx lists the supported files it found (artefact types, file counts, sizes, the host and collection tool) before anything is ingested. Name the case, choose where it's saved, then <b>Start ingest</b>. Ingest, detections and Sigma runs show live progress and can be cancelled.</li>
+    <li><b>Add host…</b> (case menu) — add another machine's collection to the open case, through the same window. Each collection becomes a host, named from its SYSTEM hive; rename it from the Hosts list if needed.</li>
+    <li><b>Open case…</b> (case menu) — reopen a saved <code>.fxcase</code>. Big cases show each loading step.</li>
+    <li><b>Getting around</b> — the top bar has the case menu (new, open, add host, exports), the host switcher, search and the ☰ menu (themes, help). The <b>Investigate</b> list at the top of the rail holds the case's views: Timeline, Findings, Lateral movement, Activity graph, IOC hunt &amp; Sigma and Decode. The ingest log is at the bottom of the rail.</li>
   </ul>
+
+  <h3>More than one host</h3>
+  <ul>
+    <li>The <b>host switcher</b> (top bar, next to the case name) and the rail's <b>Hosts</b> list scope everything to one machine, or show all hosts together: timeline, findings, counts, activity graph, ingest log and exports.</li>
+    <li>With several hosts the timeline gains a <b>Host</b> column, and the case report has a Hosts panel and a host on every finding.</li>
+    <li><b>Lateral movement</b> (Investigate) — a map and table of which account connected from which machine to which, by RDP, network logon, admin-share access or explicit credentials, from both ends' logs. <b>Both ends</b> marks connections the source and destination logs agree on. Click a machine or arrow to narrow it down, and a row to see its events.</li>
+  </ul>
+
+  <h3>Working a case</h3>
+  <ul>
+    <li><b>Findings</b> (Investigate) — rule, Sigma and IOC detections, worst first. Click one to jump to its event. <b>Findings only</b> narrows the timeline to the events behind any finding plus anything you've validated.</li>
+    <li><b>Triage</b> — mark any event Validated, Unconfirmed, False positive or Dismissed, with a note, and add your own tags. The <b>Triage</b> column (VAL / UNC / FP / DIS) shows it on every row; filter by state or tag from its heading or the rail. <b>Copy as table</b> copies the filtered events for a report.</li>
+    <li><b>Search</b> (<code>Ctrl+K</code>) filters the whole case as you type and shows the match count.</li>
+    <li><b>Timeline columns</b> — Triage, Time, Host, Artefact, <b>Event ID</b> (EVTX), <b>Action</b> (e.g. <code>logon.success</code>), User and Event. Click a heading to filter by its values; drag a heading's edge to resize it (double-click to reset).</li>
+    <li><b>Detail panel</b> — click a row for its raw record, its timestamp kind, and <b>Pivot ±1m/5m/30m/1h</b> to see what happened around it. <code>$MFT</code> rows show all eight times ($SI and $FN, M / A / C / B).</li>
+    <li><b>Mini timeline</b> (above the rows) — where activity sits across the case; click or drag to filter a time range.</li>
+    <li><b>Activity graph</b> (Investigate) — events per day. A day far outside the normal pattern is marked as a spike: volume no rule flagged. Click a day to pivot to it.</li>
+    <li><b>Decode</b> (Investigate) — right-click an event and choose <b>Decode command</b>, or click Decode with text selected, or paste a command, to unpick encoded or obfuscated PowerShell (Base64, Gzip, backticks, reversed strings, format strings, <code>[char]</code> joins) offline. You get a verdict, the decoded command, findings with ATT&CK, and indicators you can send to the IOC hunt.</li>
+    <li><b>IOC hunt &amp; Sigma</b> (Investigate) — paste or drop a list of hashes, IPs, domains, URLs, file names or paths (defanged works) and search the whole case at once. The <b>Sigma rules</b> tab runs community SigmaHQ rules; disable a noisy one from its result.</li>
+    <li><b>Suppress…</b> (hover a finding) — hide known-benign findings for this case or every case. Nothing is deleted: restore them from the <b>Allow-list</b>.</li>
+    <li><b>Ingest log</b> (bottom of the rail) — every file in the collection: parsed, applied (a registry transaction log replayed into its hive), duplicate, unsupported or failed, with the reason.</li>
+    <li><b>Artefact list</b> (rail) — hover any artefact for what that evidence source shows and why it matters.</li>
+  </ul>
+
+  <h3>Exporting</h3>
+  <p>From the case menu (the case's name, top left).</p>
+  <ul>
+    <li><b>Case report</b> — a self-contained HTML report: findings by tactic, ATT&CK matrix, timeline, hosts, and the evidence chain of custody with SHA-256s. Print it to PDF to archive. For one host or the whole case.</li>
+    <li><b>CSV / STIX</b> — findings (rule and analyst) for Excel or a TIP / MISP, choosing which triage states to include.</li>
+  </ul>
+
   <h3>What it analyses</h3>
-  <p>Parsers: Windows Event Logs (EVTX, ~50 event IDs across Security/Sysmon/PowerShell/Defender/TerminalServices/WMI), MFT, UsnJrnl, registry hives (Run keys, services, ShimCache, UserAssist, BAM/DAM, RDP, Amcache, ShellBags, host details, user activity: RecentDocs, Open/Save dialogs, typed paths, searches, mapped drives, Office recent files and macro-enabled documents), Prefetch, PCA, SRUM, Scheduled Tasks, Browser history, LNK & Jump Lists, Recycle Bin, PowerShell history, Windows Timeline, remote-access tool logs, Defender logs, setupapi (USB first connection) and memory remnants carved from pagefile.sys / swapfile.sys (plus hiberfil.sys state).</p>
+  <p>Windows Event Logs (EVTX: Security, Sysmon, PowerShell, Defender, Terminal Services, WMI and more), <code>$MFT</code> ($SI and $FN times), <code>$UsnJrnl</code>, registry hives with transaction-log replay (Run keys, services, ShimCache, UserAssist, BAM/DAM, RDP, AmCache, ShellBags, host details, USB devices, network profiles, user activity: RecentDocs, Open/Save dialogs, typed paths, searches, mapped drives, Office documents with macros enabled), Prefetch, PCA, SRUM, scheduled tasks, browser history and <b>cookies</b> (Chromium / Edge / Firefox; cookie values are never read), LNK and Jump Lists, Recycle Bin, PowerShell history, Windows Timeline, remote-access tool logs, Defender logs, setupapi, and memory remnants carved from <code>pagefile.sys</code> / <code>swapfile.sys</code> (plus <code>hiberfil.sys</code> state).</p>
+
   <h3>What it hunts for</h3>
-  <p>37 built-in rules: generic ATT&CK techniques (credential dumping, discovery, lateral movement, defense evasion, persistence, LOLBin abuse, suspicious PowerShell) plus behavioural rules for the top 2026 ransomware groups (Qilin, TheGentlemen, Akira, Play/DragonForce, LockBit, INC Ransom, Interlock, Clop and more). Rules match behaviour and tooling, not file hashes.</p>
+  <p>37 built-in rules: generic ATT&CK techniques (credential dumping, discovery, lateral movement, defence evasion, persistence, LOLBin abuse, suspicious PowerShell) plus behavioural rules for the leading 2026 ransomware groups (Qilin, TheGentlemen, Akira, Play / DragonForce, LockBit, INC Ransom, Interlock, Clop and more). Rules match behaviour and tooling, not file hashes. A single rule keeps at most 1,000 findings per run; further matches stay on the timeline.</p>
+
+  <h3>Reading times</h3>
+  <ul>
+    <li>All times are <b>UTC</b>, shown as DD/MM/YYYY.</li>
+    <li>fx never invents a time: a record with none shows <b>no timestamp</b> and sorts last (press <code>End</code>).</li>
+    <li>Hover a time, or open the row, to see which time it is: M Modified, A Accessed, C Changed, B Born, or Executed, Logon, Logged, Recorded.</li>
+    <li>A file whose $SI Born predates its $FN Born, with whole-second $SI times, gets a <b>Possible timestomping</b> event: search <code>timestomp</code> to review them.</li>
+  </ul>
+
   <h3>Important</h3>
-  <p class="muted">Findings are investigative <b>leads to corroborate</b>, not verdicts. Attribution to a specific group is probabilistic — tooling is shared across crews. Absence of findings is not proof a host is clean. All timestamps are UTC. Point fx at a <b>copy</b> of evidence; originals stay read-only (every source file is SHA-256 hashed at ingest).</p>
+  <p class="muted">Findings are investigative <b>leads to corroborate</b>, not verdicts. Attribution to a specific group is probabilistic: tooling is shared across crews. Absence of findings is not proof a host is clean. Point fx at a <b>copy</b> of evidence; originals stay read-only, and every source file is SHA-256 hashed at ingest.</p>
 `;
 
 
 // ── Theme switcher (daybreak / slate / midnight) ────────────────────────────
 function wireTheme() {
-  const THEMES = [
-    ["daybreak", "☀ Daybreak"],
-    ["slate", "◑ Slate"],
-    ["midnight", "◐ Midnight"],
-    ["contrast", "◼ High contrast"],
-  ];
-  const btn = el("themeBtn");
-  if (!btn) return;
+  const NAMES = ["daybreak", "slate", "midnight", "forest"];
   const root = document.documentElement;
   const apply = (name) => {
+    if (!NAMES.includes(name)) name = "daybreak";
     root.dataset.theme = name;
-    const cur = THEMES.find((t) => t[0] === name) || THEMES[0];
-    btn.textContent = cur[1];
+    document.querySelectorAll(".theme-opt").forEach((b) => {
+      const on = b.dataset.themeOpt === name;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-checked", String(on));
+    });
     try { localStorage.setItem("fx-theme", name); } catch (e) {}
   };
-  btn.addEventListener("click", () => {
-    const i = THEMES.findIndex((t) => t[0] === root.dataset.theme);
-    apply(THEMES[(i + 1) % THEMES.length][0]);
-  });
+  document.querySelectorAll(".theme-opt").forEach((b) => b.addEventListener("click", () => apply(b.dataset.themeOpt)));
   // Default to Daybreak (light) unless the analyst has chosen otherwise before.
   let saved = "daybreak";
   try { saved = localStorage.getItem("fx-theme") || "daybreak"; } catch (e) {}
   if (saved === "sunset" || saved === "moss") saved = "slate"; // retired themes -> Slate
+  if (saved === "contrast") saved = "forest"; // High contrast retired -> Forest
   apply(saved);
 }
 
@@ -1007,6 +1209,33 @@ const ARTEFACT_INFO = {
 };
 
 // ── Left rail ────────────────────────────────────────────────────────────────
+// Investigate: the case's views, at the top of the rail.
+const NAV_ICON = {
+  timeline: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>`,
+  findings: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M5 21V4h11l-1.5 4L16 12H5"/></svg>`,
+  lateral: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="5" cy="6" r="2.5"/><circle cx="19" cy="6" r="2.5"/><circle cx="12" cy="19" r="2.5"/><path d="M7.5 6h9M6.3 8.2l4.4 8.4M17.7 8.2l-4.4 8.4"/></svg>`,
+  activity: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 20V12M9.3 20V6M14.6 20v-9M20 20V3"/></svg>`,
+  ioc: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="7"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>`,
+  decode: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4c-2 0-2 2-2 4s-2 4-3 4c1 0 3 2 3 4s0 4 2 4M16 4c2 0 2 2 2 4s2 4 3 4c-1 0-3 2-3 4s0 4-2 4"/></svg>`,
+  ingest: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h6"/></svg>`,
+};
+function renderNav() {
+  const o = state.overview;
+  const v = state.view;
+  const row = (id, key, label, count, active, tip) =>
+    `<div class="nav-row ${active ? "active" : ""}" id="${id}" title="${escapeHtml(tip)}">${NAV_ICON[key]}<span class="nl">${label}</span>${count ? `<span class="nc">${count}</span>` : ""}</div>`;
+  const shownEvents = state.hostSel ? ((state.hosts || []).find((h) => h.host === state.hostSel) || {}).events : o.total_events;
+  return `<section class="nav" aria-label="Investigate">
+    <h2>Investigate</h2>
+    ${row("navTimeline", "timeline", "Timeline", fmt(shownEvents != null ? shownEvents : o.total_events), v === "timeline", "Every event in time order")}
+    ${renderFindings() || row("findingsSection", "findings", "Findings", "0", v === "hunt", "No findings")}
+    ${row("lateralLink", "lateral", "Lateral movement", "", v === "lateral", "Which account connected from which machine to which, how and when")}
+    ${renderActivityCard()}
+    ${row("navIoc", "ioc", "IOC hunt &amp; Sigma", "", v === "ioc", "Search for many indicators at once, or run community Sigma rules")}
+    ${row("navDecode", "decode", "Decode", "", v === "decode", "Unpick an encoded or obfuscated command. Select text first to decode just that.")}
+  </section>`;
+}
+
 function renderRail() {
   const o = state.overview;
   const artefactFacets = o.by_artefact
@@ -1016,16 +1245,12 @@ function renderRail() {
   const catFacets = CATEGORIES
     .map(([key, label, color]) => facetRow("category", label, catCount[key] != null ? catCount[key] : "", color, key))
     .join("");
+  const talkers = renderTalkers(o.srum_top_talkers);
   const ingTotal = (o.ingest || []).reduce((a, r) => a + r.count, 0);
   const ingFailed = ((o.ingest || []).find((r) => r.label === "failed") || {}).count || 0;
-  const talkers = renderTalkers(o.srum_top_talkers);
 
   el("rail").innerHTML = `
-    <section>
-      <div class="metric"><span class="big">${fmt(o.total_events)}</span><span class="lbl">events</span></div>
-    </section>
-    ${renderFindings()}
-    ${renderActivityCard()}
+    ${renderNav()}
     ${multiHost() ? renderHostsSection() : renderHostSection()}
     ${renderTriageSummary()}
     ${renderLabelSummary()}
@@ -1045,9 +1270,8 @@ function renderRail() {
       ${talkers}
     </section>
     <section>
-      <div class="facet ingest-link ${state.view === "ingestlog" ? "active" : ""}" id="ingestLogLink" title="Every file ingested: parsed, duplicate, unsupported or failed">
-        <span class="name">${state.view === "ingestlog" ? "▾" : "▸"} Ingest log</span>
-        <span class="count">${fmt(ingTotal)} file${ingTotal === 1 ? "" : "s"}${ingFailed ? ` · <b class="ing-fail">${fmt(ingFailed)} failed</b>` : ""}</span>
+      <div class="nav-row ${state.view === "ingestlog" ? "active" : ""}" id="ingestLogLink" title="Every file ingested: parsed, applied, duplicate, unsupported or failed">
+        ${NAV_ICON.ingest}<span class="nl">Ingest log</span><span class="nc">${fmt(ingTotal)} file${ingTotal === 1 ? "" : "s"}${ingFailed ? ` · <b>${fmt(ingFailed)} failed</b>` : ""}</span>
       </div>
     </section>`;
 }
@@ -1108,12 +1332,6 @@ function renderFindings() {
   const bySev = {};
   d.forEach((x) => (bySev[x.severity] = (bySev[x.severity] || 0) + 1));
   const order = ["critical", "high", "medium", "low", "informational"];
-  const pills = order
-    .filter((s) => bySev[s])
-    .map((s) => `<span class="sev-pill sev-${s}">${fmt(bySev[s])} ${s}</span>`)
-    .join("");
-  const worst = order.find((s) => bySev[s]) || "low";
-  const sevColor = { critical: "var(--alert)", high: "#d98c4a", medium: "#d9c04a" }[worst] || "var(--focus)";
   // How much of the list still needs eyes: a detection counts as reviewed once
   // any of its events carries a triage state other than unconfirmed.
   const tri = new Map(viewTriage().map((t) => [t.event_id, t.triage_state]));
@@ -1124,18 +1342,13 @@ function renderFindings() {
   });
   const toReview = d.length - reviewed;
   const inHunt = state.view === "hunt";
-  return `<section class="findings ${inHunt ? "active" : ""}" id="findingsSection">
-    <h2>Findings</h2>
-    <div class="findings-card" style="--fc-sev:${sevColor}" title="${inHunt ? "Back to the timeline" : "Open the findings list"}">
-      <div><span class="fc-count">${fmt(d.length)}</span><span class="fc-lbl">detection${d.length === 1 ? "" : "s"}</span></div>
-      <div class="sev-pills" style="margin-top:9px">${pills}</div>
-      <div class="fc-tri"><b>${fmt(toReview)}</b> to review · ${fmt(reviewed)} triaged</div>
-      ${allowSuppressedCount() ? `<div class="fc-sup" id="allowLink" title="Findings hidden by your allow-list. Click to review or restore them.">${fmt(allowSuppressedCount())} suppressed · allow-list</div>` : ""}
-      <button class="findings-cta" type="button">
-        <span>${inHunt ? "Back to timeline" : "Review findings"}</span><span class="arrow">${inHunt ? "←" : "→"}</span>
-      </button>
+  const top = ["critical", "high"].filter((x) => bySev[x])
+    .map((x) => `<span class="nav-sev ${x}" title="${fmt(bySev[x])} ${x}">${fmt(bySev[x])}</span>`).join("");
+  const sup = allowSuppressedCount();
+  return `<div class="nav-row ${inHunt ? "active" : ""}" id="findingsSection" title="${fmt(d.length)} findings, ${fmt(toReview)} to review: ${order.filter((x) => bySev[x]).map((x) => fmt(bySev[x]) + " " + x).join(", ")}">
+      ${NAV_ICON.findings}<span class="nl">Findings</span><span class="nc">${fmt(d.length)}</span>${top}
     </div>
-  </section>`;
+    <div class="nav-sub"><span title="Findings not yet validated, marked false positive or dismissed">${fmt(toReview)} to review</span>${sup ? ` · <a id="allowLink" title="Findings hidden by your allow-list. Click to review or restore them.">${fmt(sup)} suppressed</a>` : ""}</div>`;
 }
 
 // Activity card: same shape as the Findings card. Headline is the number of
@@ -1143,24 +1356,19 @@ function renderFindings() {
 function renderActivityCard() {
   const inAct = state.view === "activity";
   const days = state.days;
-  let head = `<span class="fc-count">…</span><span class="fc-lbl">loading activity</span>`, sub = "", spikes = 0;
+  let cnt = "…", spikes = 0, tip = "Events per day across the case";
   if (days && days.length) {
     const totals = days.map((d) => d.total);
     const thresh = anomalyThreshold(totals), med = Math.round(medianOf(totals));
     spikes = days.filter((d) => d.total >= thresh && d.total > med).length;
-    head = `<span class="fc-count">${fmt(spikes)}</span><span class="fc-lbl">volume spike${spikes === 1 ? "" : "s"}</span>`;
-    sub = `<b>${fmt(days.length)}</b> day${days.length === 1 ? "" : "s"} with events · ~${fmt(med)}/day baseline`;
+    cnt = spikes ? `${fmt(spikes)} spike${spikes === 1 ? "" : "s"}` : `${fmt(days.length)} days`;
+    tip = `${fmt(days.length)} day${days.length === 1 ? "" : "s"} with events, about ${fmt(med)} a day; ${fmt(spikes)} volume spike${spikes === 1 ? "" : "s"}`;
   } else if (days) {
-    head = `<span class="fc-count">0</span><span class="fc-lbl">days with events</span>`;
+    cnt = "no dates";
   }
-  return `<section class="findings actcard ${inAct ? "active" : ""}" id="activityLink">
-    <h2>Activity</h2>
-    <div class="findings-card ${spikes ? "spiky" : "calm"}" title="${inAct ? "Back to the timeline" : "Open the events-per-day graph"}">
-      <div>${head}</div>
-      ${sub ? `<div class="fc-tri">${sub}</div>` : ""}
-      <button class="findings-cta" type="button"><span>${inAct ? "Back to timeline" : "Activity graph"}</span><span class="arrow">${inAct ? "←" : "→"}</span></button>
-    </div>
-  </section>`;
+  return `<div class="nav-row ${inAct ? "active" : ""} ${spikes ? "spiky" : ""}" id="activityLink" title="${escapeHtml(tip)}">
+      ${NAV_ICON.activity}<span class="nl">Activity graph</span><span class="nc">${cnt}</span>
+    </div>`;
 }
 function refreshActivityCard() {
   const cur = el("activityLink");
@@ -1548,7 +1756,9 @@ function viewTriage() {
 // Top bar: "+ Add host" once a case is open; the host switcher once there are two.
 function syncHostUi() {
   const open = !!state.overview;
-  const add = el("addHostBtn"); if (add) add.hidden = !open;
+  for (const id of ["addHostBtn", "caseExportSep", "caseExportHead", "exportReportTop", "exportCsvTop", "exportStixTop"]) {
+    const n = el(id); if (n) n.hidden = !open;
+  }
   const wrap = el("hostMenuWrap"), chip = el("hostChip");
   if (el("app")) el("app").classList.toggle("multihost", hostCol());
   if (!wrap || !chip) return;
@@ -1587,10 +1797,10 @@ function wireHostMenu() {
     if (!wrap.classList.contains("open")) return;
     if (e.key === "Escape") { close(); btn.focus(); }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      const items = Array.from(wrap.querySelectorAll(".menuitem"));
-      const i = items.indexOf(document.activeElement);
-      const n = e.key === "ArrowDown" ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
-      items[n].focus(); e.preventDefault();
+      const list = items();
+      const i = list.indexOf(document.activeElement);
+      const n = e.key === "ArrowDown" ? (i + 1) % list.length : (i - 1 + list.length) % list.length;
+      list[n].focus(); e.preventDefault();
     }
   });
 }
@@ -2093,6 +2303,15 @@ function showIocEvents(det, shownAs) {
 }
 
 // Show every event carrying an analyst tag.
+// Clicking a tag chip (on a row or in the detail panel) shows every event with
+// that tag. Capture phase, so the row's own click (select / open) doesn't run.
+document.addEventListener("click", (e) => {
+  const chip = e.target.closest && e.target.closest(".lbl-chip[data-tag]");
+  if (!chip || e.target.closest("[data-untag]")) return;
+  e.stopPropagation(); e.preventDefault();
+  if (state.filter.label !== chip.dataset.tag) showTagEvents(chip.dataset.tag);
+}, true);
+
 function showTagEvents(tag) {
   state.view = "timeline"; state.huntOnly = null; state.idFilter = null;
   const on = state.filter.label === tag;
@@ -2100,10 +2319,10 @@ function showTagEvents(tag) {
   closeDetail(); renderRail(); renderToolbar(); refresh();
 }
 
-// Export menu: one top-bar button for all exports. Items keep their original
-// ids, so the existing handlers run unchanged; picking one closes the menu.
-function wireExportMenu() {
-  const wrap = el("exportMenuWrap"), btn = el("exportMenuBtn");
+// Top-bar menus (case menu, app menu). Items keep their original ids, so the
+// existing handlers run unchanged; picking one closes the menu.
+function wireMenu(wrapId, btnId) {
+  const wrap = el(wrapId), btn = el(btnId);
   if (!wrap || !btn) return;
   const close = () => { wrap.classList.remove("open"); btn.setAttribute("aria-expanded", "false"); };
   btn.addEventListener("click", (e) => {
@@ -2114,6 +2333,7 @@ function wireExportMenu() {
     if (open) { const first = wrap.querySelector(".menuitem"); if (first) first.focus(); }
   });
   wrap.querySelectorAll(".menuitem").forEach((it) => it.addEventListener("click", close));
+  const items = () => Array.from(wrap.querySelectorAll(".menuitem")).filter((x) => !x.hidden);
   document.addEventListener("click", (e) => { if (!wrap.contains(e.target)) close(); });
   document.addEventListener("keydown", (e) => {
     if (!wrap.classList.contains("open")) return;
@@ -2125,6 +2345,17 @@ function wireExportMenu() {
       items[n].focus(); e.preventDefault();
     }
   });
+}
+
+// Decode from the rail: text selected anywhere (raw record, message, a
+// finding) is decoded directly; otherwise the last input comes back.
+let navDecodeSel = "";
+function onNavDecode() {
+  if (state.view === "decode") { state.view = "timeline"; renderRail(); renderToolbar(); refresh(); return; }
+  const sel = navDecodeSel || String((window.getSelection && window.getSelection()) || "").trim(); navDecodeSel = "";
+  if (sel.length > 2) { openDecode(sel, null); return; }
+  const d = state.decode;
+  openDecode((d && d.input) || "", d && d.source && d.input === d.sourceText ? d.source : null);
 }
 
 // HTML case report — same output as `fx report`: findings by tactic, ATT&CK
@@ -2268,6 +2499,10 @@ async function refresh() {
     await renderActivityGraph();
     return;
   }
+  if (state.view === "lateral") {
+    await renderLateral();
+    return;
+  }
   if (state.idFilter && state.idFilter.key !== JSON.stringify(state.filter)) state.idFilter = null;
   // Keep the "Clear all filters" button in step with the filters actually
   // applied (search typing / IOC / tag filters change them without a toolbar
@@ -2281,14 +2516,14 @@ async function refresh() {
     const n = state.rows.length;
     el("resultCount").textContent = `${fmt(n)} event${n === 1 ? "" : "s"}`;
     const bar = el("idfBar");
-    const isIoc = f.kind === "ioc", isSigma = f.kind === "sigma", isFinding = f.kind === "finding";
+    const isIoc = f.kind === "ioc", isSigma = f.kind === "sigma", isFinding = f.kind === "finding", isLat = f.kind === "lateral";
     bar.classList.toggle("is-tag", f.kind === "tag");
-    bar.innerHTML = `<span class="idf-tag">${isIoc ? "IOC" : isSigma ? "Sigma" : isFinding ? "Finding" : "Tag"}</span><span class="idf-val" title="${escapeHtml(f.label)}">${escapeHtml(f.label)}</span>`
-      + `<span class="idf-n">${fmt(n)} ${isIoc || isSigma || isFinding ? "matching" : "tagged"} event${n === 1 ? "" : "s"}${isIoc && f.ids.length >= 500 ? " (first 500)" : ""}</span><span class="idf-sp"></span>`
-      + (isIoc || isSigma || isFinding ? `<button class="idf-btn" id="idfBack">${isSigma ? "Back to Sigma results" : isFinding ? "Back to findings" : "Back to IOC hunt"}</button>` : "")
+    bar.innerHTML = `<span class="idf-tag">${isIoc ? "IOC" : isSigma ? "Sigma" : isFinding ? "Finding" : isLat ? "Lateral" : "Tag"}</span><span class="idf-val" title="${escapeHtml(f.label)}">${escapeHtml(f.label)}</span>`
+      + `<span class="idf-n">${fmt(n)} ${isIoc || isSigma || isFinding || isLat ? "matching" : "tagged"} event${n === 1 ? "" : "s"}${isIoc && f.ids.length >= 500 ? " (first 500)" : ""}</span><span class="idf-sp"></span>`
+      + (isIoc || isSigma || isFinding || isLat ? `<button class="idf-btn" id="idfBack">${isSigma ? "Back to Sigma results" : isFinding ? "Back to findings" : isLat ? "Back to lateral movement" : "Back to IOC hunt"}</button>` : "")
       + `<button class="idf-btn" id="idfClear">Clear filter</button>`;
     bar.hidden = false;
-    if (el("idfBack")) el("idfBack").onclick = () => { state.iocTab = isSigma ? "sigma" : "ioc"; state.idFilter = null; state.view = isFinding ? "hunt" : "ioc"; closeDetail(); renderRail(); renderToolbar(); refresh(); };
+    if (el("idfBack")) el("idfBack").onclick = () => { state.iocTab = isSigma ? "sigma" : "ioc"; state.idFilter = null; state.view = isFinding ? "hunt" : isLat ? "lateral" : "ioc"; closeDetail(); renderRail(); renderToolbar(); refresh(); };
     el("idfClear").onclick = () => { state.idFilter = null; refresh(); };
     renderStatus();
     renderWindow();
@@ -2985,7 +3220,7 @@ async function select(id) {
           ${["60:±1m", "300:±5m", "1800:±30m", "3600:±1h"].map((x) => { const [s, l] = x.split(":"); return `<button class="pv-btn" data-pivot="${s}"${e.ts ? "" : ` disabled title="No timestamp to pivot around"`}>${l}</button>`; }).join("")}
         </div>
         <div class="seg dtags" role="group" aria-label="Tags and note">
-          ${labelsFor(id).map((t) => `<span class="lbl-chip big">${escapeHtml(t)}<button class="x" data-untag="${escapeHtml(t)}" title="Remove tag">×</button></span>`).join("")}
+          ${labelsFor(id).map((t) => `<span class="lbl-chip big" data-tag="${escapeHtml(t)}" title="Show every event tagged ${escapeHtml(t)}">${escapeHtml(t)}<button class="x" data-untag="${escapeHtml(t)}" title="Remove tag">×</button></span>`).join("")}
           <button class="add-tag" id="detAddTag" title="Add one of your tags, or type a new one">+ Tag</button>
           <button class="add-tag" id="detNoteBtn"${note ? " hidden" : ""} title="Add an analyst note (saved with the triage state)">+ Note</button>
         </div>
@@ -3087,7 +3322,7 @@ function labelCounts() { const c = {}; (state.labels || []).forEach((l) => (c[l.
 function labelChips(id) {
   const t = labelsFor(id);
   if (!t.length) return "";
-  const shown = t.slice(0, 2).map((x) => `<span class="lbl-chip">${escapeHtml(x)}</span>`).join("");
+  const shown = t.slice(0, 2).map((x) => `<span class="lbl-chip" data-tag="${escapeHtml(x)}" title="Show every event tagged ${escapeHtml(x)}">${escapeHtml(x)}</span>`).join("");
   return shown + (t.length > 2 ? `<span class="lbl-chip more">+${t.length - 2}</span>` : "");
 }
 async function toggleLabel(id, tag) {
@@ -3395,6 +3630,26 @@ function wireEvents() {
     if (e.target.closest("#findingsSection")) {
       state.view = state.view === "hunt" ? "timeline" : "hunt";
       state.huntOnly = null;
+      closeDetail();
+      renderRail();
+      renderToolbar();
+      refresh();
+      return;
+    }
+    if (e.target.closest("#navTimeline")) {
+      state.view = "timeline"; state.idFilter = null;
+      closeDetail(); renderRail(); renderToolbar(); refresh();
+      return;
+    }
+    if (e.target.closest("#navIoc")) {
+      if (state.view === "ioc") { state.view = "timeline"; renderRail(); renderToolbar(); refresh(); }
+      else openIocHunt();
+      return;
+    }
+    if (e.target.closest("#navDecode")) { onNavDecode(); return; }
+    if (e.target.closest("#lateralLink")) {
+      state.view = state.view === "lateral" ? "timeline" : "lateral";
+      state.lmFocus = null;
       closeDetail();
       renderRail();
       renderToolbar();

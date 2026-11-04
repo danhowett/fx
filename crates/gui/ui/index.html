@@ -120,41 +120,32 @@
     --focus:     #4cc2e8;   /* sky — distinct from every category hue */
   }
 
-  /* ── High contrast: pure black ground, white text, bright fully separated
-     accents and visible borders. Body and secondary text exceed WCAG AAA
-     (7:1); yellow focus ring as in Windows high-contrast themes. */
-  html[data-theme="contrast"] {
-    --bg:        #000000;
-    --surface:   #000000;
-    --surface-2: #1c1c1c;
-    --line:      #9a9a9a;
-    --line-soft: #5c5c5c;
-    --ink:       #ffffff;
-    --ink-dim:   #ececec;
-    --ink-faint: #c8c8c8;
+  /* ── Forest: deep pine ground with clear steps between layers, saturated
+     accents (as in Slate) and a bright leaf green as the theme's signature
+     on buttons, selection and focus. Body text about 14:1 on panels. */
+  html[data-theme="forest"] {
+    --bg:        #0d1912;
+    --surface:   #13241a;
+    --surface-2: #1b3124;
+    --line:      #2d4a38;
+    --line-soft: #21392b;
+    --ink:       #eef5ee;
+    --ink-dim:   #b6cbb8;
+    --ink-faint: #82a088;
 
-    --cat-execution:   #6fb8ff;
-    --cat-persistence: #ff8ad4;
-    --cat-filesystem:  #3dffbe;
-    --cat-network:     #ffad42;
-    --cat-logon:       #c6ff4f;
-    --cat-other:       #c8c8c8;
+    --cat-execution:   #6cb4ff;  /* blue   */
+    --cat-persistence: #e58ad6;  /* orchid */
+    --cat-filesystem:  #4fd6c4;  /* teal   */
+    --cat-network:     #ffb454;  /* amber  */
+    --cat-logon:       #d2e86a;  /* citron */
+    --cat-other:       #82a088;
 
-    --alert:     #ff5f5f;
-    --alert-dim: #5c0000;
-    --flag:      #ffd400;
+    --alert:     #ff6b5e;   /* coral red */
+    --alert-dim: #5c2420;
+    --flag:      #ffd24a;   /* gold */
 
-    --focus:     #ffff00;
+    --focus:     #5fe08e;   /* leaf green: the theme's signature */
   }
-  html[data-theme="contrast"] :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-  html[data-theme="contrast"] .evrow.sel,
-  html[data-theme="contrast"] .hitrow.sel { box-shadow: inset 0 0 0 2px var(--focus); }
-  html[data-theme="contrast"] .facet.active { outline: 1px solid var(--focus); }
-  html[data-theme="contrast"] .topbtn,
-  html[data-theme="contrast"] .btn-primary { border-width: 1px; border-style: solid; border-color: var(--ink-faint); }
-  html[data-theme="contrast"] .btn-primary { color: #000; background: var(--focus); }
-  html[data-theme="contrast"] .linkbtn,
-  html[data-theme="contrast"] .fc-sup { text-decoration: underline; }
 
   @media (prefers-reduced-motion: no-preference) {
     .app { animation: settle .28s ease-out; }
@@ -187,13 +178,35 @@
   .app.detail-open { grid-template-columns: 248px 1fr var(--detail-w, 440px); }
 
   /* ── Top bar ─────────────────────────────────────────────────────────────── */
+  /* The frame (top bar) and the rail's Investigate list take their own tone
+     in every theme: the background pulled a little towards the theme's
+     accent, so the app's chrome reads apart from the evidence. */
+  :root { --chrome: color-mix(in srgb, var(--focus) 9%, var(--bg)); --nav-bg: color-mix(in srgb, var(--focus) 6%, var(--surface)); }
   .topbar {
     grid-area: topbar;
-    display: flex; align-items: center; gap: 16px;
+    display: flex; align-items: center; gap: 12px;
     padding: 0 14px;
-    background: var(--surface);
-    border-bottom: 1px solid var(--line);
+    background: var(--chrome);
+    border-bottom: 1px solid color-mix(in srgb, var(--focus) 22%, var(--line));
   }
+  .casebtn {
+    display: inline-flex; align-items: center; gap: 7px; max-width: 320px; cursor: pointer;
+    background: none; border: 1px solid transparent; border-radius: 7px; padding: 5px 9px;
+    font: 600 13px var(--sans); color: var(--ink);
+  }
+  .casebtn svg { width: 15px; height: 15px; flex: none; color: var(--focus); }
+  .casebtn .case-name { color: var(--ink); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .casebtn .chev { font-size: 10px; color: var(--ink-faint); }
+  .casebtn:hover, .menuwrap.open .casebtn { border-color: var(--line); background: var(--surface); }
+  .iconbtn { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 30px; cursor: pointer; background: none; border: 1px solid transparent; border-radius: 7px; color: var(--ink-dim); }
+  .iconbtn svg { width: 18px; height: 18px; }
+  .iconbtn:hover, .menuwrap.open .iconbtn { border-color: var(--line); background: var(--surface); color: var(--ink); }
+  .casebtn:focus-visible, .iconbtn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+  .menu.menu-right { left: auto; right: 0; }
+  .menuhead { font-size: 10.5px; font-weight: 600; color: var(--ink-faint); padding: 6px 10px 3px; }
+  .menuitem[hidden], .menusep[hidden], .menuhead[hidden] { display: none; }
+  .theme-opt { position: relative; padding-left: 28px !important; }
+  .theme-opt.on::before { content: "✓"; position: absolute; left: 10px; top: 7px; color: var(--focus); font-weight: 700; font-size: 12px; }
   .brand {
     font-family: var(--mono);
     font-weight: 600;
@@ -209,8 +222,8 @@
   }
   .topbtn:hover { border-color: var(--focus); }
   #newCaseBtn { color: var(--ink); border-color: var(--focus); }
-  .searchgroup { margin-left: auto; display: flex; align-items: center; gap: 6px; }
-  .topbar .search { position: relative; width: 340px; }
+  .searchgroup { margin-left: auto; flex: 0 1 560px; min-width: 200px; display: flex; align-items: center; gap: 6px; }
+  .topbar .search { position: relative; width: 100%; }
   .topbar-end { display: flex; align-items: center; gap: 6px; padding-left: 10px; border-left: 1px solid var(--line); }
   /* Hover / focus tooltip (instant, unlike the native title delay). */
   .has-tip { position: relative; }
@@ -701,6 +714,24 @@
     font-size: 11px; font-weight: 600; color: var(--ink-faint);
     margin: 0 0 9px; letter-spacing: .02em;
   }
+  /* Investigate: the case's views, one compact row each. */
+  .rail section.nav { background: var(--nav-bg); padding: 8px 8px 10px; border-bottom: 1px solid color-mix(in srgb, var(--focus) 18%, var(--line-soft)); }
+  .rail section.nav h2 { margin: 2px 6px 6px; }
+  .nav-row { display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--ink); position: relative; }
+  .nav-row:hover { background: color-mix(in srgb, var(--focus) 10%, transparent); }
+  .nav-row.active { background: color-mix(in srgb, var(--focus) 17%, transparent); font-weight: 600; }
+  .nav-row.active::before { content: ""; position: absolute; left: 0; top: 6px; bottom: 6px; width: 3px; border-radius: 0 2px 2px 0; background: var(--focus); }
+  .nav-row svg { width: 15px; height: 15px; flex: none; color: var(--ink-dim); }
+  .nav-row.active svg { color: var(--focus); }
+  .nav-row .nl { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .nav-row .nc { font-size: 11.5px; color: var(--ink-dim); font-variant-numeric: tabular-nums; white-space: nowrap; font-weight: 400; }
+  .nav-row .nc b { color: var(--alert); font-weight: 600; }
+  .nav-sev { display: inline-block; font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 8px; line-height: 15px; margin-left: 3px; font-variant-numeric: tabular-nums; }
+  .nav-sev.critical { background: var(--alert); color: #fff; }
+  .nav-sev.high { background: #d98c4a; color: #1b1b1b; }
+  .nav-sub { font-size: 11px; color: var(--ink-faint); padding: 0 8px 4px 32px; margin-top: -3px; }
+  .nav-sub a { color: var(--focus); cursor: pointer; }
+  .nav-row.spiky .nc { color: var(--alert); font-weight: 600; }
   .metric { display: flex; align-items: baseline; gap: 8px; }
   .metric .big {
     font-family: var(--sans); font-size: 26px; font-weight: 500; color: var(--ink);
@@ -940,6 +971,8 @@
   .lbl-chip { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; font-weight: 600; color: var(--focus); border: 1px solid color-mix(in srgb, var(--focus) 50%, transparent); background: color-mix(in srgb, var(--focus) 10%, transparent); border-radius: 9px; padding: 0 6px; margin-right: 5px; line-height: 15px; vertical-align: 1px; }
   .lbl-chip.more { color: var(--ink-faint); border-color: var(--line); background: none; }
   .lbl-chip.big { font-size: 11px; line-height: 19px; padding: 0 4px 0 8px; margin: 0; }
+  .lbl-chip[data-tag] { cursor: pointer; }
+  .lbl-chip[data-tag]:hover { background: color-mix(in srgb, var(--focus) 22%, transparent); }
   .lbl-chip .x { background: none; border: 0; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; opacity: .7; }
   .lbl-chip .x:hover { opacity: 1; }
   .lbl-dot { background: var(--focus); border-radius: 50% !important; }
@@ -948,7 +981,7 @@
   /* When the detail panel is wide, drop the Event ID, Action and User columns
      so the event text keeps room instead of being squeezed to nothing. */
   .main { container-type: inline-size; }
-  @container (max-width: 820px) {
+  @container (max-width: 980px) {
     .grid-head, .evrow { --w-eid: 0px; --w-act: 0px; --w-user: 0px; }
     .grid-head .hc[data-k="eid"], .grid-head .hc[data-k="act"], .grid-head .hc[data-k="user"],
     .evrow .c.eid, .evrow .c.act, .evrow .c.user { visibility: hidden; padding: 0 !important; }
@@ -1152,6 +1185,57 @@
   .nc-note { font-size: 11.5px; color: var(--ink-faint); margin-top: 7px; line-height: 1.5; }
   .nc-empty { font-size: 12.5px; color: var(--ink); background: var(--surface-2); border-left: 3px solid #c99a2e; padding: 9px 11px; border-radius: 4px; line-height: 1.5; }
 
+  /* lateral movement view */
+  .lm { padding: 12px 16px 24px; }
+  .lm-intro { font-size: 12px; color: var(--ink-dim); max-width: 860px; line-height: 1.55; margin: 0 0 10px; }
+  .lm-bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ink-dim); margin-bottom: 10px; }
+  .lm-bar label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  .lm-bar .sp { flex: 1; }
+  .lm-key { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; }
+  .lm-key i { display: inline-block; width: 16px; height: 0; border-top: 2px solid currentColor; }
+  .lm-key i.dash { border-top-style: dashed; }
+  .lm-map { border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface); margin-bottom: 14px; }
+  .lm-map svg { display: block; width: 100%; height: 340px; }
+  .lm-edge { fill: none; stroke-width: 2; opacity: .85; cursor: pointer; }
+  .lm-edge:hover, .lm-edge.on { opacity: 1; stroke-width: 3.5; }
+  .lm-rdp { stroke: var(--cat-execution); color: var(--cat-execution); }
+  .lm-net { stroke: var(--cat-network); color: var(--cat-network); }
+  .lm-share { stroke: var(--cat-filesystem); color: var(--cat-filesystem); }
+  .lm-cred { stroke: var(--cat-persistence); color: var(--cat-persistence); }
+  .lm-fail { stroke: var(--alert); color: var(--alert); stroke-dasharray: 5 4; }
+  .lm-elabel { font: 600 10.5px var(--sans); fill: var(--ink-dim); pointer-events: none; }
+  .lm-node { cursor: pointer; }
+  .lm-node circle { stroke: var(--surface); stroke-width: 3; }
+  .lm-node.ext circle { fill: var(--surface-2); stroke: var(--ink-faint); stroke-width: 1.5; stroke-dasharray: 3 3; }
+  .lm-node.on circle { stroke: var(--focus); stroke-width: 3; }
+  .lm-node text { font: 600 11.5px var(--sans); fill: var(--ink); }
+  .lm-node .sub { font: 400 10px var(--sans); fill: var(--ink-faint); }
+  .lm-node.hc0 circle { fill: #4c8dd6; } .lm-node.hc1 circle { fill: #d9822b; } .lm-node.hc2 circle { fill: #3aa57a; } .lm-node.hc3 circle { fill: #b05cc8; }
+  .lm-node.hc4 circle { fill: #d4b23a; } .lm-node.hc5 circle { fill: #2fb3c0; } .lm-node.hc6 circle { fill: #d0566c; } .lm-node.hc7 circle { fill: #8a9a3a; }
+  .lm-node.in circle { fill: var(--ink-dim); }
+  .lm-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .lm-table th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-faint); padding: 6px 8px; border-bottom: 1px solid var(--line); font-weight: 600; }
+  .lm-table td { padding: 7px 8px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  .lm-table tr.grp { cursor: pointer; }
+  .lm-table tr.grp:hover td { background: var(--surface); }
+  .lm-table tr.grp.fail td:first-child { box-shadow: inset 3px 0 0 var(--alert); }
+  .lm-table .path { white-space: nowrap; font-weight: 600; color: var(--ink); }
+  .lm-table .path .arr { color: var(--ink-faint); font-weight: 400; margin: 0 6px; }
+  .lm-table .ext { color: var(--ink-dim); font-weight: 500; }
+  .lm-table .addr { display: block; font: 400 10.5px var(--sans); color: var(--ink-faint); }
+  .lm-table .n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .lm-table .t { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--ink-dim); }
+  .lm-meth { display: inline-block; font: 600 10.5px var(--sans); padding: 1px 7px; border-radius: 9px; border: 1px solid currentColor; }
+  .lm-ends { font-size: 11px; color: var(--ink-dim); white-space: nowrap; }
+  .lm-ends b { color: var(--ink); font-weight: 600; }
+  .lm-items td { background: var(--surface); font-size: 11.5px; color: var(--ink-dim); padding: 4px 8px 4px 22px; border-bottom: 1px solid var(--line-soft); }
+  .lm-items .t { color: var(--ink-dim); }
+  .lm-items .msg { color: var(--ink); }
+  .lm-items a { color: var(--focus); cursor: pointer; }
+  .lm-empty { padding: 30px 16px; color: var(--ink-dim); font-size: 12.5px; max-width: 640px; line-height: 1.6; }
+  .lm-filter { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--focus); }
+  .lm-filter button { all: unset; cursor: pointer; color: var(--ink-faint); }
+
   /* findings section — top billing */
   .findings.active { background: var(--surface-2); }
   .findings-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
@@ -1190,19 +1274,23 @@
 <div class="app" id="app">
   <div class="topbar">
     <span class="brand">fx<span class="dot">.</span></span>
-    <button class="topbtn" id="newCaseBtn">+ New case</button>
-    <button class="topbtn" id="openCaseBtn">Open case</button>
-    <button class="topbtn" id="addHostBtn" hidden title="Add another machine's collection to this case. Its events join the same timeline, tagged with the host they came from.">+ Add host</button>
-    <div class="menuwrap" id="exportMenuWrap">
-      <button class="topbtn" id="exportMenuBtn" aria-haspopup="menu" aria-expanded="false">Export <span class="chev">▾</span></button>
-      <div class="menu" id="exportMenu" role="menu">
-        <button class="menuitem" role="menuitem" id="exportCsvTop"><span class="mi-t">Findings as CSV</span><span class="mi-s">For Excel or sharing</span></button>
-        <button class="menuitem" role="menuitem" id="exportStixTop"><span class="mi-t">Findings as STIX 2.1</span><span class="mi-s">For a TIP or MISP</span></button>
-        <div class="menusep"></div>
-        <button class="menuitem" role="menuitem" id="exportReportTop"><span class="mi-t">Case report (HTML)</span><span class="mi-s">Findings, ATT&amp;CK matrix and evidence hashes</span></button>
+    <!-- Case menu: the case's name, and everything you do to a case. -->
+    <div class="menuwrap" id="caseMenuWrap">
+      <button class="casebtn" id="caseMenuBtn" aria-haspopup="menu" aria-expanded="false" title="Case: new, open, add a host, export">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        <span class="case-name" id="caseName">no case open</span><span class="chev">▾</span>
+      </button>
+      <div class="menu" id="caseMenu" role="menu">
+        <button class="menuitem" role="menuitem" id="newCaseBtn"><span class="mi-t">New case…</span><span class="mi-s">Ingest a collection into a new case</span></button>
+        <button class="menuitem" role="menuitem" id="openCaseBtn"><span class="mi-t">Open case…</span><span class="mi-s">Reopen a saved .fxcase</span></button>
+        <button class="menuitem" role="menuitem" id="addHostBtn" hidden><span class="mi-t">Add host…</span><span class="mi-s">Add another machine's collection to this case</span></button>
+        <div class="menusep" id="caseExportSep" hidden></div>
+        <div class="menuhead" id="caseExportHead" hidden>Export</div>
+        <button class="menuitem" role="menuitem" id="exportReportTop" hidden><span class="mi-t">Case report (HTML)</span><span class="mi-s">Findings, ATT&amp;CK matrix and evidence hashes</span></button>
+        <button class="menuitem" role="menuitem" id="exportCsvTop" hidden><span class="mi-t">Findings as CSV</span><span class="mi-s">For Excel or sharing</span></button>
+        <button class="menuitem" role="menuitem" id="exportStixTop" hidden><span class="mi-t">Findings as STIX 2.1</span><span class="mi-s">For a TIP or MISP</span></button>
       </div>
     </div>
-    <span class="case-name" id="caseName">no case open</span>
     <div class="menuwrap" id="hostMenuWrap" hidden>
       <button class="hostchip" id="hostChip" aria-haspopup="menu" aria-expanded="false" title="Choose which host to look at, or all of them together"></button>
       <div class="menu hostmenu" id="hostMenu" role="menu"></div>
@@ -1210,19 +1298,24 @@
     <div class="searchgroup">
       <div class="search">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-        <input id="search" type="text" placeholder="Filter path, user, message…  (⌘K)" spellcheck="false" />
+        <input id="search" type="text" placeholder="Search path, user, message…  (Ctrl+K)" spellcheck="false" />
         <span class="search-n" id="searchCount" aria-live="polite" hidden></span>
       </div>
-      <button class="topbtn has-tip" id="iocBtn" aria-describedby="iocTip">IOC hunt
-        <span class="tip" id="iocTip" role="tooltip"><b>Search for many values at once.</b> Paste or drop a list of IOCs (hashes, IPs, domains, URLs, file names, paths) and hunt the whole case in one pass. Defanged values work.<br><br><b>Sigma rules tab:</b> run community SigmaHQ rules against the case, on top of fx's built-in rules.</span>
-      </button>
-      <button class="topbtn has-tip" id="decodeBtn" aria-describedby="decTip">Decode
-        <span class="tip" id="decTip" role="tooltip"><b>Make sense of a command.</b> Paste PowerShell or a command line: fx peels Base64 / compression / string obfuscation, explains each part, flags known techniques with MITRE ATT&amp;CK and extracts IOCs. Fully offline, nothing is executed.<br><br>Select text first (e.g. in a raw record) to decode just that. Right-click any event and choose <b>Decode command</b>; events that hold a command also get a <b>Decode</b> button on their raw record.</span>
-      </button>
     </div>
-    <div class="topbar-end">
-      <button class="topbtn" id="themeBtn" title="Switch theme">◐ Theme</button>
-      <button class="topbtn" id="helpBtn" title="About fx / help" aria-label="Help">?</button>
+    <!-- App menu: appearance and help. -->
+    <div class="menuwrap" id="appMenuWrap">
+      <button class="iconbtn" id="appMenuBtn" aria-haspopup="menu" aria-expanded="false" aria-label="Menu" title="Theme and help">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      <div class="menu menu-right" id="appMenu" role="menu">
+        <div class="menuhead">Theme</div>
+        <button class="menuitem theme-opt" role="menuitemradio" data-theme-opt="daybreak"><span class="mi-t">Daybreak</span><span class="mi-s">Light</span></button>
+        <button class="menuitem theme-opt" role="menuitemradio" data-theme-opt="slate"><span class="mi-t">Slate</span><span class="mi-s">Mid-tone grey-blue</span></button>
+        <button class="menuitem theme-opt" role="menuitemradio" data-theme-opt="midnight"><span class="mi-t">Midnight</span><span class="mi-s">Dark</span></button>
+        <button class="menuitem theme-opt" role="menuitemradio" data-theme-opt="forest"><span class="mi-t">Forest</span><span class="mi-s">Deep green</span></button>
+        <div class="menusep"></div>
+        <button class="menuitem" role="menuitem" id="helpBtn"><span class="mi-t">Help and about</span><span class="mi-s">How to use fx, what it parses and hunts</span></button>
+      </div>
     </div>
   </div>
 

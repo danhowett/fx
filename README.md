@@ -89,12 +89,13 @@ Full step-by-step, including a troubleshooting table, is in
 
 ## Screenshots
 
-*Captured from fx's built-in demo case (synthetic data, Slate theme).*
+*Captured from fx's built-in demo case and synthetic sample hosts (no real data, Slate theme).*
 
 ### Artefact timeline
 Every artefact on one timeline. The narrow activity strip at the top filters by
 time range with a click or drag; flagged events are marked inline; the detail
 panel shows the full message, the raw record and one-click triage and pivots.
+Shown with **Findings only** on: just the events behind a detection.
 
 ![Artefact timeline](docs/screenshot-timeline.png)
 
@@ -121,6 +122,13 @@ Events per day across the whole case: spot volume spikes no rule flagged, then
 click a day to pivot the timeline to it.
 
 ![Activity graph](docs/screenshot-graph.png)
+
+### Lateral movement
+Which account connected from which machine to which, and how: RDP, network
+logons, admin-share access and explicit credentials, from both ends' logs.
+*Both ends* marks the connections the source and destination agree on.
+
+![Lateral movement](docs/screenshot-lateral.png)
 
 ### New case
 Pick the collection folder and fx shows what it recognises inside (artefact
@@ -200,11 +208,14 @@ and can be cancelled without losing the work already done.
   offline and deterministic: nothing is executed and no AI service is called.
   The engine is the psparse rule pack (59 rules, each with its own self-tests).
 
-- **Multi-host cases** — add more machines to a case with **+ Add host**. Look
+- **Multi-host cases** — add more machines to a case with **Add host…** (case menu). Look
   at one host or all of them in one merged timeline with a Host column;
   findings group by host, correlations never mix machines, each host's
   local-time artefacts use its own time zone, and exports and the report
   cover one host or all of them.
+- **Lateral movement** — a map and table of which account connected from
+  which machine to which, by RDP, network logon, admin-share access or explicit
+  credentials, built from both ends' logs and marked where they agree.
 
 ### Analyst workspace
 - **Allow-list** — suppress known-benign findings (per case or for every case)
@@ -223,6 +234,12 @@ and can be cancelled without losing the work already done.
 - **All events + mini timeline** — a narrow activity strip above the timeline;
   click or drag across it to filter to a time range. A per-day activity graph
   in the rail surfaces volume spikes no rule flagged.
+- **Clean layout** — a case menu (new, open, add host, exports), a host
+  switcher, search and a ☰ menu across the top; every view of the case
+  (Timeline, Findings, Lateral movement, Activity graph, IOC hunt & Sigma,
+  Decode) in one compact Investigate list with counts.
+- **Timeline columns** — Event ID and Action alongside time, artefact and user;
+  drag any column to resize it; the search box shows how many events match.
 - **Findings only** — one toggle narrows the timeline to events behind a
   detection or that you've triaged; **Clear all filters** resets everything.
 - **Triage & tags** — mark events Validated / Unconfirmed / False positive /
@@ -230,8 +247,8 @@ and can be cancelled without losing the work already done.
   filter by tag from the rail.
 - **Detail panel** — resizable, with the full message, a pretty-printed raw
   record (font size, wrap, copy) and pivot ±1m / 5m / 30m / 1h around any event.
-- **Export** — CSV / STIX 2.1, plus a self-contained interactive **HTML / PDF
-  case report** with a chain-of-custody evidence table.
+- **Export** (case menu) — CSV / STIX 2.1, plus a self-contained interactive
+  **HTML / PDF case report** with a chain-of-custody evidence table.
 - **Offline & provenance-first** — no network at analysis time; every event
   traces back to a hashed source file, a parser, and a record locator.
 
@@ -293,7 +310,8 @@ fx report host01.fxcase report.html
 fx report host01.fxcase dc01-report.html --host DC01
 ```
 
-Or launch **`fx-gui`** for the analyst workspace: **New case** → browse to the
+Or launch **`fx-gui`** for the analyst workspace: case menu (top left) →
+**New case…** → browse to the
 collection folder, check what fx found in it, name the case and choose where to
 save the `.fxcase`, and fx ingests, hunts and opens it for you. Run in a plain browser, the UI loads representative sample
 data so you can explore it before loading real evidence.

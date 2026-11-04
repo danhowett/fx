@@ -88,6 +88,7 @@ export const backend = {
   hostInfo: () => call("host_info", { host: hostScope }),
   ingestLog: () => call("ingest_log", { host: hostScope }),
   dailyActivity: () => call("daily_activity", { host: hostScope }),
+  lateralMovement: () => call("lateral_movement", {}),
   pickExportFile: async (format) => {
     if (!hasTauri) return null;
     const ext = format === "stix" ? "json" : format === "html" ? "html" : "csv";
@@ -481,6 +482,8 @@ function sample(cmd, args) {
     { source_path: "C/Windows/Prefetch/README.txt", artefact_kind: "Unclassified", status: "unsupported", detail: "no parser for this artefact kind", records_read: 0, events_emitted: 0, warning_count: 0, host: HN.wk },
     { source_path: "C/corrupt/SOFTWARE", artefact_kind: "RegistryGeneric", status: "failed", detail: "notatin: unexpected end of hive bin at offset 0x4000", records_read: 0, events_emitted: 0, warning_count: 0, host: HN.wk },
   ].filter((r) => !args.host || r.host === args.host)); }
+  // Browser preview: no lateral movement in the sample case.
+  if (cmd === "lateral_movement") return Promise.resolve([]);
   if (cmd === "daily_activity") {
     const d = demoDailyActivity(), dc = hasDC();
     if (!dc || !args.host) return Promise.resolve(dc ? d.map((x) => ({ ...x, total: x.total + Math.round(x.total * 0.4) })) : d);

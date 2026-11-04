@@ -165,7 +165,7 @@ surviving after the tool is uninstalled.
 ### Host information
 
 Read from the SYSTEM, SOFTWARE and SAM hives at ingest and summarised under **analysed
-host** in the left rail, below the activity graph: the hostname, OS and time
+host** in the left rail, below the Investigate list: the hostname, OS and time
 zone, expandable to domain, build, IP addresses, accounts and collection tool,
 with **Full host details** for the complete view (each fact linked to its
 source): computer name and DNS domain; OS edition, version, build and install
@@ -276,8 +276,8 @@ executed and nothing leaves the machine.
 - **From the raw record:** when an event's record holds a command or script,
   a small **Decode** button sits next to **Copy** in the raw record bar.
 - **Just part of a record:** select the text (in the raw record, message or
-  anywhere else), then click **Decode** in the top bar.
-- **Anything else:** click **Decode** in the top bar with nothing selected,
+  anywhere else), then click **Decode** in the rail's Investigate list.
+- **Anything else:** click **Decode** in the Investigate list with nothing selected,
   paste a command, script block or command line, then **Analyse** (Ctrl+Enter).
   **Clear** empties the box and the result.
 
@@ -308,8 +308,9 @@ surrounding events.
 
 ### More than one host (multi-host cases)
 
-A case can hold several machines. Open (or create) the case, click
-**+ Add host** in the top bar and pick the next machine's collection folder.
+A case can hold several machines. Open (or create) the case, choose
+**Add host…** from the case menu (the case's name, top left) and pick the next
+machine's collection folder.
 fx ingests it into the same case, then re-runs the built-in rules (and Sigma,
 if it's set to run on new cases, and your saved IOC list) across every host.
 
@@ -346,9 +347,56 @@ Command line: `fx add case.fxcase <collection> [--host NAME]`, then
 `fx hunt case.fxcase`; `fx report case.fxcase out.html --host NAME` for one
 host's report.
 
+### Lateral movement
+
+**Lateral movement** (in the rail's Investigate list) shows which
+account connected from which machine to which, how and when. It is built from
+records already in the case:
+
+- **On the machine connected to:** network and RDP logons with a source
+  (Security 4624 types 3 and 10), failed attempts (4625, shown when you tick
+  *Include failed logons*), RDP session and authentication records
+  (TerminalServices LocalSessionManager 21 / 22 / 25 and RemoteConnectionManager
+  1149, 4778 reconnects) and share access (5140, e.g. `ADMIN$`).
+- **On the machine connecting:** logons with explicit credentials to another
+  server (4648: `mstsc.exe` is shown as RDP, anything else such as PsExec as
+  *Explicit credentials*) and RDP client history from user hives.
+
+Sources are matched to hosts in the case by name (host name, SYSTEM-hive
+computer name, logon WorkstationName) or by address (registry interface IPs,
+and addresses a logon ties to a workstation name). A machine that isn't in the
+case is shown dashed, by the name or address the record gave. Machine accounts
+(`NAME$`), service and local logons, and a machine connecting to itself are
+left out.
+
+The map draws each machine once with arrows coloured by method (RDP, network
+logon, share access, explicit credentials; failed attempts dashed red). Click a
+machine or an arrow to narrow the table to it. The table lists each connection
+(from, to, account, method) with its event count, first and last time, and
+**Recorded by**: *both ends* when the source's and destination's logs agree,
+which is the strongest evidence. Click a row for its events, then **Show these
+events in the timeline**. With a host selected, only connections to or from
+that host are shown.
+
+## Finding your way around
+
+- **Top bar:** the **case menu** (the open case's name, top left) has New case,
+  Open case, Add host and the exports; the **host switcher** next to it picks
+  one machine or all of them; **Search** filters the whole case as you type;
+  the **☰** menu (top right) has the themes and Help.
+- **Investigate** (top of the left rail): the case's views, one row each with a
+  count: **Timeline**, **Findings** (with critical / high counts and how many
+  are still to review), **Lateral movement**, **Activity graph** (volume
+  spikes), **IOC hunt & Sigma** and **Decode**. The current view is
+  highlighted.
+- Below it: the analysed host (or **Hosts** in a multi-host case), **Triage**,
+  **Tags**, **Artefact** and **Category** filters, network top talkers and, at
+  the bottom, the **Ingest log**.
+
 ## The workflow
 
-1. **New case** — **Browse** to an artefact folder (KAPE, Magnet RESPONSE,
+1. **New case** — open the case menu (top left) and choose **New case…**, then
+   **Browse** to an artefact folder (KAPE, Magnet RESPONSE,
    Velociraptor, CyLR, or a raw copy). Before anything is ingested, fx lists
    what it recognises there: each artefact type with its file count and size
    (hover a row for what it is and example paths), the host and collection
@@ -358,7 +406,7 @@ host's report.
    finds nothing, you've probably picked the wrong level of folder. The case is
    named after the host (or the folder) and saved next to the collection, or
    wherever you saved your last case; change either before you **Start
-   ingest**. fx ingests, hunts, and displays it automatically. **+ Add host**
+   ingest**. fx ingests, hunts, and displays it automatically. **Add host…**
    uses the same window.
    While it works, a progress panel shows the phase, a bar weighted by data
    size, the file being parsed (type, path, size), files and data done, events
@@ -368,8 +416,8 @@ host's report.
    runs its built-in rules over that partial case); cancelling detections
    keeps the findings found so far.
    Failed files and record warnings are reported afterwards in the
-   **ingest log** (left rail), not during the run.
-2. **Review findings** — *view all findings* shows rule detections **and** your
+   **Ingest log** (bottom of the left rail), not during the run.
+2. **Findings** — **Findings** in the Investigate list shows rule detections **and** your
    own analyst-validated events together. Click any finding to jump to the
    event, read its raw record, and triage it.
 3. **Triage** — mark any event **Validated / Unconfirmed / False positive /
@@ -381,19 +429,19 @@ host's report.
    the case, and appear under **Tags** in the rail — click one to list every
    event carrying it. The right-click menu also sets triage directly.
 4. **Pivot** — on any event, use **Pivot ±1m / 5m / 30m / 1h** to see everything
-   around it; or set an explicit time range in the toolbar.
-5. **Export** — everything lives under the **Export ▾** menu in the top bar:
+   around it; or set an explicit time range above the timeline.
+5. **Export** — the exports are in the case menu (the case's name, top left):
    **CSV** (Excel / sharing) or **STIX 2.1** (TIP / MISP). A
    dialog lets you choose which triage states to include — **Validated**,
    **Unconfirmed**, **False positive**, **Dismissed** — with a live count for
    each. It defaults to validated + unconfirmed, so reviewed noise stays out of
    a client-facing export. Exports carry triage state and analyst notes.
-   **Export report** saves the self-contained HTML case report — findings by
+   **Case report (HTML)** saves the self-contained HTML case report — findings by
    ATT&CK tactic, severity scorecards, timeline, ATT&CK matrix, and the
    **evidence chain-of-custody table** (every ingested file with its SHA-256).
    Open it in any browser; print to PDF to archive. (CLI equivalent:
    `fx report case.fxcase report.html`.)
-6. **IOC hunt** — click **IOC hunt** in the top bar to open the IOC view. Paste
+6. **IOC hunt** — click **IOC hunt & Sigma** in the Investigate list to open the IOC view. Paste
    indicators on the left, load a `.txt` / `.csv`, or drop a file onto the view.
    fx recognises SHA-256 / SHA-1 / MD5 hashes, IPv4 / IPv6, domains, URLs, email
    addresses, file names, full paths and free text — one or more per line, `#`
@@ -466,7 +514,7 @@ its room.
 **Search** (the box at the top, `Ctrl+K`) filters the whole case as you type
 and shows how many events match inside the box.
 
-**Findings only** (toolbar) narrows the timeline to the events behind any
+**Findings only** (above the timeline) narrows the timeline to the events behind any
 finding — built-in rules, Sigma, IOC hunt — plus anything you've triaged as
 Validated or Unconfirmed: the attack in time order, with full context. It is
 the same set shown in red on the mini timeline and the activity graph.
@@ -492,7 +540,7 @@ ticket. The rail's Triage and Tags sections apply the same filters.
 **Column filters.** Click the **Triage**, **Host**, **Artefact** or **User**
 column header for a list of that column's values with event counts (under the
 current filters); pick one to filter the timeline, or **All** to clear it.
-Active column filters show as chips in the toolbar. Time has its own range
+Active column filters show as chips above the timeline. Time has its own range
 picker; Event has too many values to list, so use the search box.
 
 - **Scroll** or use the mouse wheel; a floating readout shows your position
@@ -520,11 +568,10 @@ picker; Event has too many values to list, so use the search box.
 
 ## Themes
 
-Four themes via the theme button in the toolbar (click to cycle): **Daybreak**
-(light), **Slate** (a mid-tone grey-blue), **Midnight** (dark) and **High
-contrast** (black background, white text, bright separated colours, visible
-borders and a yellow focus ring; text contrast meets WCAG AAA). fx remembers the
-choice on this machine.
+Four themes, chosen from the **☰** menu (top right): **Daybreak**
+(light), **Slate** (a mid-tone grey-blue), **Midnight** (dark) and **Forest**
+(deep green with bright, clearly separated accents). fx remembers the choice on this
+machine.
 
 ---
 

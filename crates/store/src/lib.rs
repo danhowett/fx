@@ -22,6 +22,7 @@ pub mod allowlist;
 pub mod evidence;
 pub mod hosts;
 pub mod hunt_support;
+pub mod lateral;
 pub mod query;
 pub mod schema;
 

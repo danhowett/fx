@@ -33,10 +33,11 @@ impl Parser for EvtxParser {
     ) -> Result<ParseOutcome, ParseError> {
         let mut outcome = ParseOutcome::default();
 
-        let mut parser = evtx::EvtxParser::from_path(&artefact.path).map_err(|e| ParseError::Io {
-            path: artefact.path.display().to_string(),
-            source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
-        })?;
+        let mut parser =
+            evtx::EvtxParser::from_path(&artefact.path).map_err(|e| ParseError::Io {
+                path: artefact.path.display().to_string(),
+                source: std::io::Error::other(e.to_string()),
+            })?;
 
         for record in parser.records_json_value() {
             outcome.records_read += 1;
@@ -121,14 +122,34 @@ fn build_event(artefact: &IdentifiedArtefact, record_id: u64, data: &Value) -> O
     })
 }
 
+/// "DOMAIN\\user" (as TerminalServices logs it) into a Principal.
+fn split_domain_user(v: Option<String>) -> Principal {
+    match v {
+        Some(s) => match s.split_once('\\') {
+            Some((d, u)) => Principal {
+                name: Some(u.to_string()),
+                domain: Some(d.to_string()),
+                ..Default::default()
+            },
+            None => Principal {
+                name: Some(s),
+                ..Default::default()
+            },
+        },
+        None => Principal::default(),
+    }
+}
+
 /// EventID can be a bare number or an object `{ "#text": 4624, ... }`.
 fn extract_event_id(v: &Value) -> Option<u64> {
     v.as_u64()
         .or_else(|| v.get("#text").and_then(Value::as_u64))
         .or_else(|| {
-            v.as_str()
-                .and_then(|s| s.parse().ok())
-                .or_else(|| v.get("#text").and_then(Value::as_str).and_then(|s| s.parse().ok()))
+            v.as_str().and_then(|s| s.parse().ok()).or_else(|| {
+                v.get("#text")
+                    .and_then(Value::as_str)
+                    .and_then(|s| s.parse().ok())
+            })
         })
 }
 
@@ -203,12 +224,7 @@ impl Classified {
 /// The provider is used to disambiguate ids that collide across channels
 /// (e.g. Sysmon 1 vs Security 1). Unmapped ids still produce a usable event
 /// with `evtx.eid.N` so nothing is lost.
-fn classify(
-    provider: &str,
-    event_id: u64,
-    data: &Value,
-    system_sid: Option<String>,
-) -> Classified {
+fn classify(provider: &str, event_id: u64, data: &Value, system_sid: Option<String>) -> Classified {
     // Read an EventData field as a string. The evtx crate renders values with
     // their native JSON type, so a field like LogonType can arrive as a NUMBER
     // (3) rather than a string ("3"); it can also be nested as
@@ -216,6 +232,14 @@ fn classify(
     // comes out blank.
     let ed = |k: &str| -> Option<String> {
         let v = data.pointer("/Event/EventData").and_then(|e| e.get(k))?;
+        value_to_string(v).filter(|s| !s.is_empty() && s != "-")
+    };
+    // Some providers (TerminalServices session and connection logs among
+    // them) put their fields in <UserData><EventXML> instead of <EventData>.
+    let ud = |k: &str| -> Option<String> {
+        let v = data
+            .pointer("/Event/UserData/EventXML")
+            .and_then(|e| e.get(k))?;
         value_to_string(v).filter(|s| !s.is_empty() && s != "-")
     };
 
@@ -275,25 +299,48 @@ fn classify(
                     ..Default::default()
                 })
         }
-        4634 | 4647 => Classified::new("logon.logoff", "Account logged off".into())
-            .user(Principal { name: ed("TargetUserName"), sid: ed("TargetUserSid"), domain: ed("TargetDomainName") }),
+        4634 | 4647 => {
+            Classified::new("logon.logoff", "Account logged off".into()).user(Principal {
+                name: ed("TargetUserName"),
+                sid: ed("TargetUserSid"),
+                domain: ed("TargetDomainName"),
+            })
+        }
         4648 => Classified::new(
             "logon.explicit_credentials",
-            format!("Logon with explicit credentials as {}", ed("TargetUserName").unwrap_or_default()),
+            format!(
+                "Logon with explicit credentials as {}",
+                ed("TargetUserName").unwrap_or_default()
+            ),
         )
-        .user(Principal { name: ed("SubjectUserName"), sid: ed("SubjectUserSid").or(system_sid), domain: ed("SubjectDomainName") })
-        .network(NetworkInfo { source_ip: ed("IpAddress"), ..Default::default() }),
+        .user(Principal {
+            name: ed("SubjectUserName"),
+            sid: ed("SubjectUserSid").or(system_sid),
+            domain: ed("SubjectDomainName"),
+        })
+        .network(NetworkInfo {
+            source_ip: ed("IpAddress"),
+            ..Default::default()
+        }),
         4672 => Classified::new(
             "logon.special_privileges",
             "Special privileges assigned to new logon (admin-equivalent)".into(),
         )
-        .user(Principal { name: ed("SubjectUserName"), sid: ed("SubjectUserSid").or(system_sid), domain: ed("SubjectDomainName") }),
+        .user(Principal {
+            name: ed("SubjectUserName"),
+            sid: ed("SubjectUserSid").or(system_sid),
+            domain: ed("SubjectDomainName"),
+        }),
 
         // Process creation (Security 4688) with command line when auditing is on.
         4688 => {
             let img = ed("NewProcessName").unwrap_or_default();
             Classified::new("process.start", format!("Process created: {img}"))
-                .user(Principal { name: ed("SubjectUserName"), sid: ed("SubjectUserSid").or(system_sid), domain: ed("SubjectDomainName") })
+                .user(Principal {
+                    name: ed("SubjectUserName"),
+                    sid: ed("SubjectUserSid").or(system_sid),
+                    domain: ed("SubjectDomainName"),
+                })
                 .process(ProcessInfo {
                     name: img.rsplit(['\\', '/']).next().map(str::to_string),
                     path: Some(img),
@@ -306,95 +353,255 @@ fn classify(
         // Account & group management (rogue-admin creation is core to eCrime).
         4720 => user_mgmt_event("account.created", "User account created", &ed, system_sid),
         4722 => user_mgmt_event("account.enabled", "User account enabled", &ed, system_sid),
-        4724 => user_mgmt_event("account.password_reset", "Password reset attempt", &ed, system_sid),
+        4724 => user_mgmt_event(
+            "account.password_reset",
+            "Password reset attempt",
+            &ed,
+            system_sid,
+        ),
         4725 => user_mgmt_event("account.disabled", "User account disabled", &ed, system_sid),
         4726 => user_mgmt_event("account.deleted", "User account deleted", &ed, system_sid),
         4728 | 4732 | 4756 => Classified::new(
             "account.added_to_privileged_group",
-            format!("Member added to security-enabled group {}", ed("TargetUserName").or(ed("GroupName")).unwrap_or_default()),
+            format!(
+                "Member added to security-enabled group {}",
+                ed("TargetUserName").or(ed("GroupName")).unwrap_or_default()
+            ),
         )
-        .user(Principal { name: ed("SubjectUserName"), sid: ed("SubjectUserSid").or(system_sid), ..Default::default() }),
+        .user(Principal {
+            name: ed("SubjectUserName"),
+            sid: ed("SubjectUserSid").or(system_sid),
+            ..Default::default()
+        }),
         4738 => user_mgmt_event("account.changed", "User account changed", &ed, system_sid),
 
         // Service install (System 7045) + service control-manager.
         7045 => Classified::new(
             "service.install",
-            format!("Service installed: {} ({})", ed("ServiceName").unwrap_or_default(), ed("ImagePath").unwrap_or_default()),
+            format!(
+                "Service installed: {} ({})",
+                ed("ServiceName").unwrap_or_default(),
+                ed("ImagePath").unwrap_or_default()
+            ),
         )
-        .user(Principal { sid: system_sid, ..Default::default() })
-        .process(ProcessInfo { path: ed("ImagePath"), command_line: ed("ImagePath"), ..Default::default() })
-        .target(Target { path: ed("ServiceName"), ..Default::default() }),
-        7040 => Classified::new("service.start_type_changed", "Service start type changed".into())
-            .target(Target { path: ed("param1"), ..Default::default() }),
-        7036 => Classified::new("service.state_changed", format!("Service state: {}", ed("param1").unwrap_or_default())),
+        .user(Principal {
+            sid: system_sid,
+            ..Default::default()
+        })
+        .process(ProcessInfo {
+            path: ed("ImagePath"),
+            command_line: ed("ImagePath"),
+            ..Default::default()
+        })
+        .target(Target {
+            path: ed("ServiceName"),
+            ..Default::default()
+        }),
+        7040 => Classified::new(
+            "service.start_type_changed",
+            "Service start type changed".into(),
+        )
+        .target(Target {
+            path: ed("param1"),
+            ..Default::default()
+        }),
+        7036 => Classified::new(
+            "service.state_changed",
+            format!("Service state: {}", ed("param1").unwrap_or_default()),
+        ),
 
         // Scheduled task auditing (Security 4698/4702) — persistence.
         4698 => Classified::new(
             "persistence.scheduled_task_created",
-            format!("Scheduled task created: {}", ed("TaskName").unwrap_or_default()),
+            format!(
+                "Scheduled task created: {}",
+                ed("TaskName").unwrap_or_default()
+            ),
         )
-        .user(Principal { name: ed("SubjectUserName"), sid: ed("SubjectUserSid").or(system_sid), ..Default::default() })
-        .target(Target { path: ed("TaskName"), ..Default::default() }),
-        4699 => Classified::new("scheduled_task.deleted", format!("Scheduled task deleted: {}", ed("TaskName").unwrap_or_default()))
-            .target(Target { path: ed("TaskName"), ..Default::default() }),
-        4702 => Classified::new("scheduled_task.updated", format!("Scheduled task updated: {}", ed("TaskName").unwrap_or_default()))
-            .target(Target { path: ed("TaskName"), ..Default::default() }),
+        .user(Principal {
+            name: ed("SubjectUserName"),
+            sid: ed("SubjectUserSid").or(system_sid),
+            ..Default::default()
+        })
+        .target(Target {
+            path: ed("TaskName"),
+            ..Default::default()
+        }),
+        4699 => Classified::new(
+            "scheduled_task.deleted",
+            format!(
+                "Scheduled task deleted: {}",
+                ed("TaskName").unwrap_or_default()
+            ),
+        )
+        .target(Target {
+            path: ed("TaskName"),
+            ..Default::default()
+        }),
+        4702 => Classified::new(
+            "scheduled_task.updated",
+            format!(
+                "Scheduled task updated: {}",
+                ed("TaskName").unwrap_or_default()
+            ),
+        )
+        .target(Target {
+            path: ed("TaskName"),
+            ..Default::default()
+        }),
 
         // Log tampering / anti-forensics.
         // 1102 / 104 mean "log cleared" ONLY from Microsoft-Windows-Eventlog.
         // Many unrelated providers reuse these ids; matching on the number
         // alone produced hundreds of bogus "log cleared" findings. Other
         // providers' 1102/104 fall through to the generic evtx.eid.N event.
-        1102 if prov.contains("eventlog") => Classified::new("defense_evasion.security_log_cleared", "Security event log was CLEARED".into())
-            .user(Principal { name: ed("SubjectUserName"), sid: ed("SubjectUserId").or(system_sid), ..Default::default() }),
-        104 if prov.contains("eventlog") => Classified::new("defense_evasion.log_cleared", format!("Event log cleared: {}", ed("Channel").unwrap_or_default())),
+        1102 if prov.contains("eventlog") => Classified::new(
+            "defense_evasion.security_log_cleared",
+            "Security event log was CLEARED".into(),
+        )
+        .user(Principal {
+            name: ed("SubjectUserName"),
+            sid: ed("SubjectUserId").or(system_sid),
+            ..Default::default()
+        }),
+        104 if prov.contains("eventlog") => Classified::new(
+            "defense_evasion.log_cleared",
+            format!("Event log cleared: {}", ed("Channel").unwrap_or_default()),
+        ),
 
         // Object access — file shares (lateral movement / staging).
         5140 => Classified::new(
             "network.share_access",
-            format!("Network share accessed: {}", ed("ShareName").unwrap_or_default()),
+            format!(
+                "Network share accessed: {}",
+                ed("ShareName").unwrap_or_default()
+            ),
         )
-        .user(Principal { name: ed("SubjectUserName"), sid: ed("SubjectUserSid").or(system_sid), domain: ed("SubjectDomainName") })
-        .network(NetworkInfo { source_ip: ed("IpAddress"), ..Default::default() })
-        .target(Target { path: ed("ShareName"), ..Default::default() }),
+        .user(Principal {
+            name: ed("SubjectUserName"),
+            sid: ed("SubjectUserSid").or(system_sid),
+            domain: ed("SubjectDomainName"),
+        })
+        .network(NetworkInfo {
+            source_ip: ed("IpAddress"),
+            ..Default::default()
+        })
+        .target(Target {
+            path: ed("ShareName"),
+            ..Default::default()
+        }),
         5145 => Classified::new(
             "network.share_object_checked",
-            format!("Share object access: {}\\{}", ed("ShareName").unwrap_or_default(), ed("RelativeTargetName").unwrap_or_default()),
+            format!(
+                "Share object access: {}\\{}",
+                ed("ShareName").unwrap_or_default(),
+                ed("RelativeTargetName").unwrap_or_default()
+            ),
         )
-        .user(Principal { name: ed("SubjectUserName"), sid: ed("SubjectUserSid").or(system_sid), ..Default::default() })
-        .network(NetworkInfo { source_ip: ed("IpAddress"), ..Default::default() }),
+        .user(Principal {
+            name: ed("SubjectUserName"),
+            sid: ed("SubjectUserSid").or(system_sid),
+            ..Default::default()
+        })
+        .network(NetworkInfo {
+            source_ip: ed("IpAddress"),
+            ..Default::default()
+        }),
 
         // RDP / Terminal Services session lifecycle.
         4778 => Classified::new(
             "rdp.session_reconnected",
-            format!("RDP session reconnected from {}", ed("ClientAddress").unwrap_or_default()),
+            format!(
+                "RDP session reconnected from {}",
+                ed("ClientAddress").unwrap_or_default()
+            ),
         )
-        .user(Principal { name: ed("AccountName"), ..Default::default() })
-        .network(NetworkInfo { source_ip: ed("ClientAddress"), logon_type: Some(10), ..Default::default() }),
-        4779 => Classified::new("rdp.session_disconnected", "RDP session disconnected".into())
-            .user(Principal { name: ed("AccountName"), ..Default::default() }),
-        21 | 22 | 25 => Classified::new(
-            "rdp.session_logon",
-            format!("Terminal Services logon from {}", ed("Address").unwrap_or_default()),
+        .user(Principal {
+            name: ed("AccountName"),
+            ..Default::default()
+        })
+        .network(NetworkInfo {
+            source_ip: ed("ClientAddress"),
+            logon_type: Some(10),
+            ..Default::default()
+        }),
+        4779 => Classified::new(
+            "rdp.session_disconnected",
+            "RDP session disconnected".into(),
         )
-        .user(Principal { name: ed("User"), ..Default::default() })
-        .network(NetworkInfo { source_ip: ed("Address"), logon_type: Some(10), ..Default::default() }),
+        .user(Principal {
+            name: ed("AccountName"),
+            ..Default::default()
+        }),
+        21 | 22 | 25 if prov.contains("terminalservices") => {
+            let addr = ed("Address").or_else(|| ud("Address"));
+            Classified::new(
+                "rdp.session_logon",
+                format!(
+                    "Terminal Services {} from {}",
+                    match event_id {
+                        25 => "session reconnection",
+                        22 => "shell start",
+                        _ => "logon",
+                    },
+                    addr.clone().unwrap_or_else(|| "(no address)".into())
+                ),
+            )
+            .user(split_domain_user(ed("User").or_else(|| ud("User"))))
+            .network(NetworkInfo {
+                source_ip: addr,
+                logon_type: Some(10),
+                ..Default::default()
+            })
+        }
+        // RemoteConnectionManager 1149: RDP network authentication succeeded.
+        // Param1 user, Param2 domain, Param3 client address.
+        1149 if prov.contains("remoteconnectionmanager") => {
+            let addr = ud("Param3").or_else(|| ed("Param3"));
+            Classified::new(
+                "rdp.auth_succeeded",
+                format!(
+                    "RDP authentication succeeded from {}",
+                    addr.clone().unwrap_or_else(|| "(no address)".into())
+                ),
+            )
+            .user(Principal {
+                name: ud("Param1").or_else(|| ed("Param1")),
+                domain: ud("Param2").or_else(|| ed("Param2")),
+                ..Default::default()
+            })
+            .network(NetworkInfo {
+                source_ip: addr,
+                logon_type: Some(10),
+                ..Default::default()
+            })
+        }
 
         // WMI persistence (WMI-Activity/Operational 5857-5861).
-        5857 | 5858 | 5859 | 5860 | 5861 => Classified::new(
+        5857..=5861 => Classified::new(
             "persistence.wmi_subscription",
             "WMI event-consumer / subscription activity (possible persistence)".into(),
         ),
 
         // Audit policy tampering.
-        4719 => Classified::new("defense_evasion.audit_policy_changed", "System audit policy changed".into())
-            .user(Principal { name: ed("SubjectUserName"), sid: ed("SubjectUserSid").or(system_sid), ..Default::default() }),
+        4719 => Classified::new(
+            "defense_evasion.audit_policy_changed",
+            "System audit policy changed".into(),
+        )
+        .user(Principal {
+            name: ed("SubjectUserName"),
+            sid: ed("SubjectUserSid").or(system_sid),
+            ..Default::default()
+        }),
 
         _ => Classified::new(
             &format!("evtx.eid.{event_id}"),
             format!("{provider} EventID {event_id}"),
         )
-        .user(Principal { sid: system_sid, ..Default::default() }),
+        .user(Principal {
+            sid: system_sid,
+            ..Default::default()
+        }),
     }
 }
 
@@ -431,7 +638,10 @@ fn classify_sysmon(
         1 => {
             let img = ed("Image").unwrap_or_default();
             Classified::new("process.start", format!("Sysmon process create: {img}"))
-                .user(Principal { name: ed("User"), ..Default::default() })
+                .user(Principal {
+                    name: ed("User"),
+                    ..Default::default()
+                })
                 .process(ProcessInfo {
                     name: img.rsplit(['\\', '/']).next().map(str::to_string),
                     path: Some(img),
@@ -443,14 +653,41 @@ fn classify_sysmon(
         }
         3 => Classified::new(
             "network.connection",
-            format!("Sysmon network connection to {}:{}", ed("DestinationIp").unwrap_or_default(), ed("DestinationPort").unwrap_or_default()),
+            format!(
+                "Sysmon network connection to {}:{}",
+                ed("DestinationIp").unwrap_or_default(),
+                ed("DestinationPort").unwrap_or_default()
+            ),
         )
-        .user(Principal { name: ed("User"), ..Default::default() })
-        .process(ProcessInfo { path: ed("Image"), ..Default::default() })
-        .network(NetworkInfo { source_ip: ed("SourceIp"), dest_ip: ed("DestinationIp"), ..Default::default() }),
-        7 => Classified::new("process.image_loaded", format!("Sysmon image loaded: {}", ed("ImageLoaded").unwrap_or_default()))
-            .process(ProcessInfo { path: ed("Image"), hash_sha1: sysmon_sha1(ed), ..Default::default() })
-            .target(Target { path: ed("ImageLoaded"), ..Default::default() }),
+        .user(Principal {
+            name: ed("User"),
+            ..Default::default()
+        })
+        .process(ProcessInfo {
+            path: ed("Image"),
+            ..Default::default()
+        })
+        .network(NetworkInfo {
+            source_ip: ed("SourceIp"),
+            dest_ip: ed("DestinationIp"),
+            ..Default::default()
+        }),
+        7 => Classified::new(
+            "process.image_loaded",
+            format!(
+                "Sysmon image loaded: {}",
+                ed("ImageLoaded").unwrap_or_default()
+            ),
+        )
+        .process(ProcessInfo {
+            path: ed("Image"),
+            hash_sha1: sysmon_sha1(ed),
+            ..Default::default()
+        })
+        .target(Target {
+            path: ed("ImageLoaded"),
+            ..Default::default()
+        }),
         8 => Classified::new(
             "defense_evasion.create_remote_thread",
             format!(
@@ -460,25 +697,94 @@ fn classify_sysmon(
                 ed("StartModule").unwrap_or_else(|| "?".into())
             ),
         )
-            .process(ProcessInfo { path: ed("SourceImage"), ..Default::default() })
-            .target(Target { path: ed("TargetImage"), ..Default::default() }),
-        10 => Classified::new("credential_access.process_access", format!("Sysmon process access -> {}", ed("TargetImage").unwrap_or_default()))
-            .process(ProcessInfo { path: ed("SourceImage"), ..Default::default() })
-            .target(Target { path: ed("TargetImage"), ..Default::default() }),
-        11 => Classified::new("file.create", format!("Sysmon file created: {}", ed("TargetFilename").unwrap_or_default()))
-            .process(ProcessInfo { path: ed("Image"), ..Default::default() })
-            .target(Target { path: ed("TargetFilename"), ..Default::default() }),
-        12 | 13 | 14 => Classified::new("registry.modified", format!("Sysmon registry event: {}", ed("TargetObject").unwrap_or_default()))
-            .process(ProcessInfo { path: ed("Image"), ..Default::default() })
-            .target(Target { path: ed("TargetObject"), ..Default::default() }),
-        22 => Classified::new("network.dns_query", format!("Sysmon DNS query: {}", ed("QueryName").unwrap_or_default()))
-            .process(ProcessInfo { path: ed("Image"), ..Default::default() })
-            .target(Target { path: ed("QueryName"), ..Default::default() }),
-        23 | 26 => Classified::new("file.delete", format!("Sysmon file delete: {}", ed("TargetFilename").unwrap_or_default()))
-            .process(ProcessInfo { path: ed("Image"), ..Default::default() })
-            .target(Target { path: ed("TargetFilename"), ..Default::default() }),
-        _ => Classified::new(&format!("sysmon.eid.{event_id}"), format!("Sysmon EventID {event_id}"))
-            .user(Principal { sid: system_sid, ..Default::default() }),
+        .process(ProcessInfo {
+            path: ed("SourceImage"),
+            ..Default::default()
+        })
+        .target(Target {
+            path: ed("TargetImage"),
+            ..Default::default()
+        }),
+        10 => Classified::new(
+            "credential_access.process_access",
+            format!(
+                "Sysmon process access -> {}",
+                ed("TargetImage").unwrap_or_default()
+            ),
+        )
+        .process(ProcessInfo {
+            path: ed("SourceImage"),
+            ..Default::default()
+        })
+        .target(Target {
+            path: ed("TargetImage"),
+            ..Default::default()
+        }),
+        11 => Classified::new(
+            "file.create",
+            format!(
+                "Sysmon file created: {}",
+                ed("TargetFilename").unwrap_or_default()
+            ),
+        )
+        .process(ProcessInfo {
+            path: ed("Image"),
+            ..Default::default()
+        })
+        .target(Target {
+            path: ed("TargetFilename"),
+            ..Default::default()
+        }),
+        12..=14 => Classified::new(
+            "registry.modified",
+            format!(
+                "Sysmon registry event: {}",
+                ed("TargetObject").unwrap_or_default()
+            ),
+        )
+        .process(ProcessInfo {
+            path: ed("Image"),
+            ..Default::default()
+        })
+        .target(Target {
+            path: ed("TargetObject"),
+            ..Default::default()
+        }),
+        22 => Classified::new(
+            "network.dns_query",
+            format!("Sysmon DNS query: {}", ed("QueryName").unwrap_or_default()),
+        )
+        .process(ProcessInfo {
+            path: ed("Image"),
+            ..Default::default()
+        })
+        .target(Target {
+            path: ed("QueryName"),
+            ..Default::default()
+        }),
+        23 | 26 => Classified::new(
+            "file.delete",
+            format!(
+                "Sysmon file delete: {}",
+                ed("TargetFilename").unwrap_or_default()
+            ),
+        )
+        .process(ProcessInfo {
+            path: ed("Image"),
+            ..Default::default()
+        })
+        .target(Target {
+            path: ed("TargetFilename"),
+            ..Default::default()
+        }),
+        _ => Classified::new(
+            &format!("sysmon.eid.{event_id}"),
+            format!("Sysmon EventID {event_id}"),
+        )
+        .user(Principal {
+            sid: system_sid,
+            ..Default::default()
+        }),
     }
 }
 
@@ -504,17 +810,44 @@ fn classify_powershell(
     match event_id {
         4104 => {
             let block = ed("ScriptBlockText")
-                .or_else(|| data.pointer("/Event/EventData/ScriptBlockText").and_then(Value::as_str).map(str::to_string))
+                .or_else(|| {
+                    data.pointer("/Event/EventData/ScriptBlockText")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
                 .unwrap_or_default();
             let preview: String = block.chars().take(120).collect();
-            Classified::new("execution.powershell_scriptblock", format!("PowerShell script block: {preview}"))
-                // Put the script text on the command line so cmdline rules match it.
-                .process(ProcessInfo { name: Some("powershell".into()), command_line: Some(block), ..Default::default() })
+            Classified::new(
+                "execution.powershell_scriptblock",
+                format!("PowerShell script block: {preview}"),
+            )
+            // Put the script text on the command line so cmdline rules match it.
+            .process(ProcessInfo {
+                name: Some("powershell".into()),
+                command_line: Some(block),
+                ..Default::default()
+            })
         }
-        4103 => Classified::new("execution.powershell_pipeline", "PowerShell pipeline execution".into())
-            .process(ProcessInfo { name: Some("powershell".into()), command_line: ed("Payload").or_else(|| ed("CommandLine")), ..Default::default() }),
-        400 | 403 => Classified::new("execution.powershell_engine", format!("PowerShell engine state: {}", ed("NewEngineState").unwrap_or_default())),
-        _ => Classified::new(&format!("powershell.eid.{event_id}"), format!("PowerShell EventID {event_id}")),
+        4103 => Classified::new(
+            "execution.powershell_pipeline",
+            "PowerShell pipeline execution".into(),
+        )
+        .process(ProcessInfo {
+            name: Some("powershell".into()),
+            command_line: ed("Payload").or_else(|| ed("CommandLine")),
+            ..Default::default()
+        }),
+        400 | 403 => Classified::new(
+            "execution.powershell_engine",
+            format!(
+                "PowerShell engine state: {}",
+                ed("NewEngineState").unwrap_or_default()
+            ),
+        ),
+        _ => Classified::new(
+            &format!("powershell.eid.{event_id}"),
+            format!("PowerShell EventID {event_id}"),
+        ),
     }
 }
 
@@ -526,56 +859,134 @@ fn classify_defender(event_id: u64, ed: &dyn Fn(&str) -> Option<String>) -> Clas
     // user it ran as and the process that touched it.
     let threat = || ed("Threat Name").or(ed("ThreatName")).unwrap_or_default();
     let detail = |verb: &str| {
-        let sev = ed("Severity Name").map(|s| format!(" [{s}]")).unwrap_or_default();
-        let action = ed("Action Name").filter(|a| !a.eq_ignore_ascii_case("not applicable")).map(|a| format!(" — {a}")).unwrap_or_default();
+        let sev = ed("Severity Name")
+            .map(|s| format!(" [{s}]"))
+            .unwrap_or_default();
+        let action = ed("Action Name")
+            .filter(|a| !a.eq_ignore_ascii_case("not applicable"))
+            .map(|a| format!(" — {a}"))
+            .unwrap_or_default();
         format!("Defender {verb}: {}{sev}{action}", threat())
     };
     let resource_path = || {
         ed("Path").map(|p| {
             // "file:_C:\x\y.exe;file:_C:\x\z" → first resource, prefix stripped
             let first = p.split(';').next().unwrap_or(&p).to_string();
-            first.splitn(2, ":_").nth(1).map(str::to_string).unwrap_or(first)
+            first
+                .split_once(":_")
+                .map(|x| x.1)
+                .map(str::to_string)
+                .unwrap_or(first)
         })
     };
     let with_ctx = |c: Classified| {
-        let user = ed("Detection User").or(ed("User")).filter(|u| !u.is_empty() && u != "-");
+        let user = ed("Detection User")
+            .or(ed("User"))
+            .filter(|u| !u.is_empty() && u != "-");
         let proc_name = ed("Process Name").filter(|p| !p.is_empty() && p != "Unknown");
-        let c = c.target(Target { path: resource_path(), ..Default::default() });
+        let c = c.target(Target {
+            path: resource_path(),
+            ..Default::default()
+        });
         let c = match user {
             Some(u) => {
-                let (domain, name) = u.split_once('\\').map(|(d, n)| (Some(d.to_string()), n.to_string())).unwrap_or((None, u));
-                c.user(Principal { name: Some(name), domain, ..Default::default() })
+                let (domain, name) = u
+                    .split_once('\\')
+                    .map(|(d, n)| (Some(d.to_string()), n.to_string()))
+                    .unwrap_or((None, u));
+                c.user(Principal {
+                    name: Some(name),
+                    domain,
+                    ..Default::default()
+                })
             }
             None => c,
         };
         match proc_name {
-            Some(p) => c.process(ProcessInfo { name: p.rsplit('\\').next().map(str::to_string), path: Some(p), ..Default::default() }),
+            Some(p) => c.process(ProcessInfo {
+                name: p.rsplit('\\').next().map(str::to_string),
+                path: Some(p),
+                ..Default::default()
+            }),
             None => c,
         }
     };
     match event_id {
         1116 => with_ctx(Classified::new("malware.detected", detail("detection"))),
-        1015 => with_ctx(Classified::new("malware.detected", detail("suspicious behaviour detected"))),
-        1006 | 1007 => with_ctx(Classified::new("malware.detected", detail("malware detected (scan)"))),
-        1117 => with_ctx(Classified::new("malware.action_taken", detail("action taken"))),
-        1118 | 1119 => with_ctx(Classified::new("malware.action_failed", detail("remediation FAILED"))),
+        1015 => with_ctx(Classified::new(
+            "malware.detected",
+            detail("suspicious behaviour detected"),
+        )),
+        1006 | 1007 => with_ctx(Classified::new(
+            "malware.detected",
+            detail("malware detected (scan)"),
+        )),
+        1117 => with_ctx(Classified::new(
+            "malware.action_taken",
+            detail("action taken"),
+        )),
+        1118 | 1119 => with_ctx(Classified::new(
+            "malware.action_failed",
+            detail("remediation FAILED"),
+        )),
         1121 | 1122 => {
-            let mode = if event_id == 1121 { "blocked" } else { "audited" };
+            let mode = if event_id == 1121 {
+                "blocked"
+            } else {
+                "audited"
+            };
             Classified::new(
                 &format!("defender.asr_{mode}"),
-                format!("Defender attack surface reduction rule {mode}: {} (rule {})",
-                    ed("Path").unwrap_or_default(), ed("ID").unwrap_or_default()),
+                format!(
+                    "Defender attack surface reduction rule {mode}: {} (rule {})",
+                    ed("Path").unwrap_or_default(),
+                    ed("ID").unwrap_or_default()
+                ),
             )
-            .process(ProcessInfo { path: ed("Process Name"), name: ed("Process Name").and_then(|p| p.rsplit('\\').next().map(str::to_string)), ..Default::default() })
-            .target(Target { path: ed("Path"), ..Default::default() })
+            .process(ProcessInfo {
+                path: ed("Process Name"),
+                name: ed("Process Name").and_then(|p| p.rsplit('\\').next().map(str::to_string)),
+                ..Default::default()
+            })
+            .target(Target {
+                path: ed("Path"),
+                ..Default::default()
+            })
         }
         1125 | 1126 => Classified::new(
             "defender.network_protection",
-            format!("Defender network protection {}: {}", if event_id == 1125 { "audited" } else { "blocked" }, ed("Domain").or(ed("Destination")).unwrap_or_default()),
+            format!(
+                "Defender network protection {}: {}",
+                if event_id == 1125 {
+                    "audited"
+                } else {
+                    "blocked"
+                },
+                ed("Domain").or(ed("Destination")).unwrap_or_default()
+            ),
         ),
-        5001 => Classified::new("defense_evasion.defender_rtp_disabled", "Defender real-time protection DISABLED".into()),
-        5010 | 5012 => Classified::new("defense_evasion.defender_protection_disabled", format!("Defender {} scanning DISABLED", if event_id == 5010 { "malware/spyware" } else { "virus" })),
-        5013 => Classified::new("defender.tamper_protection_blocked", format!("Tamper protection blocked a change to Defender: {}", ed("Value").or(ed("Changed Value")).unwrap_or_default())),
+        5001 => Classified::new(
+            "defense_evasion.defender_rtp_disabled",
+            "Defender real-time protection DISABLED".into(),
+        ),
+        5010 | 5012 => Classified::new(
+            "defense_evasion.defender_protection_disabled",
+            format!(
+                "Defender {} scanning DISABLED",
+                if event_id == 5010 {
+                    "malware/spyware"
+                } else {
+                    "virus"
+                }
+            ),
+        ),
+        5013 => Classified::new(
+            "defender.tamper_protection_blocked",
+            format!(
+                "Tamper protection blocked a change to Defender: {}",
+                ed("Value").or(ed("Changed Value")).unwrap_or_default()
+            ),
+        ),
         // 5007 fires on every Defender setting change, including routine
         // platform/signature updates. Only exclusions and protection being
         // switched off are tampering; everything else is ordinary config noise.
@@ -583,19 +994,31 @@ fn classify_defender(event_id: u64, ed: &dyn Fn(&str) -> Option<String>) -> Clas
             let new_val = ed("New Value").or(ed("NewValue")).unwrap_or_default();
             let lc = new_val.to_ascii_lowercase();
             if lc.contains("\\exclusions\\") {
-                Classified::new("defense_evasion.defender_exclusion_added", format!("Defender exclusion added: {new_val}"))
+                Classified::new(
+                    "defense_evasion.defender_exclusion_added",
+                    format!("Defender exclusion added: {new_val}"),
+                )
             } else if lc.contains("disablerealtimemonitoring = 0x1")
                 || lc.contains("disableantispyware = 0x1")
                 || lc.contains("disablebehaviormonitoring = 0x1")
                 || lc.contains("disableioavprotection = 0x1")
                 || lc.contains("tamperprotection = 0x0")
             {
-                Classified::new("defense_evasion.defender_protection_disabled", format!("Defender protection disabled: {new_val}"))
+                Classified::new(
+                    "defense_evasion.defender_protection_disabled",
+                    format!("Defender protection disabled: {new_val}"),
+                )
             } else {
-                Classified::new("defender.config_changed", format!("Defender configuration changed: {new_val}"))
+                Classified::new(
+                    "defender.config_changed",
+                    format!("Defender configuration changed: {new_val}"),
+                )
             }
         }
-        _ => Classified::new(&format!("defender.eid.{event_id}"), format!("Defender EventID {event_id}")),
+        _ => Classified::new(
+            &format!("defender.eid.{event_id}"),
+            format!("Defender EventID {event_id}"),
+        ),
     }
 }
 
@@ -603,7 +1026,11 @@ fn classify_defender(event_id: u64, ed: &dyn Fn(&str) -> Option<String>) -> Clas
 /// `#text`, or an array of strings; flatten it and classify on the text.
 fn classify_screenconnect(provider: &str, data: &Value) -> Classified {
     let text = match data.pointer("/Event/EventData/Data") {
-        Some(Value::Array(a)) => a.iter().filter_map(value_to_string).collect::<Vec<_>>().join(" | "),
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(value_to_string)
+            .collect::<Vec<_>>()
+            .join(" | "),
         Some(v) => value_to_string(v).unwrap_or_default(),
         None => String::new(),
     };
@@ -621,6 +1048,12 @@ fn classify_screenconnect(provider: &str, data: &Value) -> Classified {
     };
     let short: String = text.chars().take(200).collect();
     Classified::new(action, format!("ScreenConnect: {short}"))
-        .process(ProcessInfo { name: Some("ScreenConnect.ClientService.exe".into()), ..Default::default() })
-        .target(Target { value_name: Some(provider.to_string()), ..Default::default() })
+        .process(ProcessInfo {
+            name: Some("ScreenConnect.ClientService.exe".into()),
+            ..Default::default()
+        })
+        .target(Target {
+            value_name: Some(provider.to_string()),
+            ..Default::default()
+        })
 }

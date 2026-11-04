@@ -586,6 +586,18 @@ pub async fn ingest_log(
         .collect())
 }
 
+/// Lateral movement evidence across the whole case (every host): who
+/// connected from which machine to which, how, and when. The view groups the
+/// rows into connections and filters them to a host if one is selected.
+#[tauri::command]
+pub async fn lateral_movement(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<fx_store::lateral::LateralEvent>, String> {
+    let guard = state.store.lock().unwrap();
+    let store = guard.as_ref().ok_or("no case open")?;
+    store.lateral_movement().map_err(|e| e.to_string())
+}
+
 /// One day's bar for the activity graph.
 #[derive(Debug, Serialize)]
 pub struct DailyActivityDto {
